@@ -104,3 +104,47 @@ func TestDefaultFormatCommandPersistsConfig(t *testing.T) {
 
 	assert.Contains(t, string(data), "\"output-format\": \"toon\"")
 }
+
+func TestInitLoadsDotEnvFile(t *testing.T) {
+	viper.Reset()
+	Cache = nil
+	Client = nil
+	Root = nil
+
+	home := t.TempDir()
+	oldHome := os.Getenv("HOME")
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatalf("set HOME: %v", err)
+	}
+	defer os.Setenv("HOME", oldHome)
+
+	oldAPIKey := os.Getenv("TEST_DOTENV_KEY")
+	if err := os.Unsetenv("TEST_DOTENV_KEY"); err != nil {
+		t.Fatalf("unset TEST_DOTENV_KEY: %v", err)
+	}
+	defer os.Setenv("TEST_DOTENV_KEY", oldAPIKey)
+
+	cwd := t.TempDir()
+	oldWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(oldWD)
+
+	if err := os.WriteFile(filepath.Join(cwd, ".env"), []byte("TEST_DOTENV_KEY=from-dotenv\n"), 0600); err != nil {
+		t.Fatalf("write .env: %v", err)
+	}
+
+	Init(&Config{
+		AppName:      "test-dotenv",
+		EnvPrefix:    "TEST",
+		APIKeyEnvVar: "TEST_DOTENV_KEY",
+	})
+
+	if got := os.Getenv("TEST_DOTENV_KEY"); got != "from-dotenv" {
+		t.Fatalf("expected dotenv value loaded into env, got %q", got)
+	}
+}

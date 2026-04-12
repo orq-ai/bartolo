@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -156,6 +157,51 @@ func userHomeDir() string {
 	return os.Getenv("HOME")
 }
 
+func loadDotEnvFiles() {
+	for _, filename := range []string{".env", ".env.local"} {
+		loadDotEnvFile(filename)
+	}
+}
+
+func loadDotEnvFile(filename string) {
+	file, err := os.Open(filename)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		if strings.HasPrefix(line, "export ") {
+			line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
+		}
+
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || os.Getenv(key) != "" {
+			continue
+		}
+
+		if len(value) >= 2 {
+			if (value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'') {
+				value = value[1 : len(value)-1]
+			}
+		}
+
+		_ = os.Setenv(key, value)
+	}
+}
+
 func initConfig(appName, envPrefix, apiKeyEnvVar, defaultOutputFormat string) {
 	// One-time setup to ensure the path exists so we can write files into it
 	// later as needed.
@@ -169,6 +215,10 @@ func initConfig(appName, envPrefix, apiKeyEnvVar, defaultOutputFormat string) {
 	viper.AddConfigPath("/etc/" + appName + "/")
 	viper.AddConfigPath("$HOME/." + appName + "/")
 	viper.ReadInConfig()
+
+	// Load local dotenv files before environment variables so project-level
+	// credentials work without requiring an explicit `export`.
+	loadDotEnvFiles()
 
 	// Load configuration from the environment if provided. Flags below get
 	// transformed automatically, e.g. `client-id` -> `PREFIX_CLIENT_ID`.
