@@ -1,0 +1,80 @@
+# {{ .Title }}
+
+Generated CLI for the {{ .Title }} API.
+
+The examples below assume the compiled binary is named `{{ .CommandName }}`. If you install it under a different name, replace that in the commands below.
+
+## First Run
+
+Build the CLI:
+
+```sh
+go build -o ./{{ .CommandName }} .
+```
+
+Check the generated setup before making requests:
+
+```sh
+{{ .CommandName }} --json doctor
+```
+
+## Authentication
+{{- if .AuthDoc.Enabled }}
+
+{{ .AuthDoc.Summary }}
+
+Environment variables:
+{{- range .AuthDoc.EnvVars }}
+- `{{ . }}`
+{{- end }}
+
+Profile setup:
+
+```sh
+{{ .AuthDoc.ProfileCommand }}
+```
+{{- else }}
+
+{{ .AuthDoc.Summary }}
+{{- end }}
+
+## Command Surface
+{{- if .Groups }}
+
+This CLI groups commands by product/resource noun inferred from the OpenAPI tags.
+
+{{- range .Groups }}
+- `{{ $.CommandName }} {{ .CLIName }} --help`
+  {{- if .Description }} {{ .Description }}{{ else }} {{ .Short }}{{ end }}
+{{- end }}
+{{- else }}
+
+This CLI exposes operations directly at the root level. Use `{{ .CommandName }} --help` to inspect the available commands.
+{{- end }}
+
+## Examples
+{{- range .Examples }}
+
+### {{ .Title }}
+
+{{ .Description }}
+
+```sh
+{{ .Command }}
+```
+{{- end }}
+
+## Raw Request Escape Hatch
+
+Use the built-in raw request command when a high-level command is missing:
+
+```sh
+{{ .CommandName }} request get /path
+{{ .CommandName }} request post /path < body.json
+```
+
+## Output Conventions
+
+- Prefer `--json` when you want machine-readable output.
+- Use `--help` on any command group or command to inspect flags and required args.
+- Use `help-input` when a command accepts a request body from stdin or CLI shorthand.
