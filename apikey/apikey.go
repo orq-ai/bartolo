@@ -117,7 +117,11 @@ func defaultEnvVars(name string, prefix string) []string {
 		return nil
 	}
 
-	envVars := []string{envPrefix + "_API_KEY"}
+	envVars := make([]string, 0, 4)
+	if custom := strings.TrimSpace(viper.GetString("api-key-env-var")); custom != "" {
+		envVars = append(envVars, custom)
+	}
+	envVars = append(envVars, envPrefix+"_API_KEY")
 	if name == "Authorization" || prefix != "" {
 		envVars = append(envVars, envPrefix+"_TOKEN")
 	}

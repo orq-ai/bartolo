@@ -8,11 +8,13 @@ func main() {
 	cli.Init(&cli.Config{
 		AppName:             "{{ .Name }}",
 		EnvPrefix:           "{{ .NameEnv }}",
+		APIKeyEnvVar:        "{{ .APIKeyEnvVar }}",
 		DefaultOutputFormat: "{{ .DefaultOutputFormat }}",
 		Version:             "1.0.0",
 	})
 
 	registerGeneratedCommands()
+	registerCustomCommands()
 
 	cli.Root.Execute()
 }

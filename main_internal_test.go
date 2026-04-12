@@ -153,12 +153,12 @@ paths:
 
 func TestInferGroupedLeafNameNormalizesCommonPatterns(t *testing.T) {
 	cases := []struct {
-		name       string
-		method     string
-		path       string
-		group      string
-		explicit   bool
-		expected   string
+		name     string
+		method   string
+		path     string
+		group    string
+		explicit bool
+		expected string
 	}{
 		{"GetAllPrompts", "get", "/v2/prompts", "prompts", false, "list"},
 		{"FindOnePrompt", "get", "/v2/prompts/{prompt_id}", "prompts", false, "get"},
@@ -215,6 +215,8 @@ paths:
 func TestResolveInitConfigUsesFlagsWithoutPrompting(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().Bool("interactive", false, "")
+	cmd.Flags().String("module-path", "github.com/acme/demo-cli", "")
+	cmd.Flags().String("api-key-env-var", "MY_TEAM_TOKEN", "")
 	cmd.Flags().String("default-format", "yaml", "")
 
 	config, err := resolveInitConfig(cmd, []string{"demo-cli"})
@@ -228,11 +230,38 @@ func TestResolveInitConfigUsesFlagsWithoutPrompting(t *testing.T) {
 	if config.EnvPrefix != "DEMO_CLI" {
 		t.Fatalf("expected env prefix DEMO_CLI, got %q", config.EnvPrefix)
 	}
+	if config.ModulePath != "github.com/acme/demo-cli" {
+		t.Fatalf("expected module path github.com/acme/demo-cli, got %q", config.ModulePath)
+	}
 	if config.DefaultOutputFormat != "yaml" {
 		t.Fatalf("expected default output format yaml, got %q", config.DefaultOutputFormat)
 	}
-	if config.APIKeyEnvVar != "DEMO_CLI_API_KEY" {
-		t.Fatalf("expected api key env var DEMO_CLI_API_KEY, got %q", config.APIKeyEnvVar)
+	if config.APIKeyEnvVar != "MY_TEAM_TOKEN" {
+		t.Fatalf("expected api key env var MY_TEAM_TOKEN, got %q", config.APIKeyEnvVar)
+	}
+}
+
+func TestResolveInitConfigRejectsInvalidAPIKeyEnvVar(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("interactive", false, "")
+	cmd.Flags().String("module-path", "", "")
+	cmd.Flags().String("api-key-env-var", "123_BAD", "")
+	cmd.Flags().String("default-format", "json", "")
+
+	if _, err := resolveInitConfig(cmd, []string{"demo-cli"}); err == nil {
+		t.Fatal("expected invalid api key env var error")
+	}
+}
+
+func TestResolveInitConfigRejectsInvalidModulePath(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("interactive", false, "")
+	cmd.Flags().String("module-path", "github.com/acme/demo cli", "")
+	cmd.Flags().String("api-key-env-var", "", "")
+	cmd.Flags().String("default-format", "json", "")
+
+	if _, err := resolveInitConfig(cmd, []string{"demo-cli"}); err == nil {
+		t.Fatal("expected invalid module path error")
 	}
 }
 

@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+BIN_DIR="${BIN_DIR:-$ROOT_DIR/bin}"
+BINARY="${BINARY:-{{ .CommandName }}}"
+
+mkdir -p "$BIN_DIR"
+cd "$ROOT_DIR"
+go build -o "$BIN_DIR/$BINARY" .
+printf 'Built %s\n' "$BIN_DIR/$BINARY"

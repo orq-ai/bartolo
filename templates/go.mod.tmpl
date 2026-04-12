@@ -1,0 +1,7 @@
+module {{ .ModulePath }}
+
+go 1.23
+{{- if .BartoloReplacePath }}
+
+replace github.com/orq-ai/bartolo => {{ .BartoloReplacePath }}
+{{- end }}

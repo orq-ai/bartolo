@@ -75,3 +75,19 @@ func TestBearerAuthFromEnv(t *testing.T) {
 
 	assert.Equal(t, "Bearer secret-token", r.Context.Request.Header.Get("Authorization"))
 }
+
+func TestCustomAPIKeyEnvVarTakesPrecedence(t *testing.T) {
+	t.Setenv("CUSTOM_ORQ_KEY", "custom-secret")
+
+	cli.Init(&cli.Config{
+		AppName:      "test",
+		EnvPrefix:    "TEST",
+		APIKeyEnvVar: "CUSTOM_ORQ_KEY",
+	})
+	Init("x-auth", LocationHeader)
+
+	r := cli.Client.Get()
+	r.Do()
+
+	assert.Equal(t, "custom-secret", r.Context.Request.Header.Get("x-auth"))
+}

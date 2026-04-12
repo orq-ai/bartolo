@@ -9,7 +9,20 @@ The examples below assume the compiled binary is named `{{ .CommandName }}`. If 
 Build the CLI:
 
 ```sh
-go build -o ./{{ .CommandName }} .
+make build
+```
+
+Install it locally under `~/.local/bin`:
+
+```sh
+make install-local
+```
+
+If you prefer shell scripts over `make`, the scaffold also includes:
+
+```sh
+./scripts/build.sh
+./scripts/install-local.sh
 ```
 
 Check the generated setup before making requests:
@@ -73,8 +86,18 @@ Use the built-in raw request command when a high-level command is missing:
 {{ .CommandName }} request post /path < body.json
 ```
 
+## Custom Commands
+
+Bartolo keeps generated commands separate from your extension hook:
+
+- Generated API commands live in `{{ .CommandName }}.go` and `generated_register.go`.
+- Add your own commands in `custom_commands.go` or any additional `*.go` file in the same package.
+- Register them from `registerCustomCommands()` so regeneration does not overwrite your work.
+
 ## Output Conventions
 
 - Prefer `--json` when you want machine-readable output.
 - Use `--help` on any command group or command to inspect flags and required args.
 - Use `help-input` when a command accepts a request body from stdin or CLI shorthand.
+- `make build` writes the binary to `./bin/{{ .CommandName }}`.
+- `make install-local` installs the binary to `~/.local/bin/{{ .CommandName }}` by default.

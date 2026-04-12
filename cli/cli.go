@@ -51,13 +51,14 @@ var tty bool
 type Config struct {
 	AppName             string
 	EnvPrefix           string
+	APIKeyEnvVar        string
 	DefaultOutputFormat string
 	Version             string
 }
 
 // Init will set up the CLI.
 func Init(config *Config) {
-	initConfig(config.AppName, config.EnvPrefix, config.DefaultOutputFormat)
+	initConfig(config.AppName, config.EnvPrefix, config.APIKeyEnvVar, config.DefaultOutputFormat)
 	initCache(config.AppName)
 	authInitialized = false
 
@@ -155,7 +156,7 @@ func userHomeDir() string {
 	return os.Getenv("HOME")
 }
 
-func initConfig(appName, envPrefix, defaultOutputFormat string) {
+func initConfig(appName, envPrefix, apiKeyEnvVar, defaultOutputFormat string) {
 	// One-time setup to ensure the path exists so we can write files into it
 	// later as needed.
 	configDir := path.Join(userHomeDir(), "."+appName)
@@ -180,6 +181,7 @@ func initConfig(appName, envPrefix, defaultOutputFormat string) {
 	viper.Set("env-prefix", envPrefix)
 	viper.Set("config-directory", configDir)
 	viper.SetDefault("server-index", 0)
+	viper.SetDefault("api-key-env-var", apiKeyEnvVar)
 	viper.SetDefault("output-format", outputFormatOrDefault(defaultOutputFormat))
 }
 

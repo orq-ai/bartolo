@@ -1,0 +1,24 @@
+SHELL := /bin/sh
+.DEFAULT_GOAL := build
+
+BINARY := {{ .CommandName }}
+BIN_DIR ?= ./bin
+INSTALL_DIR ?= $(HOME)/.local/bin
+
+.PHONY: build install-local tidy doctor
+
+build:
+	@mkdir -p "$(BIN_DIR)"
+	@go build -o "$(BIN_DIR)/$(BINARY)" .
+	@printf 'Built %s\n' "$(BIN_DIR)/$(BINARY)"
+
+install-local:
+	@mkdir -p "$(INSTALL_DIR)"
+	@go build -o "$(INSTALL_DIR)/$(BINARY)" .
+	@printf 'Installed %s to %s/%s\n' "$(BINARY)" "$(INSTALL_DIR)" "$(BINARY)"
+
+tidy:
+	@go mod tidy
+
+doctor:
+	@go run . --json doctor

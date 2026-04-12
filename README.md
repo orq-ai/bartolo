@@ -101,6 +101,7 @@ func main() {
 	})
 
 	registerGeneratedCommands()
+	registerCustomCommands()
 	cli.Root.Execute()
 }
 ```

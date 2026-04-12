@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+BINARY="${BINARY:-{{ .CommandName }}}"
+
+mkdir -p "$INSTALL_DIR"
+cd "$ROOT_DIR"
+go build -o "$INSTALL_DIR/$BINARY" .
+printf 'Installed %s to %s/%s\n' "$BINARY" "$INSTALL_DIR" "$BINARY"

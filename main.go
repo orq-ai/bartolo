@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"embed"
 	"encoding/json"
@@ -10,6 +9,7 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
@@ -18,8 +18,11 @@ import (
 	"text/template"
 	"unicode"
 
-	"github.com/orq-ai/bartolo/shorthand"
+	survey "github.com/AlecAivazis/survey/v2"
+	surveycore "github.com/AlecAivazis/survey/v2/core"
+	surveyterminal "github.com/AlecAivazis/survey/v2/terminal"
 	"github.com/getkin/kin-openapi/openapi3"
+	"github.com/orq-ai/bartolo/shorthand"
 	"github.com/spf13/cobra"
 	yamlv3 "gopkg.in/yaml.v3"
 )
@@ -142,6 +145,8 @@ type Imports struct {
 // ProjectConfig describes local generator metadata written by `init`.
 type ProjectConfig struct {
 	AppName             string `json:"app_name"`
+	ModulePath          string `json:"module_path,omitempty"`
+	BartoloReplacePath  string `json:"bartolo_replace_path,omitempty"`
 	EnvPrefix           string `json:"env_prefix"`
 	DefaultOutputFormat string `json:"default_output_format,omitempty"`
 	APIKeyEnvVar        string `json:"api_key_env_var,omitempty"`
@@ -161,6 +166,12 @@ type AuthDoc struct {
 type READMEExample struct {
 	Title       string
 	Command     string
+	Description string
+}
+
+type selectOption struct {
+	Value       string
+	Label       string
 	Description string
 }
 
@@ -874,7 +885,7 @@ func inferLeafFromPath(httpMethod string, rawPath string, group string) string {
 
 	groupIndex := -1
 	groupForms := map[string]bool{
-		slug(group):             true,
+		slug(group):              true,
 		singularize(slug(group)): true,
 	}
 	for i, segment := range staticSegments {
@@ -1289,6 +1300,38 @@ func writeFormattedFile(filename string, data []byte) {
 	}
 }
 
+func writeFileIfMissing(filename string, data []byte, mode os.FileMode) {
+	if _, err := os.Stat(filename); err == nil {
+		return
+	}
+
+	dir := filepath.Dir(filename)
+	if dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			panic(err)
+		}
+	}
+
+	if err := ioutil.WriteFile(filename, data, mode); err != nil {
+		panic(err)
+	}
+}
+
+func writeTemplateFileIfMissing(templateName string, filename string, mode os.FileMode, data interface{}) {
+	templateData := loadTemplate(templateName)
+	tmpl, err := template.New(filepath.Base(templateName)).Parse(string(templateData))
+	if err != nil {
+		panic(err)
+	}
+
+	var sb strings.Builder
+	if err := tmpl.Execute(&sb, data); err != nil {
+		panic(err)
+	}
+
+	writeFileIfMissing(filename, []byte(sb.String()), mode)
+}
+
 func loadTemplate(name string) []byte {
 	data, err := templateFS.ReadFile(name)
 	if err != nil {
@@ -1464,6 +1507,83 @@ func isInteractiveInput() bool {
 	return info.Mode()&os.ModeCharDevice != 0
 }
 
+func isInteractiveOutput() bool {
+	info, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+func shouldColorizeWizard() bool {
+	if !isInteractiveOutput() {
+		return false
+	}
+
+	term := strings.TrimSpace(os.Getenv("TERM"))
+	return term != "" && term != "dumb"
+}
+
+func wizardStyle(enabled bool, code string, value string) string {
+	if !enabled {
+		return value
+	}
+
+	return "\033[" + code + "m" + value + "\033[0m"
+}
+
+func wizardTitle(enabled bool, value string) string {
+	return wizardStyle(enabled, "1;38;5;45", value)
+}
+
+func wizardStep(enabled bool, value string) string {
+	return wizardStyle(enabled, "1;38;5;81", value)
+}
+
+func wizardAccent(enabled bool, value string) string {
+	return wizardStyle(enabled, "1;38;5;114", value)
+}
+
+func wizardMuted(enabled bool, value string) string {
+	return wizardStyle(enabled, "38;5;244", value)
+}
+
+func wizardError(enabled bool, value string) string {
+	return wizardStyle(enabled, "1;38;5;203", value)
+}
+
+func wizardAskOptions(color bool) []survey.AskOpt {
+	return []survey.AskOpt{
+		survey.WithIcons(func(icons *survey.IconSet) {
+			icons.Question.Text = ">"
+			icons.Question.Format = "cyan+b"
+			icons.Help.Text = "i"
+			icons.Help.Format = "yellow+b"
+			icons.Error.Text = "x"
+			icons.Error.Format = "red+b"
+			icons.SelectFocus.Text = ">"
+			icons.SelectFocus.Format = "green+b"
+			icons.MarkedOption.Text = ">"
+			icons.MarkedOption.Format = "green+b"
+			icons.UnmarkedOption.Text = " "
+			icons.UnmarkedOption.Format = "default"
+
+			if !color {
+				icons.Question.Format = "default"
+				icons.Help.Format = "default"
+				icons.Error.Format = "default"
+				icons.SelectFocus.Format = "default"
+				icons.MarkedOption.Format = "default"
+			}
+		}),
+	}
+}
+
+func promptInterrupted(err error) bool {
+	return err == surveyterminal.InterruptErr
+}
+
 func normalizeOutputFormat(value string) string {
 	if format, ok := parseOutputFormat(value); ok {
 		return format
@@ -1484,33 +1604,149 @@ func parseOutputFormat(value string) (string, bool) {
 	}
 }
 
-func promptText(reader *bufio.Reader, question string, defaultValue string, validate func(string) error) (string, error) {
-	for {
-		if defaultValue != "" {
-			fmt.Printf("%s [%s]: ", question, defaultValue)
-		} else {
-			fmt.Printf("%s: ", question)
-		}
-
-		line, err := reader.ReadString('\n')
-		if err != nil {
-			return "", err
-		}
-
-		value := strings.TrimSpace(line)
-		if value == "" {
-			value = defaultValue
-		}
-
-		if validate != nil {
-			if err := validate(value); err != nil {
-				fmt.Printf("%s\n", err)
-				continue
-			}
-		}
-
-		return value, nil
+func isValidEnvVarName(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
 	}
+
+	for i, r := range value {
+		if i == 0 {
+			if r != '_' && !unicode.IsLetter(r) {
+				return false
+			}
+			continue
+		}
+
+		if r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func promptSelect(question string, options []selectOption, defaultValue string, color bool) (string, error) {
+	labels := make([]string, 0, len(options))
+	valuesByLabel := make(map[string]string, len(options))
+	defaultLabel := ""
+
+	for _, option := range options {
+		label := option.Label
+		if label == "" {
+			label = option.Value
+		}
+		labels = append(labels, label)
+		valuesByLabel[label] = option.Value
+		if option.Value == defaultValue {
+			defaultLabel = label
+		}
+	}
+
+	selected := defaultLabel
+	prompt := &survey.Select{
+		Message:  question,
+		Options:  labels,
+		Default:  defaultLabel,
+		PageSize: len(labels),
+		Description: func(value string, index int) string {
+			if index < 0 || index >= len(options) {
+				return ""
+			}
+			return options[index].Description
+		},
+	}
+
+	if err := survey.AskOne(prompt, &selected, wizardAskOptions(color)...); err != nil {
+		if promptInterrupted(err) {
+			return "", fmt.Errorf("wizard cancelled")
+		}
+		return "", err
+	}
+
+	value := strings.TrimSpace(valuesByLabel[selected])
+	if value == "" {
+		value = defaultValue
+	}
+	return value, nil
+}
+
+func printWizardHeader(color bool) {
+	fmt.Println()
+	fmt.Println(wizardTitle(color, "Bartolo Init Wizard"))
+	fmt.Println(wizardMuted(color, "Create a new CLI scaffold with a sensible local default setup."))
+	fmt.Println()
+}
+
+func printWizardStep(color bool, current int, total int, title string, hint string) {
+	label := fmt.Sprintf("Step %d/%d", current, total)
+	fmt.Printf("%s %s\n", wizardStep(color, label), wizardAccent(color, title))
+	if hint != "" {
+		fmt.Println(wizardMuted(color, hint))
+	}
+}
+
+func printWizardSummary(color bool, config *ProjectConfig) {
+	fmt.Println()
+	fmt.Println(wizardTitle(color, "Wizard Summary"))
+	fmt.Printf("%s %s\n", wizardAccent(color, "CLI name:"), config.AppName)
+	if strings.TrimSpace(config.ModulePath) != "" {
+		fmt.Printf("%s %s\n", wizardAccent(color, "Module path:"), config.ModulePath)
+	}
+	if strings.TrimSpace(config.BartoloReplacePath) != "" {
+		fmt.Printf("%s %s\n", wizardAccent(color, "Local bartolo path:"), config.BartoloReplacePath)
+	}
+	fmt.Printf("%s %s\n", wizardAccent(color, "Env prefix:"), config.EnvPrefix)
+	fmt.Printf("%s %s\n", wizardAccent(color, "API key env var:"), config.APIKeyEnvVar)
+	fmt.Printf("%s %s\n", wizardAccent(color, "Default output:"), config.DefaultOutputFormat)
+	fmt.Println()
+}
+
+func promptText(question string, defaultValue string, validate func(string) error, color bool) (string, error) {
+	value := defaultValue
+	opts := wizardAskOptions(color)
+	if validate != nil {
+		opts = append(opts, survey.WithValidator(func(ans interface{}) error {
+			return validate(strings.TrimSpace(fmt.Sprint(ans)))
+		}))
+	}
+
+	if err := survey.AskOne(&survey.Input{
+		Message: question,
+		Default: defaultValue,
+	}, &value, opts...); err != nil {
+		if promptInterrupted(err) {
+			return "", fmt.Errorf("wizard cancelled")
+		}
+		return "", err
+	}
+
+	return strings.TrimSpace(value), nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func defaultModulePath(name string) string {
+	modulePath := slug(name)
+	if modulePath == "" {
+		modulePath = "my-cli"
+	}
+	return modulePath
+}
+
+func isValidModulePath(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	return !strings.ContainsAny(value, " \t\r\n")
 }
 
 func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error) {
@@ -1518,6 +1754,15 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 	if len(args) > 0 {
 		name = strings.TrimSpace(args[0])
 	}
+
+	modulePath, _ := cmd.Flags().GetString("module-path")
+	modulePath = strings.TrimSpace(modulePath)
+
+	bartoloReplacePath, _ := cmd.Flags().GetString("bartolo-path")
+	bartoloReplacePath = strings.TrimSpace(firstNonEmpty(bartoloReplacePath, os.Getenv("BARTOLO_REPLACE_PATH")))
+
+	apiKeyEnvVar, _ := cmd.Flags().GetString("api-key-env-var")
+	apiKeyEnvVar = strings.TrimSpace(apiKeyEnvVar)
 
 	defaultFormat, _ := cmd.Flags().GetString("default-format")
 	defaultFormat = normalizeOutputFormat(defaultFormat)
@@ -1532,39 +1777,77 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 			return nil, fmt.Errorf("init requires <app-name> when stdin is not interactive")
 		}
 
-		reader := bufio.NewReader(os.Stdin)
+		color := shouldColorizeWizard()
+		previousDisableColor := surveycore.DisableColor
+		surveycore.DisableColor = !color
+		defer func() {
+			surveycore.DisableColor = previousDisableColor
+		}()
+
+		printWizardHeader(color)
+
 		defaultName := name
 		if defaultName == "" {
 			defaultName = getCommandName()
 		}
 
 		var err error
-		name, err = promptText(reader, "What is the name of your CLI?", defaultName, func(value string) error {
+		printWizardStep(color, 1, 3, "CLI identity", "Pick the install name your users will actually type.")
+		name, err = promptText("What is the name of your CLI?", defaultName, func(value string) error {
 			if strings.TrimSpace(value) == "" {
 				return fmt.Errorf("CLI name cannot be empty")
 			}
 			return nil
-		})
+		}, color)
 		if err != nil {
 			return nil, err
 		}
+		fmt.Println()
 
 		envPrefix := strings.ToUpper(strings.ReplaceAll(slug(name), "-", "_"))
 		if envPrefix == "" {
 			envPrefix = strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
 		}
-		fmt.Printf("API key env var: %s_API_KEY\n", envPrefix)
+		if apiKeyEnvVar == "" {
+			apiKeyEnvVar = envPrefix + "_API_KEY"
+		}
 
-		defaultFormat, err = promptText(reader, "Default output format", defaultFormat, func(value string) error {
-			if _, ok := parseOutputFormat(value); ok {
-				return nil
+		modulePath = firstNonEmpty(modulePath, defaultModulePath(name))
+
+		printWizardStep(color, 2, 3, "Auth defaults", "You can keep the suggested API key env var or replace it with your own convention.")
+		apiKeyEnvVar, err = promptText("API key env var", apiKeyEnvVar, func(value string) error {
+			if !isValidEnvVarName(value) {
+				return fmt.Errorf("%s", wizardError(color, "Use only letters, numbers, and underscores, and do not start with a number."))
 			}
-			return fmt.Errorf("unsupported output format %q", value)
-		})
+			return nil
+		}, color)
 		if err != nil {
 			return nil, err
 		}
-		defaultFormat = normalizeOutputFormat(defaultFormat)
+		fmt.Println()
+
+		printWizardStep(color, 3, 3, "Output format", "Choose the default rendering style for generated CLIs. Use the arrow keys to move and Enter to confirm.")
+		defaultFormat, err = promptSelect("Default output format", []selectOption{
+			{Value: "json", Label: "json", Description: "Best for agents and automation."},
+			{Value: "yaml", Label: "yaml", Description: "Easy to scan in terminals."},
+			{Value: "toon", Label: "toon", Description: "Human-oriented serialization of data for LLMs."},
+		}, defaultFormat, color)
+		if err != nil {
+			return nil, err
+		}
+
+		summaryEnvPrefix := strings.ToUpper(strings.ReplaceAll(slug(name), "-", "_"))
+		if summaryEnvPrefix == "" {
+			summaryEnvPrefix = strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+		}
+		printWizardSummary(color, &ProjectConfig{
+			AppName:             name,
+			ModulePath:          modulePath,
+			BartoloReplacePath:  bartoloReplacePath,
+			EnvPrefix:           summaryEnvPrefix,
+			DefaultOutputFormat: defaultFormat,
+			APIKeyEnvVar:        apiKeyEnvVar,
+		})
 	}
 
 	if name == "" {
@@ -1576,11 +1859,23 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 		envPrefix = strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
 	}
 
+	modulePath = firstNonEmpty(modulePath, defaultModulePath(name))
+	if !isValidModulePath(modulePath) {
+		return nil, fmt.Errorf("invalid module path %q", modulePath)
+	}
+
+	apiKeyEnvVar = firstNonEmpty(apiKeyEnvVar, envPrefix+"_API_KEY")
+	if !isValidEnvVarName(apiKeyEnvVar) {
+		return nil, fmt.Errorf("invalid api key env var %q", apiKeyEnvVar)
+	}
+
 	return &ProjectConfig{
 		AppName:             name,
+		ModulePath:          modulePath,
+		BartoloReplacePath:  bartoloReplacePath,
 		EnvPrefix:           envPrefix,
 		DefaultOutputFormat: defaultFormat,
-		APIKeyEnvVar:        envPrefix + "_API_KEY",
+		APIKeyEnvVar:        apiKeyEnvVar,
 	}, nil
 }
 
@@ -1599,11 +1894,24 @@ func enrichOpenAPIForREADME(api *OpenAPI, project *ProjectConfig) {
 
 func getAuthDocFromProject(api *OpenAPI, project *ProjectConfig) *AuthDoc {
 	envPrefix := strings.ToUpper(strings.ReplaceAll(api.CommandName, "-", "_"))
+	apiKeyEnvVar := ""
 	if project != nil && project.EnvPrefix != "" {
 		envPrefix = project.EnvPrefix
 	}
+	if project != nil {
+		apiKeyEnvVar = strings.TrimSpace(project.APIKeyEnvVar)
+	}
 
 	doc := getAuthDocFromSpec(api, envPrefix)
+	if doc != nil && apiKeyEnvVar != "" {
+		for i, envVar := range doc.EnvVars {
+			if strings.HasSuffix(envVar, "_API_KEY") {
+				doc.EnvVars[i] = apiKeyEnvVar
+				break
+			}
+		}
+		doc.EnvVars = uniqueStrings(doc.EnvVars)
+	}
 	if doc != nil && doc.ProfileCommand != "" && api != nil {
 		doc.ProfileCommand = strings.ReplaceAll(doc.ProfileCommand, "<binary>", api.CommandName)
 	}
@@ -1760,7 +2068,78 @@ func writeRegistrationStub() {
 func registerGeneratedCommands() {}
 `
 
-	writeFormattedFile("zz_generated_register.go", []byte(stub))
+	writeFormattedFile("generated_register.go", []byte(stub))
+}
+
+func writeCustomCommandsStub() {
+	if _, err := os.Stat("custom_commands.go"); err == nil {
+		return
+	}
+
+	const stub = `package main
+
+func registerCustomCommands() {
+	// Add your own commands here without touching generated files.
+}
+`
+
+	writeFormattedFile("custom_commands.go", []byte(stub))
+}
+
+func writeGoModIfMissing(modulePath string, bartoloReplacePath string) {
+	if _, err := os.Stat("go.mod"); err == nil {
+		return
+	}
+
+	if !isValidModulePath(modulePath) {
+		panic(fmt.Errorf("invalid module path %q", modulePath))
+	}
+
+	data := loadTemplate("templates/go.mod.tmpl")
+	tmpl, err := template.New("gomod").Parse(string(data))
+	if err != nil {
+		panic(err)
+	}
+
+	var sb strings.Builder
+	if err := tmpl.Execute(&sb, map[string]string{
+		"ModulePath":         modulePath,
+		"BartoloReplacePath": bartoloReplacePath,
+	}); err != nil {
+		panic(err)
+	}
+
+	if err := ioutil.WriteFile("go.mod", []byte(sb.String()), 0600); err != nil {
+		panic(err)
+	}
+}
+
+func writeGeneratedProjectTooling(config *ProjectConfig) {
+	templateData := map[string]string{
+		"CommandName": config.AppName,
+	}
+
+	writeTemplateFileIfMissing("templates/generated_makefile.tmpl", "Makefile", 0600, templateData)
+	writeTemplateFileIfMissing("templates/build.sh.tmpl", filepath.Join("scripts", "build.sh"), 0755, templateData)
+	writeTemplateFileIfMissing("templates/install-local.sh.tmpl", filepath.Join("scripts", "install-local.sh"), 0755, templateData)
+}
+
+func runGoModTidy() {
+	if _, err := os.Stat("go.mod"); err != nil {
+		return
+	}
+
+	if _, err := exec.LookPath("go"); err != nil {
+		return
+	}
+
+	cmd := exec.Command("go", "mod", "tidy")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: go mod tidy failed: %v\n", err)
+		fmt.Fprintln(os.Stderr, "Run `go mod tidy` in this directory once your module path and access are configured.")
+	}
 }
 
 func writeRegistrationFile(shortName string) {
@@ -1771,7 +2150,7 @@ func registerGeneratedCommands() {
 }
 `, toGoName(shortName, false))
 
-	writeFormattedFile("zz_generated_register.go", []byte(data))
+	writeFormattedFile("generated_register.go", []byte(data))
 }
 
 func initCmd(cmd *cobra.Command, args []string) {
@@ -1794,6 +2173,7 @@ func initCmd(cmd *cobra.Command, args []string) {
 	templateData := map[string]string{
 		"Name":                config.AppName,
 		"NameEnv":             config.EnvPrefix,
+		"APIKeyEnvVar":        config.APIKeyEnvVar,
 		"DefaultOutputFormat": config.DefaultOutputFormat,
 	}
 
@@ -1805,7 +2185,11 @@ func initCmd(cmd *cobra.Command, args []string) {
 
 	writeFormattedFile("main.go", []byte(sb.String()))
 	writeRegistrationStub()
+	writeCustomCommandsStub()
+	writeGoModIfMissing(config.ModulePath, config.BartoloReplacePath)
+	writeGeneratedProjectTooling(config)
 	writeProjectConfig(config)
+	runGoModTidy()
 }
 
 func generate(cmd *cobra.Command, args []string) {
@@ -1847,6 +2231,7 @@ func generate(cmd *cobra.Command, args []string) {
 	writeFormattedFile(shortName+".go", []byte(sb.String()))
 	writeRegistrationFile(shortName)
 	writeGeneratedREADME(templateData)
+	runGoModTidy()
 }
 
 func main() {
@@ -1859,6 +2244,9 @@ func main() {
 		Run:   initCmd,
 	}
 	initCommand.Flags().Bool("interactive", false, "Prompt for CLI settings even if app name is provided")
+	initCommand.Flags().String("module-path", "", "Go module path for the generated CLI project")
+	initCommand.Flags().String("bartolo-path", "", "Local path to the bartolo repo to use via go.mod replace during development")
+	initCommand.Flags().String("api-key-env-var", "", "Custom API key environment variable for generated CLIs")
 	initCommand.Flags().String("default-format", "json", "Default output format for generated CLIs [json, yaml, toon]")
 	root.AddCommand(initCommand)
 
