@@ -35,7 +35,6 @@ jobs:
   govulncheck:
     name: govulncheck
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -43,4 +42,21 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: go install golang.org/x/vuln/cmd/govulncheck@latest
-      - run: govulncheck ./...
+      - name: Run govulncheck
+        shell: bash
+        run: |
+          set +e
+          output="$(govulncheck ./... 2>&1)"
+          status=$?
+          printf '%s\n' "$output"
+          if [ "$status" -ne 0 ]; then
+            {
+              echo "## govulncheck"
+              echo
+              echo "govulncheck reported vulnerabilities. This job is advisory until Bartolo raises its minimum supported Go version or the affected code paths are remediated."
+              echo
+              echo '```text'
+              printf '%s\n' "$output"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
