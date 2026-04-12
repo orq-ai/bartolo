@@ -1,11 +1,19 @@
 SHELL := /bin/sh
-.DEFAULT_GOAL := build
+.DEFAULT_GOAL := help
 
 BINARY := {{ .CommandName }}
 BIN_DIR ?= ./bin
 INSTALL_DIR ?= $(HOME)/.local/bin
 
-.PHONY: build install-local tidy doctor
+.PHONY: help build install-local tidy doctor
+
+help:
+	@printf '%s\n' \
+		'Available targets:' \
+		'  make build          Build ./bin/$(BINARY)' \
+		'  make install-local  Install $(BINARY) into $(INSTALL_DIR)' \
+		'  make tidy           Run go mod tidy' \
+		'  make doctor         Run the CLI doctor command'
 
 build:
 	@mkdir -p "$(BIN_DIR)"

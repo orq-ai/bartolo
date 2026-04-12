@@ -2116,12 +2116,17 @@ func writeGoModIfMissing(modulePath string, bartoloReplacePath string) {
 
 func writeGeneratedProjectTooling(config *ProjectConfig) {
 	templateData := map[string]string{
-		"CommandName": config.AppName,
+		"CommandName":  config.AppName,
+		"APIKeyEnvVar": config.APIKeyEnvVar,
 	}
 
 	writeTemplateFileIfMissing("templates/generated_makefile.tmpl", "Makefile", 0600, templateData)
 	writeTemplateFileIfMissing("templates/build.sh.tmpl", filepath.Join("scripts", "build.sh"), 0755, templateData)
 	writeTemplateFileIfMissing("templates/install-local.sh.tmpl", filepath.Join("scripts", "install-local.sh"), 0755, templateData)
+	writeTemplateFileIfMissing("templates/gitignore.tmpl", ".gitignore", 0600, templateData)
+	writeTemplateFileIfMissing("templates/editorconfig.tmpl", ".editorconfig", 0600, templateData)
+	writeTemplateFileIfMissing("templates/gitattributes.tmpl", ".gitattributes", 0600, templateData)
+	writeTemplateFileIfMissing("templates/env.example.tmpl", ".env.example", 0600, templateData)
 }
 
 func runGoModTidy() {

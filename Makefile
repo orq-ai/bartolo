@@ -26,6 +26,12 @@ smoke:
 		go build ./...; \
 		make build >/dev/null; \
 		INSTALL_DIR="$$INSTALL_DIR" make install-local >/dev/null; \
+		test -f "$$SMOKE_DIR/.gitignore"; \
+		test -f "$$SMOKE_DIR/.editorconfig"; \
+		test -f "$$SMOKE_DIR/.gitattributes"; \
+		test -f "$$SMOKE_DIR/.env.example"; \
+		test -x "$$SMOKE_DIR/scripts/build.sh"; \
+		test -x "$$SMOKE_DIR/scripts/install-local.sh"; \
 		test -x "$$SMOKE_DIR/bin/example"; \
 		test -x "$$INSTALL_DIR/example"
 
