@@ -63,36 +63,71 @@ func ResolveServer() string {
 func initAgentCommands() {
 	Root.AddCommand(newDoctorCommand())
 	Root.AddCommand(newRequestCommand())
+	Root.AddCommand(newServerCommand())
 }
 
 func newDoctorCommand() *cobra.Command {
-	return &cobra.Command{
+	var fix bool
+	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Show CLI health, auth, and server configuration",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return Formatter.Format(map[string]interface{}{
-				"app": map[string]interface{}{
-					"name":    viper.GetString("app-name"),
-					"version": Root.Version,
-				},
-				"config": map[string]interface{}{
-					"directory":       viper.GetString("config-directory"),
-					"profile":         viper.GetString("profile"),
-					"server_index":    viper.GetInt("server-index"),
-					"server_override": viper.GetString("server"),
-					"selected_server": ResolveServer(),
-				},
-				"servers": GetServers(),
-				"auth":    GetAuthStatus(),
-				"checks": map[string]interface{}{
-					"reachability": map[string]interface{}{
-						"checked": false,
-					},
-				},
-			})
+			status := doctorStatus()
+			if fix {
+				if fixed, err := runDoctorFixes(status); err != nil {
+					return err
+				} else if fixed {
+					status = doctorStatus()
+				}
+			}
+			return Formatter.Format(status)
 		},
 	}
+	cmd.Flags().BoolVar(&fix, "fix", false, "Attempt safe local fixes such as interactive auth setup")
+	return cmd
+}
+
+func doctorStatus() map[string]interface{} {
+	auth := GetAuthStatus()
+	fixable := make([]string, 0, 1)
+	if configured, _ := auth["configured"].(bool); !configured {
+		fixable = append(fixable, "auth")
+	}
+
+	return map[string]interface{}{
+		"app": map[string]interface{}{
+			"name":    viper.GetString("app-name"),
+			"version": Root.Version,
+		},
+		"config": map[string]interface{}{
+			"directory":       viper.GetString("config-directory"),
+			"profile":         viper.GetString("profile"),
+			"server_index":    viper.GetInt("server-index"),
+			"server_override": viper.GetString("server"),
+			"selected_server": ResolveServer(),
+		},
+		"servers": GetServers(),
+		"auth":    auth,
+		"checks": map[string]interface{}{
+			"reachability": map[string]interface{}{
+				"checked": false,
+			},
+			"fixable": fixable,
+		},
+	}
+}
+
+func runDoctorFixes(status map[string]interface{}) (bool, error) {
+	auth, _ := status["auth"].(map[string]interface{})
+	if configured, _ := auth["configured"].(bool); !configured {
+		if err := RunAuthSetup(viper.GetString("profile"), ""); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+
+	return false, nil
 }
 
 func newRequestCommand() *cobra.Command {
@@ -128,7 +163,7 @@ func newRequestCommand() *cobra.Command {
 				req = req.AddHeader(strings.TrimSpace(name), strings.TrimSpace(value))
 			}
 
-			body, err := GetBody(params.GetString("content-type"), args[2:])
+			body, err := GetBody(params.GetString("content-type"), args[2:], params, nil)
 			if err != nil {
 				return err
 			}
@@ -156,6 +191,7 @@ func newRequestCommand() *cobra.Command {
 
 	cmd.Flags().StringSlice("header", nil, "Additional request header in 'Name: Value' form")
 	cmd.Flags().String("content-type", "application/json", "Content type to use when sending a request body")
+	AddBodyFlags(cmd)
 
 	if cmd.Flags().HasFlags() {
 		params.BindPFlags(cmd.Flags())

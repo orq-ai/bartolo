@@ -7,5 +7,5 @@ BINARY="${BINARY:-{{ .CommandName }}}"
 
 mkdir -p "$INSTALL_DIR"
 cd "$ROOT_DIR"
-go build -o "$INSTALL_DIR/$BINARY" .
+go build -o "$INSTALL_DIR/$BINARY" "./cmd/$BINARY"
 printf 'Installed %s to %s/%s\n' "$BINARY" "$INSTALL_DIR" "$BINARY"

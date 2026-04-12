@@ -136,6 +136,7 @@ func Init(config *Config) {
 		Run:   showHelpInput,
 	})
 	Root.AddCommand(newDefaultFormatCommand())
+	Root.AddCommand(newCompletionCommand())
 	initAgentCommands()
 
 	AddGlobalFlag("verbose", "", "Enable verbose log output", false)
@@ -283,6 +284,29 @@ func newDefaultFormatCommand() *cobra.Command {
 	}
 }
 
+func newCompletionCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "completion [bash|zsh|fish|powershell]",
+		Short: "Generate shell completion scripts",
+		Long:  "Write shell completion scripts to stdout. Example: mycli completion zsh > _mycli",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			switch strings.ToLower(strings.TrimSpace(args[0])) {
+			case "bash":
+				return Root.GenBashCompletion(Stdout)
+			case "zsh":
+				return Root.GenZshCompletion(Stdout)
+			case "fish":
+				return Root.GenFishCompletion(Stdout, true)
+			case "powershell":
+				return Root.GenPowerShellCompletionWithDesc(Stdout)
+			default:
+				return fmt.Errorf("unsupported shell %q (supported: bash, zsh, fish, powershell)", args[0])
+			}
+		},
+	}
+}
+
 func saveJSONConfig(values map[string]interface{}) error {
 	filename := path.Join(viper.GetString("config-directory"), "config.json")
 	merged := map[string]interface{}{}
@@ -382,13 +406,24 @@ func showHelpInput(cmd *cobra.Command, args []string) {
 
 Input to the CLI is handled via parameters, arguments, and standard input. The help for an individual command shows the available optional parameters and required arguments. Optional parameters can be passed like ¬--option=value¬ or ¬--option value¬.
 
-For requests that require a body, standard input and a CLI shorthand can complement each other to supply the request data.
+For requests that require a body, standard input, body helper flags, and CLI shorthand can complement each other to supply the request data.
 
 ## Standard Input
 
 Standard input allows you to send in whatever data is required to make a successful request against the API. For example: ¬my-cli command <input.json¬ or ¬echo '{\"hello\": \"world\"}' | my-cli command¬.
 
 Note: Windows PowerShell and other shells that do not support input redirection via ¬<¬ will need to pipe input instead, for example: ¬cat input.json | my-cli command¬. This may load the entire input file into memory.
+
+## Body Helper Flags
+
+Commands that accept a request body also support:
+
+- ¬--from-file path.json¬ to load the base body from disk.
+- ¬--example¬ to start from the first generated example body.
+- ¬--stdin¬ to require piped stdin input explicitly.
+- Generated ¬--field-name¬ flags for simple top-level body properties when Bartolo can infer them safely.
+
+CLI shorthand still applies on top of any base body so you can override or add fields without editing the source file.
 
 ## CLI Shortand Syntax
 

@@ -46,7 +46,7 @@ func (h *Handler) OnRequest(log *zerolog.Logger, request *http.Request) error {
 	profile := cli.GetProfile()
 	key, source := h.lookupKey(profile)
 	if key == "" {
-		return fmt.Errorf("missing API key; configure a profile with `auth add-profile` or set one of %s", strings.Join(h.EnvVars, ", "))
+		return fmt.Errorf("missing API key; configure a profile with `auth setup` or set one of %s", strings.Join(h.EnvVars, ", "))
 	}
 
 	log.Debug().Str("auth-source", source).Msg("Using API key authentication")

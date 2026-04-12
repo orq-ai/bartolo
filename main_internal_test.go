@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
@@ -262,6 +265,62 @@ func TestResolveInitConfigRejectsInvalidModulePath(t *testing.T) {
 
 	if _, err := resolveInitConfig(cmd, []string{"demo-cli"}); err == nil {
 		t.Fatal("expected invalid module path error")
+	}
+}
+
+func TestGenerateFromJSONFixtureBuildsCLI(t *testing.T) {
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+
+	tmp := t.TempDir()
+	oldWD := repoRoot
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir tempdir: %v", err)
+	}
+	defer os.Chdir(oldWD)
+
+	config := &ProjectConfig{
+		AppName:             "orq",
+		AppVersion:          "0.1.0",
+		ModulePath:          "github.com/acme/orq",
+		BartoloReplacePath:  repoRoot,
+		BartoloVersion:      bartoloVersion,
+		EnvPrefix:           "ORQ",
+		DefaultOutputFormat: "json",
+		APIKeyEnvVar:        "ORQ_API_KEY",
+	}
+	if err := writeProjectScaffold(config, false); err != nil {
+		t.Fatalf("writeProjectScaffold: %v", err)
+	}
+
+	specPath := filepath.Join(repoRoot, "testdata", "orq", "openapi.json")
+	if err := generateFromSpec(specPath); err != nil {
+		t.Fatalf("generateFromSpec: %v", err)
+	}
+
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = tmp
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, string(out))
+	}
+
+	for _, path := range []string{
+		filepath.Join(tmp, "cmd", "orq", "main.go"),
+		filepath.Join(tmp, "cli", "generated", "register.go"),
+		filepath.Join(tmp, "cli", "custom", "register.go"),
+		filepath.Join(tmp, "examples", "README.md"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected generated file %s: %v", path, err)
+		}
+	}
+
+	build := exec.Command("go", "build", "./...")
+	build.Dir = tmp
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go build ./...: %v\n%s", err, string(out))
 	}
 }
 

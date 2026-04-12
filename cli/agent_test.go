@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -61,4 +62,27 @@ func TestRequestCommand(t *testing.T) {
 
 	body := decoded["body"].(map[string]interface{})
 	assert.Equal(t, "world", body["hello"])
+}
+
+func TestServerUseCommand(t *testing.T) {
+	viper.Reset()
+	Init(&Config{
+		AppName: "test",
+	})
+
+	RegisterServers([]map[string]string{
+		{"description": "Prod", "url": "https://prod.example.com"},
+		{"description": "Staging", "url": "https://staging.example.com"},
+	})
+
+	out := execute("server use 1")
+
+	var decoded map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("decode server use output: %v\n%s", err, out)
+	}
+
+	assert.Equal(t, "https://staging.example.com", decoded["server"])
+	assert.EqualValues(t, 1, decoded["index"])
+	assert.Equal(t, "https://staging.example.com", ResolveServer())
 }

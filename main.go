@@ -31,6 +31,7 @@ import (
 var templateFS embed.FS
 
 const projectConfigFilename = ".bartolo.json"
+const bartoloVersion = "0.1.0"
 
 // OpenAPI Extensions
 const (
@@ -74,12 +75,23 @@ type Operation struct {
 	OptionalParams []*Param
 	MediaType      string
 	Examples       []string
+	BodyFields     []*BodyField
 	Hidden         bool
 	NeedsResponse  bool
 	Waiters        []*WaiterParams
 	Group          *CommandGroup
 	CommandPath    string
 	LeafName       string
+}
+
+// BodyField describes a generated request-body flag for a simple top-level
+// request property.
+type BodyField struct {
+	Name        string
+	CLIName     string
+	GoName      string
+	Description string
+	Type        string
 }
 
 // CommandGroup describes a high-level product noun such as `files`.
@@ -145,11 +157,14 @@ type Imports struct {
 // ProjectConfig describes local generator metadata written by `init`.
 type ProjectConfig struct {
 	AppName             string `json:"app_name"`
+	AppVersion          string `json:"app_version,omitempty"`
 	ModulePath          string `json:"module_path,omitempty"`
 	BartoloReplacePath  string `json:"bartolo_replace_path,omitempty"`
+	BartoloVersion      string `json:"bartolo_version,omitempty"`
 	EnvPrefix           string `json:"env_prefix"`
 	DefaultOutputFormat string `json:"default_output_format,omitempty"`
 	APIKeyEnvVar        string `json:"api_key_env_var,omitempty"`
+	LastSpecPath        string `json:"last_spec_path,omitempty"`
 }
 
 // AuthDoc describes auth setup to show in a generated README.
@@ -191,6 +206,16 @@ type OpenAPI struct {
 	AuthDoc      *AuthDoc
 	CommandName  string
 	Examples     []*READMEExample
+}
+
+// CommandsTemplateData describes a generated commands file for either the
+// root command set or a specific command group.
+type CommandsTemplateData struct {
+	API        *OpenAPI
+	Group      *CommandGroup
+	Operations []*Operation
+	Waiters    []*Waiter
+	NeedsFmt   bool
 }
 
 // ProcessAPI returns the API description to be used with the commands template
@@ -290,7 +315,7 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				description = extStr(operation.Extensions[ExtDescription])
 			}
 
-			reqMt, reqSchema, reqExamples := getRequestInfo(operation)
+			reqMt, reqSchema, reqExamples, bodyFields := getRequestInfo(operation)
 
 			var examples []string
 			if len(reqExamples) > 0 {
@@ -327,6 +352,9 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 
 			if reqSchema != "" {
 				description += "\n\n" + reqSchema
+			}
+			if len(bodyFields) > 0 {
+				description += "\n\nSimple top-level body fields are also exposed as flags for this command."
 			}
 
 			method := strings.Title(strings.ToLower(method))
@@ -405,6 +433,7 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				OptionalParams: optionalParams,
 				MediaType:      reqMt,
 				Examples:       examples,
+				BodyFields:     bodyFields,
 				Hidden:         hidden,
 				Group:          group,
 				CommandPath:    commandPath,
@@ -1052,16 +1081,24 @@ func getOptionalParams(allParams []*Param) []*Param {
 	return optional
 }
 
-func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}) {
-	mts := make(map[string][]interface{})
+func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}, []*BodyField) {
+	type requestInfo struct {
+		summary    string
+		examples   []interface{}
+		bodyFields []*BodyField
+	}
+
+	mts := make(map[string]requestInfo)
 
 	if op.RequestBody != nil && op.RequestBody.Value != nil {
 		for mt, item := range op.RequestBody.Value.Content {
 			var summary string
 			var examples []interface{}
+			var bodyFields []*BodyField
 
 			if item.Schema != nil && item.Schema.Value != nil {
 				summary = summarizeRequestSchema(mt, item.Schema.Value)
+				bodyFields = getBodyFields(item.Schema.Value)
 			} else {
 				summary = summarizeRequestSchema(mt, nil)
 			}
@@ -1077,30 +1114,104 @@ func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}) {
 				}
 			}
 
-			mts[mt] = []interface{}{summary, examples}
+			mts[mt] = requestInfo{
+				summary:    summary,
+				examples:   examples,
+				bodyFields: bodyFields,
+			}
 		}
 	}
 
 	// Prefer JSON.
 	for mt, item := range mts {
 		if strings.Contains(mt, "json") {
-			return mt, item[0].(string), item[1].([]interface{})
+			return mt, item.summary, item.examples, item.bodyFields
 		}
 	}
 
 	// Fall back to YAML next.
 	for mt, item := range mts {
 		if strings.Contains(mt, "yaml") {
-			return mt, item[0].(string), item[1].([]interface{})
+			return mt, item.summary, item.examples, item.bodyFields
 		}
 	}
 
 	// Last resort: return the first we find!
 	for mt, item := range mts {
-		return mt, item[0].(string), item[1].([]interface{})
+		return mt, item.summary, item.examples, item.bodyFields
 	}
 
-	return "", "", nil
+	return "", "", nil, nil
+}
+
+func getBodyFields(schema *openapi3.Schema) []*BodyField {
+	if schema == nil {
+		return nil
+	}
+
+	if !schema.Type.Is("object") && len(schema.Properties) == 0 {
+		return nil
+	}
+
+	fields := make([]*BodyField, 0, len(schema.Properties))
+	names := make([]string, 0, len(schema.Properties))
+	for name := range schema.Properties {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		ref := schema.Properties[name]
+		if ref == nil || ref.Value == nil {
+			continue
+		}
+		if ref.Value.Extensions != nil && ref.Value.Extensions[ExtIgnore] != nil {
+			continue
+		}
+
+		fieldType := bodyFieldType(ref.Value)
+		if fieldType == "" {
+			continue
+		}
+
+		cliName := slug(name)
+		if ref.Value.Extensions != nil && ref.Value.Extensions[ExtName] != nil {
+			cliName = extStr(ref.Value.Extensions[ExtName])
+		}
+		description := ref.Value.Description
+		if ref.Value.Extensions != nil && ref.Value.Extensions[ExtDescription] != nil {
+			description = extStr(ref.Value.Extensions[ExtDescription])
+		}
+
+		fields = append(fields, &BodyField{
+			Name:        name,
+			CLIName:     cliName,
+			GoName:      toGoName("body "+cliName, false),
+			Description: description,
+			Type:        fieldType,
+		})
+	}
+
+	return fields
+}
+
+func bodyFieldType(schema *openapi3.Schema) string {
+	if schema == nil || schema.Type == nil {
+		return ""
+	}
+
+	switch {
+	case schema.Type.Is("string"):
+		return "string"
+	case schema.Type.Is("boolean"):
+		return "bool"
+	case schema.Type.Is("integer"):
+		return "int64"
+	case schema.Type.Is("number"):
+		return "float64"
+	default:
+		return ""
+	}
 }
 
 func getAuthInit(api *openapi3.T) string {
@@ -1287,6 +1398,13 @@ func contains(values []string, target string) bool {
 }
 
 func writeFormattedFile(filename string, data []byte) {
+	dir := filepath.Dir(filename)
+	if dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			panic(err)
+		}
+	}
+
 	formatted, errFormat := format.Source(data)
 	if errFormat != nil {
 		formatted = data
@@ -1318,18 +1436,8 @@ func writeFileIfMissing(filename string, data []byte, mode os.FileMode) {
 }
 
 func writeTemplateFileIfMissing(templateName string, filename string, mode os.FileMode, data interface{}) {
-	templateData := loadTemplate(templateName)
-	tmpl, err := template.New(filepath.Base(templateName)).Parse(string(templateData))
-	if err != nil {
-		panic(err)
-	}
-
-	var sb strings.Builder
-	if err := tmpl.Execute(&sb, data); err != nil {
-		panic(err)
-	}
-
-	writeFileIfMissing(filename, []byte(sb.String()), mode)
+	sb := renderTemplate(templateName, nil, data)
+	writeFileIfMissing(filename, []byte(sb), mode)
 }
 
 func loadTemplate(name string) []byte {
@@ -1339,6 +1447,26 @@ func loadTemplate(name string) []byte {
 	}
 
 	return data
+}
+
+func renderTemplate(name string, funcs template.FuncMap, data interface{}) string {
+	templateData := loadTemplate(name)
+	tmpl := template.New(filepath.Base(name))
+	if funcs != nil {
+		tmpl = tmpl.Funcs(funcs)
+	}
+
+	parsed, err := tmpl.Parse(string(templateData))
+	if err != nil {
+		panic(err)
+	}
+
+	var sb strings.Builder
+	if err := parsed.Execute(&sb, data); err != nil {
+		panic(err)
+	}
+
+	return sb.String()
 }
 
 func writeProjectConfig(config *ProjectConfig) {
@@ -1842,8 +1970,10 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 		}
 		printWizardSummary(color, &ProjectConfig{
 			AppName:             name,
+			AppVersion:          "0.1.0",
 			ModulePath:          modulePath,
 			BartoloReplacePath:  bartoloReplacePath,
+			BartoloVersion:      bartoloVersion,
 			EnvPrefix:           summaryEnvPrefix,
 			DefaultOutputFormat: defaultFormat,
 			APIKeyEnvVar:        apiKeyEnvVar,
@@ -1871,8 +2001,10 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 
 	return &ProjectConfig{
 		AppName:             name,
+		AppVersion:          "0.1.0",
 		ModulePath:          modulePath,
 		BartoloReplacePath:  bartoloReplacePath,
+		BartoloVersion:      bartoloVersion,
 		EnvPrefix:           envPrefix,
 		DefaultOutputFormat: defaultFormat,
 		APIKeyEnvVar:        apiKeyEnvVar,
@@ -1932,7 +2064,7 @@ func getAuthDocFromSpec(api *OpenAPI, envPrefix string) *AuthDoc {
 			Enabled:         true,
 			Kind:            "Bearer token",
 			EnvVars:         uniqueStrings([]string{envPrefix + "_TOKEN", envPrefix + "_API_KEY", envPrefix + "_AUTHORIZATION"}),
-			ProfileCommand:  "<binary> auth add-profile default <token>",
+			ProfileCommand:  "<binary> auth setup",
 			ProfileRequired: true,
 			Summary:         "The generated CLI supports bearer token authentication from environment variables or a stored profile.",
 		}
@@ -1942,7 +2074,7 @@ func getAuthDocFromSpec(api *OpenAPI, envPrefix string) *AuthDoc {
 			Enabled:         true,
 			Kind:            "API key",
 			EnvVars:         uniqueStrings([]string{envPrefix + "_API_KEY"}),
-			ProfileCommand:  "<binary> auth add-profile default <api-key>",
+			ProfileCommand:  "<binary> auth setup",
 			ProfileRequired: true,
 			Summary:         "The generated CLI supports API key authentication from either environment variables or a stored profile.",
 		}
@@ -1960,6 +2092,11 @@ func buildREADMEExamples(api *OpenAPI) []*READMEExample {
 			Title:       "Check setup",
 			Command:     binary + " --json doctor",
 			Description: "Verify config, auth source, and selected server before making API calls.",
+		},
+		{
+			Title:       "Inspect server defaults",
+			Command:     binary + " server list",
+			Description: "See the generated server targets and persist a default when the spec provides multiple environments.",
 		},
 		{
 			Title:       "Persist the default output format",
@@ -2041,49 +2178,61 @@ func pickRawRequestOperation(api *OpenAPI) *Operation {
 }
 
 func writeGeneratedREADME(api *OpenAPI) {
-	data := loadTemplate("templates/readme.tmpl")
-	tmpl, err := template.New("readme").Parse(string(data))
-	if err != nil {
-		panic(err)
-	}
-
-	var sb strings.Builder
-	if err := tmpl.Execute(&sb, api); err != nil {
-		panic(err)
-	}
+	sb := renderTemplate("templates/readme.tmpl", nil, api)
 
 	target := "README.generated.md"
 	if _, err := os.Stat("README.md"); os.IsNotExist(err) {
 		target = "README.md"
 	}
 
-	if err := ioutil.WriteFile(target, []byte(sb.String()), 0600); err != nil {
+	if err := ioutil.WriteFile(target, []byte(sb), 0600); err != nil {
 		panic(err)
 	}
 }
 
-func writeRegistrationStub() {
-	const stub = `package main
-
-func registerGeneratedCommands() {}
-`
-
-	writeFormattedFile("generated_register.go", []byte(stub))
+func writeGeneratedExamples(api *OpenAPI) {
+	target := filepath.Join("examples", "README.md")
+	sb := renderTemplate("templates/examples_readme.tmpl", nil, api)
+	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+		panic(err)
+	}
+	if err := ioutil.WriteFile(target, []byte(sb), 0600); err != nil {
+		panic(err)
+	}
 }
 
-func writeCustomCommandsStub() {
-	if _, err := os.Stat("custom_commands.go"); err == nil {
+func writeGeneratedPackageStub() {
+	const stub = `package generated
+
+import "github.com/spf13/cobra"
+
+// Register is the generator-owned entrypoint for OpenAPI-derived commands.
+func Register(root *cobra.Command) {
+	_ = root
+}
+`
+
+	writeFormattedFile(filepath.Join("cli", "generated", "register.go"), []byte(stub))
+}
+
+func writeCustomPackageStub() {
+	target := filepath.Join("cli", "custom", "register.go")
+	if _, err := os.Stat(target); err == nil {
 		return
 	}
 
-	const stub = `package main
+	const stub = `package custom
 
-func registerCustomCommands() {
-	// Add your own commands here without touching generated files.
+import "github.com/spf13/cobra"
+
+// Register is the user-owned extension point for custom commands and hooks.
+func Register(root *cobra.Command) {
+	_ = root
+	// Add your own commands and middleware registrations here.
 }
 `
 
-	writeFormattedFile("custom_commands.go", []byte(stub))
+	writeFormattedFile(target, []byte(stub))
 }
 
 func writeGoModIfMissing(modulePath string, bartoloReplacePath string) {
@@ -2147,95 +2296,169 @@ func runGoModTidy() {
 	}
 }
 
-func writeRegistrationFile(shortName string) {
-	data := fmt.Sprintf(`package main
-
-func registerGeneratedCommands() {
-	%[1]sRegister(false)
+func resetGeneratedPackage() {
+	target := filepath.Join("cli", "generated")
+	if err := os.RemoveAll(target); err != nil {
+		panic(err)
+	}
+	if err := os.MkdirAll(target, 0755); err != nil {
+		panic(err)
+	}
 }
-`, toGoName(shortName, false))
 
-	writeFormattedFile("generated_register.go", []byte(data))
+func commandTemplateFuncs() template.FuncMap {
+	return template.FuncMap{
+		"escapeStr": escapeString,
+		"slug":      slug,
+		"title":     strings.Title,
+	}
+}
+
+func commandFileNeedsFmt(operations []*Operation) bool {
+	for _, operation := range operations {
+		if len(operation.Waiters) > 0 {
+			return true
+		}
+	}
+
+	return false
+}
+
+func writeGeneratedCommandFiles(api *OpenAPI, shortName string) {
+	resetGeneratedPackage()
+
+	writeFormattedFile(
+		filepath.Join("cli", "generated", shortName+"_client.go"),
+		[]byte(renderTemplate("templates/generated_client.tmpl", commandTemplateFuncs(), api)),
+	)
+	writeFormattedFile(
+		filepath.Join("cli", "generated", "register.go"),
+		[]byte(renderTemplate("templates/generated_register.tmpl", commandTemplateFuncs(), api)),
+	)
+
+	rootCommands := &CommandsTemplateData{
+		API:        api,
+		Operations: api.Operations,
+		Waiters:    api.Waiters,
+		NeedsFmt:   commandFileNeedsFmt(api.Operations),
+	}
+	writeFormattedFile(
+		filepath.Join("cli", "generated", "root_commands.go"),
+		[]byte(renderTemplate("templates/generated_root_commands.tmpl", commandTemplateFuncs(), rootCommands)),
+	)
+
+	for _, group := range api.Groups {
+		groupData := &CommandsTemplateData{
+			API:        api,
+			Group:      group,
+			Operations: group.Operations,
+			NeedsFmt:   commandFileNeedsFmt(group.Operations),
+		}
+		filename := filepath.Join("cli", "generated", slug(group.CLIName)+"_commands.go")
+		writeFormattedFile(
+			filename,
+			[]byte(renderTemplate("templates/generated_group_commands.tmpl", commandTemplateFuncs(), groupData)),
+		)
+	}
 }
 
 func initCmd(cmd *cobra.Command, args []string) {
-	if _, err := os.Stat("main.go"); err == nil {
-		fmt.Println("Refusing to overwrite existing main.go")
-		return
-	}
-
 	config, err := resolveInitConfig(cmd, args)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	data := loadTemplate("templates/main.tmpl")
-	tmpl, err := template.New("cli").Parse(string(data))
-	if err != nil {
-		panic(err)
+	if err := writeProjectScaffold(config, false); err != nil {
+		log.Fatal(err)
 	}
-
-	templateData := map[string]string{
-		"Name":                config.AppName,
-		"NameEnv":             config.EnvPrefix,
-		"APIKeyEnvVar":        config.APIKeyEnvVar,
-		"DefaultOutputFormat": config.DefaultOutputFormat,
-	}
-
-	var sb strings.Builder
-	err = tmpl.Execute(&sb, templateData)
-	if err != nil {
-		panic(err)
-	}
-
-	writeFormattedFile("main.go", []byte(sb.String()))
-	writeRegistrationStub()
-	writeCustomCommandsStub()
-	writeGoModIfMissing(config.ModulePath, config.BartoloReplacePath)
-	writeGeneratedProjectTooling(config)
-	writeProjectConfig(config)
 	runGoModTidy()
 }
 
 func generate(cmd *cobra.Command, args []string) {
-	data, err := ioutil.ReadFile(args[0])
-	if err != nil {
+	if err := generateFromSpec(args[0]); err != nil {
 		log.Fatal(err)
+	}
+	runGoModTidy()
+}
+
+func writeProjectScaffold(config *ProjectConfig, overwrite bool) error {
+	mainPath := filepath.Join("cmd", config.AppName, "main.go")
+	if !overwrite {
+		if _, err := os.Stat(mainPath); err == nil {
+			return fmt.Errorf("refusing to overwrite existing %s", mainPath)
+		}
+	}
+
+	templateData := map[string]string{
+		"Name":                config.AppName,
+		"AppVersion":          firstNonEmpty(config.AppVersion, "0.1.0"),
+		"NameEnv":             config.EnvPrefix,
+		"ModulePath":          config.ModulePath,
+		"APIKeyEnvVar":        config.APIKeyEnvVar,
+		"DefaultOutputFormat": config.DefaultOutputFormat,
+	}
+
+	sb := renderTemplate("templates/main.tmpl", nil, templateData)
+
+	writeFormattedFile(mainPath, []byte(sb))
+	writeGeneratedPackageStub()
+	writeCustomPackageStub()
+	writeGoModIfMissing(config.ModulePath, config.BartoloReplacePath)
+	writeGeneratedProjectTooling(config)
+	writeProjectConfig(config)
+	return nil
+}
+
+func generateFromSpec(specPath string) error {
+	data, err := ioutil.ReadFile(specPath)
+	if err != nil {
+		return err
 	}
 
 	// Load the OpenAPI document.
-	var swagger *openapi3.T
-	swagger, err = loadOpenAPIDocument(data)
+	swagger, err := loadOpenAPIDocument(data)
 	if err != nil {
+		return err
+	}
+
+	shortName := normalizeSpecName(specPath)
+
+	templateData := ProcessAPI(shortName, swagger)
+	config := loadProjectConfig()
+	enrichOpenAPIForREADME(templateData, config)
+	writeGeneratedCommandFiles(templateData, shortName)
+	writeGeneratedREADME(templateData)
+	writeGeneratedExamples(templateData)
+	if config != nil {
+		config.LastSpecPath = specPath
+		config.BartoloVersion = bartoloVersion
+		writeProjectConfig(config)
+	}
+	return nil
+}
+
+func syncCmd(cmd *cobra.Command, args []string) {
+	config := loadProjectConfig()
+	if config == nil {
+		log.Fatal("missing .bartolo.json; run `bartolo init` first")
+	}
+	config.BartoloVersion = bartoloVersion
+	if config.AppVersion == "" {
+		config.AppVersion = "0.1.0"
+	}
+	if err := writeProjectScaffold(config, true); err != nil {
 		log.Fatal(err)
 	}
 
-	funcs := template.FuncMap{
-		"escapeStr": escapeString,
-		"slug":      slug,
-		"title":     strings.Title,
+	specPath := config.LastSpecPath
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+		specPath = args[0]
 	}
-
-	data = loadTemplate("templates/commands.tmpl")
-	tmpl, err := template.New("cli").Funcs(funcs).Parse(string(data))
-	if err != nil {
-		panic(err)
+	if specPath != "" {
+		if err := generateFromSpec(specPath); err != nil {
+			log.Fatal(err)
+		}
 	}
-
-	shortName := normalizeSpecName(args[0])
-
-	templateData := ProcessAPI(shortName, swagger)
-	enrichOpenAPIForREADME(templateData, loadProjectConfig())
-
-	var sb strings.Builder
-	err = tmpl.Execute(&sb, templateData)
-	if err != nil {
-		panic(err)
-	}
-
-	writeFormattedFile(shortName+".go", []byte(sb.String()))
-	writeRegistrationFile(shortName)
-	writeGeneratedREADME(templateData)
 	runGoModTidy()
 }
 
@@ -2260,6 +2483,13 @@ func main() {
 		Short: "Generate API commands from an OpenAPI spec",
 		Args:  cobra.ExactArgs(1),
 		Run:   generate,
+	})
+	root.AddCommand(&cobra.Command{
+		Use:     "sync [api-spec]",
+		Aliases: []string{"upgrade"},
+		Short:   "Refresh scaffold-owned files and optionally regenerate from the last spec",
+		Args:    cobra.MaximumNArgs(1),
+		Run:     syncCmd,
 	})
 
 	root.Execute()

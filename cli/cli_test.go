@@ -53,6 +53,16 @@ func TestHelpCommands(t *testing.T) {
 	assert.Contains(t, out, "CLI Request Input")
 }
 
+func TestCompletionCommand(t *testing.T) {
+	viper.Reset()
+	Init(&Config{
+		AppName: "test",
+	})
+
+	out := execute("completion zsh")
+	assert.Contains(t, out, "#compdef")
+}
+
 func TestPreRun(t *testing.T) {
 	viper.Reset()
 	Init(&Config{

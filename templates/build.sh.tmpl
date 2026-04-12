@@ -7,5 +7,5 @@ BINARY="${BINARY:-{{ .CommandName }}}"
 
 mkdir -p "$BIN_DIR"
 cd "$ROOT_DIR"
-go build -o "$BIN_DIR/$BINARY" .
+go build -o "$BIN_DIR/$BINARY" "./cmd/$BINARY"
 printf 'Built %s\n' "$BIN_DIR/$BINARY"

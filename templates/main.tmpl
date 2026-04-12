@@ -1,20 +1,22 @@
 package main
 
 import (
-	"github.com/orq-ai/bartolo/cli"
+	custom "{{ .ModulePath }}/cli/custom"
+	generated "{{ .ModulePath }}/cli/generated"
+	bartolocli "github.com/orq-ai/bartolo/cli"
 )
 
 func main() {
-	cli.Init(&cli.Config{
+	bartolocli.Init(&bartolocli.Config{
 		AppName:             "{{ .Name }}",
 		EnvPrefix:           "{{ .NameEnv }}",
 		APIKeyEnvVar:        "{{ .APIKeyEnvVar }}",
 		DefaultOutputFormat: "{{ .DefaultOutputFormat }}",
-		Version:             "1.0.0",
+		Version:             "{{ .AppVersion }}",
 	})
 
-	registerGeneratedCommands()
-	registerCustomCommands()
+	generated.Register(bartolocli.Root)
+	custom.Register(bartolocli.Root)
 
-	cli.Root.Execute()
+	bartolocli.Root.Execute()
 }

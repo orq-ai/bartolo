@@ -25,6 +25,12 @@ If you prefer shell scripts over `make`, the scaffold also includes:
 ./scripts/install-local.sh
 ```
 
+Refresh Bartolo-owned scaffold files after upgrading Bartolo or the schema:
+
+```sh
+bartolo sync
+```
+
 The scaffold also includes:
 
 - `.gitignore` for local binaries, env files, and editor noise
@@ -85,6 +91,8 @@ This CLI exposes operations directly at the root level. Use `{{ .CommandName }} 
 ```
 {{- end }}
 
+The same generated examples are also written to `examples/README.md` for quick copy/paste references.
+
 ## Raw Request Escape Hatch
 
 Use the built-in raw request command when a high-level command is missing:
@@ -96,16 +104,19 @@ Use the built-in raw request command when a high-level command is missing:
 
 ## Custom Commands
 
-Bartolo keeps generated commands separate from your extension hook:
+Bartolo keeps generated and user-owned code separate:
 
-- Generated API commands live in `{{ .CommandName }}.go` and `generated_register.go`.
-- Add your own commands in `custom_commands.go` or any additional `*.go` file in the same package.
-- Register them from `registerCustomCommands()` so regeneration does not overwrite your work.
+- CLI entrypoint: `cmd/{{ .CommandName }}/main.go`
+- Generated API code: `cli/generated/`
+- User-owned extensions: `cli/custom/`
+- Add your own commands or hook registrations inside `cli/custom/Register(...)` so regeneration does not overwrite your work.
 
 ## Output Conventions
 
 - Prefer `--json` when you want machine-readable output.
 - Use `--help` on any command group or command to inspect flags and required args.
 - Use `help-input` when a command accepts a request body from stdin or CLI shorthand.
+- Use `server list`, `server use`, and `server set` to manage generated server defaults.
 - `make build` writes the binary to `./bin/{{ .CommandName }}`.
 - `make install-local` installs the binary to `~/.local/bin/{{ .CommandName }}` by default.
+- `make completions` writes shell completion files into `./completions/`.

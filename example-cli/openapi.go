@@ -111,9 +111,22 @@ func openapiRegister(subcommand bool) {
 			Example: examples,
 			Args:    cobra.MinimumNArgs(0),
 			Run: func(cmd *cobra.Command, args []string) {
-				body, err := cli.GetBody("application/json", args[0:])
+				body, err := cli.GetBody("application/json", args[0:], params, []string{
+					"hello: world",
+				})
 				if err != nil {
 					log.Fatal().Err(err).Msg("Unable to get body")
+				}
+				body, err = cli.ApplyBodyFlags(cmd, params, "application/json", body, []cli.BodyField{
+					{
+						Name:        "hello",
+						FlagName:    "hello",
+						Type:        "string",
+						Description: "Greeting to echo back",
+					},
+				})
+				if err != nil {
+					log.Fatal().Err(err).Msg("Unable to apply body flags")
 				}
 
 				_, decoded, err := OpenapiEcho(params, body)
@@ -129,6 +142,15 @@ func openapiRegister(subcommand bool) {
 		}
 		root.AddCommand(cmd)
 
+		cli.AddBodyFlags(cmd)
+		cli.AddBodyFieldFlags(cmd, []cli.BodyField{
+			{
+				Name:        "hello",
+				FlagName:    "hello",
+				Type:        "string",
+				Description: "Greeting to echo back",
+			},
+		})
 		cmd.Flags().String("echo-query", "", "")
 		cmd.Flags().String("x-request-id", "", "")
 

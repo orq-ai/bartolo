@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	survey "github.com/AlecAivazis/survey/v2"
 	"github.com/olekukonko/tablewriter"
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
@@ -106,10 +107,11 @@ func initAuth() {
 					table.Render()
 				}
 			} else {
-				fmt.Printf("No profiles configured. Use `%s auth add-profile` to add one.\n", Root.CommandPath())
+				fmt.Printf("No profiles configured. Use `%s auth setup` to add one.\n", Root.CommandPath())
 			}
 		},
 	})
+	authCommand.AddCommand(newAuthSetupCommand())
 
 	// Install auth middleware
 	Client.UseRequest(func(ctx *context.Context, h context.Handler) {
@@ -179,7 +181,7 @@ func GetAuthStatus() map[string]interface{} {
 	if handler == nil {
 		status["configured"] = false
 		status["source"] = "missing"
-		status["message"] = "configure a profile with `auth add-profile`"
+		status["message"] = "configure a profile with `auth setup`"
 		return status
 	}
 
@@ -258,6 +260,155 @@ func UseAuth(typeName string, handler AuthHandler) {
 	}
 }
 
+func newAuthSetupCommand() *cobra.Command {
+	var profileName string
+	var typeName string
+
+	cmd := &cobra.Command{
+		Use:     "setup",
+		Aliases: []string{"login"},
+		Short:   "Interactively configure authentication",
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return RunAuthSetup(profileName, typeName)
+		},
+	}
+
+	cmd.Flags().StringVar(&profileName, "profile", "default", "Profile name to create or update")
+	cmd.Flags().StringVar(&typeName, "type", "", "Authentication type to configure when multiple handlers exist")
+	return cmd
+}
+
+// RunAuthSetup interactively prompts for authentication details and persists
+// them to the credentials profile store.
+func RunAuthSetup(profileName string, preferredType string) error {
+	if !hasInteractiveInput() {
+		return fmt.Errorf("auth setup requires an interactive terminal")
+	}
+
+	typeName, handler, err := pickAuthHandler(preferredType)
+	if err != nil {
+		return err
+	}
+
+	profileName = sanitizeProfileName(profileName)
+	if profileName == "" {
+		profileName = "default"
+	}
+
+	answers := make([]string, 0, len(handler.ProfileKeys()))
+	for _, key := range handler.ProfileKeys() {
+		value, err := promptProfileValue(key)
+		if err != nil {
+			return err
+		}
+		answers = append(answers, value)
+	}
+
+	return saveAuthProfile(typeName, profileName, handler.ProfileKeys(), answers)
+}
+
+func pickAuthHandler(preferredType string) (string, AuthHandler, error) {
+	if len(AuthHandlers) == 0 {
+		return "", nil, fmt.Errorf("no authentication handler is configured for this CLI")
+	}
+
+	if preferredType != "" {
+		handler := AuthHandlers[preferredType]
+		if handler == nil {
+			return "", nil, fmt.Errorf("unknown auth type %q", preferredType)
+		}
+		return preferredType, handler, nil
+	}
+
+	if len(AuthHandlers) == 1 {
+		for name, handler := range AuthHandlers {
+			return name, handler, nil
+		}
+	}
+
+	names := make([]string, 0, len(AuthHandlers))
+	for name := range AuthHandlers {
+		display := name
+		if display == "" {
+			display = "default"
+		}
+		names = append(names, display)
+	}
+	sort.Strings(names)
+
+	selected := names[0]
+	if err := survey.AskOne(&survey.Select{
+		Message: "Auth type:",
+		Options: names,
+		Default: selected,
+	}, &selected); err != nil {
+		return "", nil, err
+	}
+
+	resolved := selected
+	if resolved == "default" {
+		resolved = ""
+	}
+
+	return resolved, AuthHandlers[resolved], nil
+}
+
+func promptProfileValue(key string) (string, error) {
+	message := strings.ReplaceAll(key, "_", " ")
+	message = strings.Title(message)
+	if strings.Contains(message, "Api ") {
+		message = strings.ReplaceAll(message, "Api ", "API ")
+	}
+
+	prompt := &survey.Input{Message: message + ":"}
+	if looksSensitiveKey(key) {
+		password := ""
+		if err := survey.AskOne(&survey.Password{Message: message + ":"}, &password); err != nil {
+			return "", err
+		}
+		return password, nil
+	}
+
+	value := ""
+	if err := survey.AskOne(prompt, &value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func looksSensitiveKey(key string) bool {
+	lower := strings.ToLower(key)
+	return strings.Contains(lower, "key") || strings.Contains(lower, "token") || strings.Contains(lower, "secret") || strings.Contains(lower, "password")
+}
+
+func sanitizeProfileName(value string) string {
+	return strings.Replace(strings.TrimSpace(value), ".", "-", -1)
+}
+
+func saveAuthProfile(typeName string, profileName string, keys []string, values []string) error {
+	if len(keys) != len(values) {
+		return fmt.Errorf("profile values do not match keys")
+	}
+
+	Creds.Set("profiles."+profileName+".type", typeName)
+	for i, key := range keys {
+		Creds.Set("profiles."+profileName+"."+strings.Replace(key, "-", "_", -1), values[i])
+	}
+
+	filename := path.Join(viper.GetString("config-directory"), "credentials.json")
+	return Creds.WriteConfigAs(filename)
+}
+
+func hasInteractiveInput() bool {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+
+	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
 // CredentialsFile holds credential-related information.
 type CredentialsFile struct {
 	*viper.Viper
@@ -311,8 +462,9 @@ func InitCredentialsFile() {
 // InitCredentials sets up the profile/auth commands. Must be called *after* you
 // have called `cli.Init()`.
 //
-//  // Initialize an API key
-//  cli.InitCredentials(cli.ProfileKeys("api-key"))
+//	// Initialize an API key
+//	cli.InitCredentials(cli.ProfileKeys("api-key"))
+//
 // This is deprecated and you should use `cli.UseAuth` instead.
 func InitCredentials(options ...func(*CredentialsFile) error) {
 	InitCredentialsFile()
@@ -373,7 +525,7 @@ func InitCredentials(options ...func(*CredentialsFile) error) {
 				}
 				table.Render()
 			} else {
-				fmt.Printf("No profiles configured. Use `%s auth add-profile` to add one.\n", Root.CommandPath())
+				fmt.Printf("No profiles configured. Use `%s auth setup` to add one.\n", Root.CommandPath())
 			}
 		},
 	})
