@@ -31,7 +31,7 @@ import (
 var templateFS embed.FS
 
 const projectConfigFilename = ".bartolo.json"
-const bartoloVersion = "0.1.0"
+const bartoloVersion = "0.2.0"
 
 // OpenAPI Extensions
 const (
