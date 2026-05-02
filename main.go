@@ -31,7 +31,7 @@ import (
 var templateFS embed.FS
 
 const projectConfigFilename = ".bartolo.json"
-const bartoloVersion = "0.3.0"
+const bartoloVersion = "0.4.0"
 
 // OpenAPI Extensions
 const (
@@ -1149,6 +1149,7 @@ func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}, []*B
 }
 
 func getBodyFields(schema *openapi3.Schema) []*BodyField {
+	schema = mergeAllOf(schema)
 	if schema == nil {
 		return nil
 	}
@@ -1253,6 +1254,69 @@ func bodyFieldType(schema *openapi3.Schema) string {
 		return base + "-nullable"
 	}
 	return base
+}
+
+// mergeAllOf flattens an `allOf` composition (recursively) into a synthetic
+// object schema whose Properties / Required are the union of every branch.
+// Returns the schema unchanged when there is nothing to merge.
+func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
+	if schema == nil || len(schema.AllOf) == 0 {
+		return schema
+	}
+
+	merged := &openapi3.Schema{
+		Type:       &openapi3.Types{"object"},
+		Properties: openapi3.Schemas{},
+	}
+	requiredSet := map[string]struct{}{}
+
+	collect := func(src *openapi3.Schema) {
+		if src == nil {
+			return
+		}
+		for name, ref := range src.Properties {
+			if _, exists := merged.Properties[name]; !exists {
+				merged.Properties[name] = ref
+			}
+		}
+		for _, name := range src.Required {
+			requiredSet[name] = struct{}{}
+		}
+		if src.AdditionalProperties.Schema != nil && merged.AdditionalProperties.Schema == nil {
+			merged.AdditionalProperties.Schema = src.AdditionalProperties.Schema
+		}
+		if src.AdditionalProperties.Has != nil && merged.AdditionalProperties.Has == nil {
+			merged.AdditionalProperties.Has = src.AdditionalProperties.Has
+		}
+	}
+
+	// Include the host schema's own properties/required first so they win on conflict.
+	collect(schema)
+
+	for _, branch := range schema.AllOf {
+		if branch == nil || branch.Value == nil {
+			continue
+		}
+		collect(mergeAllOf(branch.Value))
+	}
+
+	if len(requiredSet) > 0 {
+		required := make([]string, 0, len(requiredSet))
+		for name := range requiredSet {
+			required = append(required, name)
+		}
+		sort.Strings(required)
+		merged.Required = required
+	}
+
+	if schema.Description != "" {
+		merged.Description = schema.Description
+	}
+	if schema.Extensions != nil {
+		merged.Extensions = schema.Extensions
+	}
+
+	return merged
 }
 
 func bodyFieldEnum(schema *openapi3.Schema, fieldType string) []string {
@@ -1431,6 +1495,7 @@ func summarizeRequestSchema(mediaType string, schema *openapi3.Schema) string {
 		"Run `help-input` for body syntax details.",
 	}
 
+	schema = mergeAllOf(schema)
 	if schema == nil {
 		return strings.Join(lines, "\n")
 	}

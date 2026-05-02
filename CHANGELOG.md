@@ -4,7 +4,12 @@ All notable changes to Bartolo will be documented in this file.
 
 The project was restarted on 2026-04-09 as a new public release stream under the Bartolo name.
 
-## 2026-05-02
+## 2026-05-02 (v0.4.0)
+
+- Bumped Bartolo to v0.4.0.
+- Merged `allOf` compositions when extracting body field flags so endpoints whose top-level request schema is `allOf: [...]` (e.g. chat completions) now expose flags for every merged property instead of generating an empty flag list.
+
+## 2026-05-02 (v0.3.0)
 
 - Bumped Bartolo to v0.3.0.
 - Expanded generated body field flags to cover nullable scalars (`string | null`, `type: [X, "null"]`, `anyOf` with null), repeatable arrays of scalars (`--tag a --tag b`), `additionalProperties` string maps (`--metadata key=value`), and string enums (with shell completion + value validation).

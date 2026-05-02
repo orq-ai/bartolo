@@ -399,6 +399,55 @@ func TestBodyFieldTypeCoversCommonShapes(t *testing.T) {
 	}
 }
 
+func TestGetBodyFieldsMergesAllOf(t *testing.T) {
+	doc, err := loadOpenAPIDocument([]byte(`{
+  "openapi": "3.1.0",
+  "info": {"title": "AllOf merge", "version": "1"},
+  "paths": {
+    "/things": {
+      "post": {
+        "operationId": "CreateThing",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {"type": "object", "required": ["name"], "properties": {"name": {"type": "string"}}},
+                  {"type": "object", "properties": {"count": {"type": "integer"}, "tags": {"type": "array", "items": {"type": "string"}}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("loadOpenAPIDocument: %v", err)
+	}
+
+	schema := doc.Paths.Value("/things").Post.RequestBody.Value.Content.Get("application/json").Schema.Value
+	fields := getBodyFields(schema)
+
+	got := map[string]string{}
+	for _, f := range fields {
+		got[f.Name] = f.Type
+	}
+	want := map[string]string{
+		"name":  "string",
+		"count": "int64",
+		"tags":  "string-slice",
+	}
+	for name, typ := range want {
+		if got[name] != typ {
+			t.Errorf("field %q: type = %q, want %q", name, got[name], typ)
+		}
+	}
+}
+
 func TestLoadOpenAPIDocumentSupportsNumericExclusiveBounds(t *testing.T) {
 	doc, err := loadOpenAPIDocument([]byte(`{
   "openapi": "3.1.0",
