@@ -31,7 +31,7 @@ import (
 var templateFS embed.FS
 
 const projectConfigFilename = ".bartolo.json"
-const bartoloVersion = "0.4.2"
+const bartoloVersion = "0.4.3"
 
 // OpenAPI Extensions
 const (
@@ -1267,11 +1267,17 @@ func bodyFieldType(schema *openapi3.Schema) string {
 	return base
 }
 
-// mergeAllOf flattens an `allOf` composition (recursively) into a synthetic
-// object schema whose Properties / Required are the union of every branch.
-// Returns the schema unchanged when there is nothing to merge.
+// mergeAllOf flattens an `allOf`, `oneOf`, or `anyOf` request-body composition
+// into a synthetic object schema whose Properties are the union of every
+// branch (host's own properties win on conflict). For `allOf` the Required
+// list is the union of all branches; for `oneOf`/`anyOf` it is the
+// intersection (a field is only universally required if every branch
+// requires it). Returns the schema unchanged when there is nothing to merge.
 func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
-	if schema == nil || len(schema.AllOf) == 0 {
+	if schema == nil {
+		return schema
+	}
+	if len(schema.AllOf) == 0 && len(schema.OneOf) == 0 && len(schema.AnyOf) == 0 {
 		return schema
 	}
 
@@ -1279,9 +1285,8 @@ func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 		Type:       &openapi3.Types{"object"},
 		Properties: openapi3.Schemas{},
 	}
-	requiredSet := map[string]struct{}{}
 
-	collect := func(src *openapi3.Schema) {
+	collectProps := func(src *openapi3.Schema) {
 		if src == nil {
 			return
 		}
@@ -1289,9 +1294,6 @@ func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 			if _, exists := merged.Properties[name]; !exists {
 				merged.Properties[name] = ref
 			}
-		}
-		for _, name := range src.Required {
-			requiredSet[name] = struct{}{}
 		}
 		if src.AdditionalProperties.Schema != nil && merged.AdditionalProperties.Schema == nil {
 			merged.AdditionalProperties.Schema = src.AdditionalProperties.Schema
@@ -1301,19 +1303,69 @@ func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 		}
 	}
 
-	// Include the host schema's own properties/required first so they win on conflict.
-	collect(schema)
+	// Host's own properties win on conflict.
+	collectProps(schema)
 
+	requiredAll := map[string]struct{}{}
+	for _, name := range schema.Required {
+		requiredAll[name] = struct{}{}
+	}
+
+	// `allOf` branches: union properties + union required.
 	for _, branch := range schema.AllOf {
 		if branch == nil || branch.Value == nil {
 			continue
 		}
-		collect(mergeAllOf(branch.Value))
+		flat := mergeAllOf(branch.Value)
+		collectProps(flat)
+		if flat != nil {
+			for _, name := range flat.Required {
+				requiredAll[name] = struct{}{}
+			}
+		}
 	}
 
-	if len(requiredSet) > 0 {
-		required := make([]string, 0, len(requiredSet))
-		for name := range requiredSet {
+	// `oneOf`/`anyOf` branches: union properties + intersection of required
+	// (only fields required by every branch are universally required).
+	unionBranches := append([]*openapi3.SchemaRef{}, schema.OneOf...)
+	unionBranches = append(unionBranches, schema.AnyOf...)
+
+	var requiredIntersection map[string]struct{}
+	for _, branch := range unionBranches {
+		if branch == nil || branch.Value == nil {
+			continue
+		}
+		flat := mergeAllOf(branch.Value)
+		// Skip pure null branches so they don't wipe out the required set.
+		if flat != nil && flat.Type != nil && flat.Type.Is("null") {
+			continue
+		}
+		collectProps(flat)
+
+		branchRequired := map[string]struct{}{}
+		if flat != nil {
+			for _, name := range flat.Required {
+				branchRequired[name] = struct{}{}
+			}
+		}
+		if requiredIntersection == nil {
+			requiredIntersection = branchRequired
+			continue
+		}
+		for name := range requiredIntersection {
+			if _, ok := branchRequired[name]; !ok {
+				delete(requiredIntersection, name)
+			}
+		}
+	}
+
+	for name := range requiredIntersection {
+		requiredAll[name] = struct{}{}
+	}
+
+	if len(requiredAll) > 0 {
+		required := make([]string, 0, len(requiredAll))
+		for name := range requiredAll {
 			required = append(required, name)
 		}
 		sort.Strings(required)

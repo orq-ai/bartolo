@@ -4,6 +4,11 @@ All notable changes to Bartolo will be documented in this file.
 
 The project was restarted on 2026-04-09 as a new public release stream under the Bartolo name.
 
+## 2026-05-02 (v0.4.3)
+
+- Bumped Bartolo to v0.4.3.
+- Extended top-level `oneOf` / `anyOf` request bodies to union the properties of every branch into a single flag set. Endpoints like `chunking parse` (whose body is `oneOf` over multiple chunker strategies) now expose every strategy's fields as flags. Required fields are the intersection across branches; properties from earlier branches win on conflict.
+
 ## 2026-05-02 (v0.4.2)
 
 - Bumped Bartolo to v0.4.2.

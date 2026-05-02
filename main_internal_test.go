@@ -448,6 +448,57 @@ func TestGetBodyFieldsMergesAllOf(t *testing.T) {
 	}
 }
 
+func TestGetBodyFieldsUnionsOneOfBranches(t *testing.T) {
+	doc, err := loadOpenAPIDocument([]byte(`{
+  "openapi": "3.1.0",
+  "info": {"title": "OneOf union", "version": "1"},
+  "paths": {
+    "/parse": {
+      "post": {
+        "operationId": "Parse",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {"type": "object", "required": ["text", "strategy"], "properties": {"text": {"type": "string"}, "strategy": {"type": "string", "enum": ["token"]}, "chunk_size": {"type": "integer"}}},
+                  {"type": "object", "required": ["text", "strategy"], "properties": {"text": {"type": "string"}, "strategy": {"type": "string", "enum": ["semantic"]}, "threshold": {"type": "number"}, "embedding_model": {"type": "string"}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("loadOpenAPIDocument: %v", err)
+	}
+
+	schema := doc.Paths.Value("/parse").Post.RequestBody.Value.Content.Get("application/json").Schema.Value
+	fields := getBodyFields(schema)
+
+	got := map[string]string{}
+	for _, f := range fields {
+		got[f.Name] = f.Type
+	}
+	want := map[string]string{
+		"text":            "string",
+		"strategy":        "enum-string",
+		"chunk_size":      "int64",
+		"threshold":       "float64",
+		"embedding_model": "string",
+	}
+	for name, typ := range want {
+		if got[name] != typ {
+			t.Errorf("field %q: type = %q, want %q", name, got[name], typ)
+		}
+	}
+}
+
 func TestLoadOpenAPIDocumentSupportsNumericExclusiveBounds(t *testing.T) {
 	doc, err := loadOpenAPIDocument([]byte(`{
   "openapi": "3.1.0",
