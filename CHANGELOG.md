@@ -4,6 +4,13 @@ All notable changes to Bartolo will be documented in this file.
 
 The project was restarted on 2026-04-09 as a new public release stream under the Bartolo name.
 
+## 2026-05-02
+
+- Bumped Bartolo to v0.3.0.
+- Expanded generated body field flags to cover nullable scalars (`string | null`, `type: [X, "null"]`, `anyOf` with null), repeatable arrays of scalars (`--tag a --tag b`), `additionalProperties` string maps (`--metadata key=value`), and string enums (with shell completion + value validation).
+- Collapsed `anyOf` / `oneOf` shapes with a single non-null branch so they are exposed as flags instead of silently skipped.
+- Nullable scalar flags accept the literal `null` to send an explicit JSON null.
+
 ## 2026-04-12
 
 - Rebranded the project to `bartolo` with the module path `github.com/orq-ai/bartolo`.

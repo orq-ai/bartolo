@@ -31,7 +31,7 @@ import (
 var templateFS embed.FS
 
 const projectConfigFilename = ".bartolo.json"
-const bartoloVersion = "0.2.0"
+const bartoloVersion = "0.3.0"
 
 // OpenAPI Extensions
 const (
@@ -92,6 +92,7 @@ type BodyField struct {
 	GoName      string
 	Description string
 	Type        string
+	Enum        []string
 }
 
 // CommandGroup describes a high-level product noun such as `files`.
@@ -354,7 +355,10 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				description += "\n\n" + reqSchema
 			}
 			if len(bodyFields) > 0 {
-				description += "\n\nSimple top-level body fields are also exposed as flags for this command."
+				description += "\n\nSimple top-level body fields are also exposed as flags for this command. " +
+					"Scalar, nullable scalar (pass `null` for JSON null), enum, repeatable list (`--field a --field b`), " +
+					"and string map (`--field key=value`) fields all have generated flags. " +
+					"Nested objects, polymorphic unions, and other complex shapes must be supplied via stdin or shorthand."
 			}
 
 			method := strings.Title(strings.ToLower(method))
@@ -1189,6 +1193,7 @@ func getBodyFields(schema *openapi3.Schema) []*BodyField {
 			GoName:      toGoName("body "+cliName, false),
 			Description: description,
 			Type:        fieldType,
+			Enum:        bodyFieldEnum(ref.Value, fieldType),
 		})
 	}
 
@@ -1196,10 +1201,81 @@ func getBodyFields(schema *openapi3.Schema) []*BodyField {
 }
 
 func bodyFieldType(schema *openapi3.Schema) string {
-	if schema == nil || schema.Type == nil {
+	effective, nullable := effectiveBodySchema(schema)
+	if effective == nil || effective.Type == nil {
 		return ""
 	}
 
+	if effective.Type.Is("array") {
+		if effective.Items == nil || effective.Items.Value == nil {
+			return ""
+		}
+		itemEffective, _ := effectiveBodySchema(effective.Items.Value)
+		itemBase := scalarType(itemEffective)
+		if itemBase == "" {
+			return ""
+		}
+		return itemBase + "-slice"
+	}
+
+	if effective.Type.Is("object") {
+		if len(effective.Properties) > 0 {
+			// Nested objects are not flattened to flags yet; reachable via
+			// stdin or shorthand body input.
+			return ""
+		}
+		ap := effective.AdditionalProperties
+		if ap.Schema != nil && ap.Schema.Value != nil {
+			apEffective, _ := effectiveBodySchema(ap.Schema.Value)
+			if apEffective == nil || apEffective.Type == nil || apEffective.Type.Is("string") {
+				return "string-map"
+			}
+			return ""
+		}
+		if ap.Has != nil && *ap.Has {
+			return "string-map"
+		}
+		return ""
+	}
+
+	if len(effective.Enum) > 0 && effective.Type.Is("string") {
+		if nullable {
+			return "string-nullable"
+		}
+		return "enum-string"
+	}
+
+	base := scalarType(effective)
+	if base == "" {
+		return ""
+	}
+	if nullable {
+		return base + "-nullable"
+	}
+	return base
+}
+
+func bodyFieldEnum(schema *openapi3.Schema, fieldType string) []string {
+	if fieldType != "enum-string" {
+		return nil
+	}
+	effective, _ := effectiveBodySchema(schema)
+	if effective == nil || len(effective.Enum) == 0 {
+		return nil
+	}
+	values := make([]string, 0, len(effective.Enum))
+	for _, raw := range effective.Enum {
+		if s, ok := raw.(string); ok {
+			values = append(values, s)
+		}
+	}
+	return values
+}
+
+func scalarType(schema *openapi3.Schema) string {
+	if schema == nil || schema.Type == nil {
+		return ""
+	}
 	switch {
 	case schema.Type.Is("string"):
 		return "string"
@@ -1212,6 +1288,64 @@ func bodyFieldType(schema *openapi3.Schema) string {
 	default:
 		return ""
 	}
+}
+
+// effectiveBodySchema collapses the common nullability shapes (`nullable: true`,
+// JSON Schema `type: [..., "null"]`, `anyOf`/`oneOf` with a single non-null
+// branch) and returns the schema that actually describes the field's value
+// alongside whether the field accepts null.
+func effectiveBodySchema(schema *openapi3.Schema) (*openapi3.Schema, bool) {
+	if schema == nil {
+		return nil, false
+	}
+
+	nullable := schema.Nullable
+
+	if schema.Type != nil && schema.Type.Includes("null") {
+		nullable = true
+		// JSON Schema 3.1 `type: ["integer", "null"]`: strip null so the
+		// downstream Type.Is("integer") check sees a single concrete type.
+		nonNull := make(openapi3.Types, 0, len(schema.Type.Slice()))
+		for _, t := range schema.Type.Slice() {
+			if t != "null" {
+				nonNull = append(nonNull, t)
+			}
+		}
+		clone := *schema
+		clone.Type = &nonNull
+		schema = &clone
+	}
+
+	branches := make([]*openapi3.SchemaRef, 0, len(schema.AnyOf)+len(schema.OneOf))
+	branches = append(branches, schema.AnyOf...)
+	branches = append(branches, schema.OneOf...)
+
+	if len(branches) > 0 {
+		var nonNull *openapi3.Schema
+		nonNullCount := 0
+		for _, br := range branches {
+			if br == nil || br.Value == nil {
+				continue
+			}
+			if br.Value.Type != nil && br.Value.Type.Is("null") {
+				nullable = true
+				continue
+			}
+			nonNull = br.Value
+			nonNullCount++
+		}
+		if nonNullCount == 1 && nonNull != nil {
+			inner, innerNullable := effectiveBodySchema(nonNull)
+			if inner != nil {
+				return inner, nullable || innerNullable
+			}
+		}
+		if schema.Type == nil || len(schema.Type.Slice()) == 0 {
+			return nil, nullable
+		}
+	}
+
+	return schema, nullable
 }
 
 func getAuthInit(api *openapi3.T) string {

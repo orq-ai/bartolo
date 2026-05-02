@@ -22,6 +22,16 @@ Install Bartolo:
 go install github.com/orq-ai/bartolo@latest
 ```
 
+If `bartolo` is not found afterwards, Go most likely installed it into
+`$(go env GOBIN)` or, when `GOBIN` is unset, `$(go env GOPATH)/bin`.
+
+For `zsh`, add Go's bin directory to your shell config:
+
+```sh
+echo 'export PATH="$(go env GOPATH)/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
 Create a new generated CLI:
 
 ```sh

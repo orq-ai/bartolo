@@ -324,6 +324,81 @@ func TestGenerateFromJSONFixtureBuildsCLI(t *testing.T) {
 	}
 }
 
+func TestBodyFieldTypeCoversCommonShapes(t *testing.T) {
+	doc, err := loadOpenAPIDocument([]byte(`{
+  "openapi": "3.1.0",
+  "info": {"title": "Body field shapes", "version": "1"},
+  "paths": {
+    "/things": {
+      "post": {
+        "operationId": "CreateThing",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": {"type": "string"},
+                  "display_name": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                  "count": {"type": ["integer", "null"]},
+                  "tags": {"type": "array", "items": {"type": "string"}},
+                  "scores": {"type": "array", "items": {"type": "integer"}},
+                  "metadata": {"type": "object", "additionalProperties": {"type": "string"}},
+                  "metadata_any": {"type": "object", "additionalProperties": true},
+                  "color": {"type": "string", "enum": ["red", "green", "blue"]},
+                  "nested": {"type": "object", "properties": {"k": {"type": "string"}}}
+                }
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("loadOpenAPIDocument: %v", err)
+	}
+
+	schema := doc.Paths.Value("/things").Post.RequestBody.Value.Content.Get("application/json").Schema.Value
+	fields := getBodyFields(schema)
+
+	got := map[string]string{}
+	enumByName := map[string][]string{}
+	for _, f := range fields {
+		got[f.Name] = f.Type
+		if len(f.Enum) > 0 {
+			enumByName[f.Name] = f.Enum
+		}
+	}
+
+	want := map[string]string{
+		"name":         "string",
+		"display_name": "string-nullable",
+		"count":        "int64-nullable",
+		"tags":         "string-slice",
+		"scores":       "int64-slice",
+		"metadata":     "string-map",
+		"metadata_any": "string-map",
+		"color":        "enum-string",
+	}
+	for name, typ := range want {
+		if got[name] != typ {
+			t.Errorf("field %q: type = %q, want %q", name, got[name], typ)
+		}
+	}
+	if _, present := got["nested"]; present {
+		t.Errorf("nested object should not be exposed as a flag, got type %q", got["nested"])
+	}
+
+	if cs := enumByName["color"]; len(cs) != 3 || cs[0] != "red" || cs[2] != "blue" {
+		t.Errorf("color enum = %v, want [red green blue]", cs)
+	}
+}
+
 func TestLoadOpenAPIDocumentSupportsNumericExclusiveBounds(t *testing.T) {
 	doc, err := loadOpenAPIDocument([]byte(`{
   "openapi": "3.1.0",

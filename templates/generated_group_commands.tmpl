@@ -46,6 +46,13 @@ import (
 			FlagName: "{{ .CLIName | escapeStr }}",
 			Type: "{{ .Type | escapeStr }}",
 			Description: "{{ .Description | escapeStr }}",
+			{{- if .Enum }}
+			Enum: []string{
+				{{- range .Enum }}
+				"{{ . | escapeStr }}",
+				{{- end }}
+			},
+			{{- end }}
 		},
 		{{- end }}
 	},

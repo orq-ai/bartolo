@@ -126,6 +126,93 @@ func TestGetBodyRejectsExplicitStdinWithoutPipe(t *testing.T) {
 	}
 }
 
+func applyBody(t *testing.T, fields []cli.BodyField, sets map[string][]string, base string) string {
+	t.Helper()
+
+	cmd := &cobra.Command{Use: "test"}
+	cli.AddBodyFieldFlags(cmd, fields)
+
+	for name, values := range sets {
+		for _, value := range values {
+			if err := cmd.Flags().Set(name, value); err != nil {
+				t.Fatalf("set --%s=%s: %v", name, value, err)
+			}
+		}
+	}
+
+	params := viper.New()
+	if err := params.BindPFlags(cmd.Flags()); err != nil {
+		t.Fatalf("bind flags: %v", err)
+	}
+
+	body, err := cli.ApplyBodyFlags(cmd, params, "application/json", base, fields)
+	if err != nil {
+		t.Fatalf("ApplyBodyFlags: %v", err)
+	}
+	return body
+}
+
+func TestApplyBodyFlagsNullableScalars(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "display_name", FlagName: "display-name", Type: "string-nullable"},
+		{Name: "count", FlagName: "count", Type: "int64-nullable"},
+	}
+
+	body := applyBody(t, fields, map[string][]string{
+		"display-name": {"null"},
+		"count":        {"7"},
+	}, ``)
+
+	assert.JSONEq(t, `{"display_name":null,"count":7}`, body)
+}
+
+func TestApplyBodyFlagsRepeatableSlices(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "tags", FlagName: "tag", Type: "string-slice"},
+		{Name: "scores", FlagName: "score", Type: "int64-slice"},
+	}
+
+	body := applyBody(t, fields, map[string][]string{
+		"tag":   {"alpha", "beta"},
+		"score": {"1", "2", "3"},
+	}, ``)
+
+	assert.JSONEq(t, `{"tags":["alpha","beta"],"scores":[1,2,3]}`, body)
+}
+
+func TestApplyBodyFlagsStringMap(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "metadata", FlagName: "metadata", Type: "string-map"},
+	}
+
+	body := applyBody(t, fields, map[string][]string{
+		"metadata": {"region=eu", "tier=gold"},
+	}, ``)
+
+	assert.JSONEq(t, `{"metadata":{"region":"eu","tier":"gold"}}`, body)
+}
+
+func TestApplyBodyFlagsEnumStringRejectsInvalid(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "color", FlagName: "color", Type: "enum-string", Enum: []string{"red", "green", "blue"}},
+	}
+
+	cmd := &cobra.Command{Use: "test"}
+	cli.AddBodyFieldFlags(cmd, fields)
+	if err := cmd.Flags().Set("color", "purple"); err != nil {
+		t.Fatalf("set color: %v", err)
+	}
+	params := viper.New()
+	if err := params.BindPFlags(cmd.Flags()); err != nil {
+		t.Fatalf("bind flags: %v", err)
+	}
+
+	_, err := cli.ApplyBodyFlags(cmd, params, "application/json", ``, fields)
+	if err == nil {
+		t.Fatal("expected enum validation error")
+	}
+}
+
 func TestApplyBodyFlagsOverridesStructuredBody(t *testing.T) {
 	cmd := &cobra.Command{Use: "test"}
 	cli.AddBodyFieldFlags(cmd, []cli.BodyField{
