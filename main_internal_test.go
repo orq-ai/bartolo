@@ -390,8 +390,8 @@ func TestBodyFieldTypeCoversCommonShapes(t *testing.T) {
 			t.Errorf("field %q: type = %q, want %q", name, got[name], typ)
 		}
 	}
-	if _, present := got["nested"]; present {
-		t.Errorf("nested object should not be exposed as a flag, got type %q", got["nested"])
+	if got["nested"] != "json" {
+		t.Errorf("nested object should fall back to json flag, got %q", got["nested"])
 	}
 
 	if cs := enumByName["color"]; len(cs) != 3 || cs[0] != "red" || cs[2] != "blue" {

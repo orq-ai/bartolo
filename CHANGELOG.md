@@ -4,6 +4,11 @@ All notable changes to Bartolo will be documented in this file.
 
 The project was restarted on 2026-04-09 as a new public release stream under the Bartolo name.
 
+## 2026-05-02 (v0.4.2)
+
+- Bumped Bartolo to v0.4.2.
+- Added a `json` body field flag fallback so nested objects, arrays of objects, and polymorphic unions are exposed as flags accepting a JSON value instead of being silently dropped. Endpoints like `deployments invoke` now expose every top-level field (e.g. `--messages`, `--invoke-options`, `--prefix-messages`, `--thread`, `--knowledge-filter`, `--identity`, `--documents`).
+
 ## 2026-05-02 (v0.4.1)
 
 - Bumped Bartolo to v0.4.1.

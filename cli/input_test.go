@@ -192,6 +192,40 @@ func TestApplyBodyFlagsStringMap(t *testing.T) {
 	assert.JSONEq(t, `{"metadata":{"region":"eu","tier":"gold"}}`, body)
 }
 
+func TestApplyBodyFlagsJSONFallback(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "documents", FlagName: "documents", Type: "json"},
+		{Name: "invoke_options", FlagName: "invoke-options", Type: "json"},
+	}
+
+	body := applyBody(t, fields, map[string][]string{
+		"documents":      {`[{"id":"a"},{"id":"b"}]`},
+		"invoke-options": {`{"timeout":30}`},
+	}, ``)
+
+	assert.JSONEq(t, `{"documents":[{"id":"a"},{"id":"b"}],"invoke_options":{"timeout":30}}`, body)
+}
+
+func TestApplyBodyFlagsJSONRejectsInvalid(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "documents", FlagName: "documents", Type: "json"},
+	}
+
+	cmd := &cobra.Command{Use: "test"}
+	cli.AddBodyFieldFlags(cmd, fields)
+	if err := cmd.Flags().Set("documents", "not json"); err != nil {
+		t.Fatalf("set documents: %v", err)
+	}
+	params := viper.New()
+	if err := params.BindPFlags(cmd.Flags()); err != nil {
+		t.Fatalf("bind flags: %v", err)
+	}
+
+	if _, err := cli.ApplyBodyFlags(cmd, params, "application/json", ``, fields); err == nil {
+		t.Fatal("expected JSON parse error")
+	}
+}
+
 func TestApplyBodyFlagsEnumStringRejectsInvalid(t *testing.T) {
 	fields := []cli.BodyField{
 		{Name: "color", FlagName: "color", Type: "enum-string", Enum: []string{"red", "green", "blue"}},

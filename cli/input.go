@@ -29,6 +29,9 @@ const nullableFlagSentinel = "null"
 //     repeatable scalar list (`--tag a --tag b` or `--tag a,b`).
 //   - "string-map": map of string→string (`--metadata key=value`, repeatable).
 //   - "enum-string": string flag whose value is validated against Enum.
+//   - "json": fallback for nested objects, arrays of objects, and
+//     polymorphic unions. Value is parsed as JSON before being merged into
+//     the request body.
 type BodyField struct {
 	Name        string
 	FlagName    string
@@ -91,6 +94,8 @@ func AddBodyFieldFlags(cmd *cobra.Command, fields []BodyField) {
 			cmd.Flags().BoolSlice(field.FlagName, nil, description+" (repeatable)")
 		case "string-map":
 			cmd.Flags().StringToString(field.FlagName, nil, description+" (key=value, repeatable)")
+		case "json":
+			cmd.Flags().String(field.FlagName, "", description+" (JSON value, e.g. '{\"k\":1}' or '[1,2]')")
 		case "enum-string":
 			cmd.Flags().String(field.FlagName, "", description)
 			if len(field.Enum) > 0 {
@@ -216,6 +221,16 @@ func ApplyBodyFlags(cmd *cobra.Command, params *viper.Viper, mediaType string, b
 				return "", fmt.Errorf("--%s: %w", field.FlagName, err)
 			}
 			overrides[field.Name] = values
+		case "json":
+			raw := strings.TrimSpace(params.GetString(field.FlagName))
+			if raw == "" {
+				continue
+			}
+			var value interface{}
+			if err := json.Unmarshal([]byte(raw), &value); err != nil {
+				return "", fmt.Errorf("--%s: invalid JSON: %w", field.FlagName, err)
+			}
+			overrides[field.Name] = value
 		case "enum-string":
 			value := params.GetString(field.FlagName)
 			if len(field.Enum) > 0 {

@@ -31,7 +31,7 @@ import (
 var templateFS embed.FS
 
 const projectConfigFilename = ".bartolo.json"
-const bartoloVersion = "0.4.1"
+const bartoloVersion = "0.4.2"
 
 // OpenAPI Extensions
 const (
@@ -355,10 +355,10 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				description += "\n\n" + reqSchema
 			}
 			if len(bodyFields) > 0 {
-				description += "\n\nSimple top-level body fields are also exposed as flags for this command. " +
+				description += "\n\nAll top-level body fields are exposed as flags for this command. " +
 					"Scalar, nullable scalar (pass `null` for JSON null), enum, repeatable list (`--field a --field b`), " +
-					"and string map (`--field key=value`) fields all have generated flags. " +
-					"Nested objects, polymorphic unions, and other complex shapes must be supplied via stdin or shorthand."
+					"and string map (`--field key=value`) fields use typed flags. " +
+					"Nested objects, arrays of objects, and polymorphic unions accept a JSON string (e.g. `--field '{\"k\":1}'`)."
 			}
 
 			method := strings.Title(strings.ToLower(method))
@@ -1202,28 +1202,38 @@ func getBodyFields(schema *openapi3.Schema) []*BodyField {
 }
 
 func bodyFieldType(schema *openapi3.Schema) string {
-	effective, nullable := effectiveBodySchema(schema)
-	if effective == nil || effective.Type == nil {
+	if schema == nil {
 		return ""
+	}
+
+	effective, nullable := effectiveBodySchema(schema)
+	if effective == nil {
+		// Polymorphic shapes (multi-branch oneOf/anyOf) fall back to a JSON
+		// string flag so users can still drive them from the CLI.
+		return "json"
+	}
+	if effective.Type == nil {
+		return "json"
 	}
 
 	if effective.Type.Is("array") {
 		if effective.Items == nil || effective.Items.Value == nil {
-			return ""
+			return "json"
 		}
 		itemEffective, _ := effectiveBodySchema(effective.Items.Value)
 		itemBase := scalarType(itemEffective)
 		if itemBase == "" {
-			return ""
+			// Arrays of objects, unions, etc. → JSON string flag.
+			return "json"
 		}
 		return itemBase + "-slice"
 	}
 
 	if effective.Type.Is("object") {
 		if len(effective.Properties) > 0 {
-			// Nested objects are not flattened to flags yet; reachable via
-			// stdin or shorthand body input.
-			return ""
+			// Nested objects: expose as a JSON string flag rather than
+			// silently dropping the field.
+			return "json"
 		}
 		ap := effective.AdditionalProperties
 		if ap.Schema != nil && ap.Schema.Value != nil {
@@ -1231,12 +1241,13 @@ func bodyFieldType(schema *openapi3.Schema) string {
 			if apEffective == nil || apEffective.Type == nil || apEffective.Type.Is("string") {
 				return "string-map"
 			}
-			return ""
+			return "json"
 		}
 		if ap.Has != nil && *ap.Has {
 			return "string-map"
 		}
-		return ""
+		// Free-form object (no properties, no additionalProperties): JSON.
+		return "json"
 	}
 
 	if len(effective.Enum) > 0 && effective.Type.Is("string") {
@@ -1248,7 +1259,7 @@ func bodyFieldType(schema *openapi3.Schema) string {
 
 	base := scalarType(effective)
 	if base == "" {
-		return ""
+		return "json"
 	}
 	if nullable {
 		return base + "-nullable"
