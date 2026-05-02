@@ -4,6 +4,11 @@ All notable changes to Bartolo will be documented in this file.
 
 The project was restarted on 2026-04-09 as a new public release stream under the Bartolo name.
 
+## 2026-05-02 (v0.4.1)
+
+- Bumped Bartolo to v0.4.1.
+- Added `bartolo version` command and `bartolo --version` flag so users can verify which generator binary they have on PATH.
+
 ## 2026-05-02 (v0.4.0)
 
 - Bumped Bartolo to v0.4.0.

@@ -31,7 +31,7 @@ import (
 var templateFS embed.FS
 
 const projectConfigFilename = ".bartolo.json"
-const bartoloVersion = "0.4.0"
+const bartoloVersion = "0.4.1"
 
 // OpenAPI Extensions
 const (
@@ -2662,7 +2662,21 @@ func syncCmd(cmd *cobra.Command, args []string) {
 }
 
 func main() {
-	root := &cobra.Command{}
+	root := &cobra.Command{
+		Use:     "bartolo",
+		Short:   "Generate publishable CLIs from OpenAPI specs",
+		Version: bartoloVersion,
+	}
+	root.SetVersionTemplate("bartolo {{.Version}}\n")
+
+	root.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "Print the bartolo version",
+		Args:  cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("bartolo %s\n", bartoloVersion)
+		},
+	})
 
 	initCommand := &cobra.Command{
 		Use:   "init [app-name]",
