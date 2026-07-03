@@ -1,6 +1,6 @@
 module github.com/orq-ai/bartolo
 
-go 1.23.0
+go 1.25.0
 
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
@@ -55,8 +55,8 @@ require (
 	github.com/spf13/cast v1.2.0 // indirect
 	github.com/spf13/jwalterweatherman v1.0.0 // indirect
 	github.com/woodsbury/decimal128 v1.3.0 // indirect
-	golang.org/x/net v0.38.0 // indirect
-	golang.org/x/sys v0.31.0 // indirect
-	golang.org/x/term v0.30.0 // indirect
-	golang.org/x/text v0.23.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/term v0.43.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 )
