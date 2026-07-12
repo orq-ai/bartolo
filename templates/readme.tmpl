@@ -96,6 +96,50 @@ This CLI groups commands by product/resource noun inferred from the OpenAPI tags
 
 This CLI exposes operations directly at the root level. Use `{{ .CommandName }} --help` to inspect the available commands.
 {{- end }}
+{{- if .HasMCPTools }}
+
+## MCP Server
+
+This CLI is also an MCP (Model Context Protocol) server. `{{ .CommandName }} mcp` exposes the API operations as tools for clients such as Claude Code, Claude Desktop, and Cursor. Results are returned as structured content, and upstream API errors surface as structured tool errors.
+
+Add it to Claude Code:
+
+```sh
+claude mcp add {{ .CommandName }} -- {{ .CommandName }} mcp
+```
+
+Or configure Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "{{ .CommandName }}": {
+      "command": "{{ .CommandName }}",
+      "args": ["mcp"]{{ if and .AuthDoc.Enabled .AuthDoc.EnvVars }},
+      "env": {
+        "{{ index .AuthDoc.EnvVars 0 }}": "your-token"
+      }{{ end }}
+    }
+  }
+}
+```
+{{- if and .AuthDoc.Enabled .AuthDoc.ProfileCommand }}
+
+Alternatively, authenticate with a stored profile via `{{ .AuthDoc.ProfileCommand }}` before wiring the server into a client.
+{{- end }}
+
+Print the tool manifest as JSON (handy for debugging):
+
+```sh
+{{ .CommandName }} mcp list
+```
+
+Filter the exposed tools with `--tools`, `--groups`, or `--read-only`. Serve over Streamable HTTP instead of stdio:
+
+```sh
+{{ .CommandName }} mcp --http 127.0.0.1:8484
+```
+{{- end }}
 
 ## Examples
 {{- range .Examples }}

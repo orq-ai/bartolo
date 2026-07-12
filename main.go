@@ -2805,6 +2805,7 @@ func writeGeneratedProjectTooling(config *ProjectConfig) {
 	templateData := map[string]string{
 		"CommandName":  config.AppName,
 		"APIKeyEnvVar": config.APIKeyEnvVar,
+		"EnvPrefix":    config.EnvPrefix,
 	}
 
 	writeTemplateFileIfMissing("templates/generated_makefile.tmpl", "Makefile", 0600, templateData)

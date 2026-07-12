@@ -47,6 +47,11 @@ smoke:
 		test -x "$$SMOKE_DIR/bin/example"; \
 		test -x "$$INSTALL_DIR/example"; \
 		test -f "$$SMOKE_DIR/cli/generated/mcp_tools.go"; \
-		"$$SMOKE_DIR/bin/example" mcp list | grep -q '"inputSchema"'
+		"$$SMOKE_DIR/bin/example" mcp list | grep -q '"inputSchema"'; \
+		{ printf '%s\n' \
+			'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
+			'{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+			'{"jsonrpc":"2.0","id":2,"method":"tools/list"}'; sleep 2; } \
+			| "$$SMOKE_DIR/bin/example" mcp 2>/dev/null | grep -q '"tools"'
 
 verify: smoke test

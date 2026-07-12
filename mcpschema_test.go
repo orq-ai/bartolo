@@ -8,7 +8,23 @@ import (
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
+	"github.com/google/jsonschema-go/jsonschema"
 )
+
+// resolveSchema round-trips a compact JSON schema string through
+// jsonschema.Schema (unmarshal + Resolve), the same path the generated
+// mcpserver runtime takes at startup. It fails the test on any error, giving
+// the strongest available correctness gate on a converted schema.
+func resolveSchema(t *testing.T, label, raw string) {
+	t.Helper()
+	var schema jsonschema.Schema
+	if err := json.Unmarshal([]byte(raw), &schema); err != nil {
+		t.Fatalf("%s: unmarshal schema: %v", label, err)
+	}
+	if _, err := schema.Resolve(nil); err != nil {
+		t.Fatalf("%s: resolve schema: %v", label, err)
+	}
+}
 
 // schemaFromBody loads a spec and returns the JSON request-body schema ref for
 // the given path/POST operation.
@@ -528,10 +544,10 @@ paths:
 
 // TestMCPFixtureScale loads the Orq fixture and asserts the tool surface.
 //
-// TODO(phase 6): upgrade the per-tool schema check below to a full
-// jsonschema-go Resolve round-trip once Phase 1 lands that dependency in the
-// generator's import graph. For now a JSON-parse + type:object assertion is a
-// sufficient schema-correctness gate for Phase 2.
+// Every included tool's input schema AND output schema are round-tripped
+// through jsonschema.Schema Resolve (the exact path the generated mcpserver
+// runtime takes at startup), asserting the converter never emits a schema the
+// runtime would reject — the strongest schema-correctness gate available.
 func TestMCPFixtureScale(t *testing.T) {
 	specPath := filepath.Join("testdata", "orq", "openapi.json")
 	data, err := os.ReadFile(specPath)
@@ -563,13 +579,20 @@ func TestMCPFixtureScale(t *testing.T) {
 		}
 		included++
 
-		// Every included tool's input schema must parse as a JSON object.
+		// Every included tool's input schema must parse as a JSON object and
+		// resolve under jsonschema-go (the runtime registration gate).
 		var parsed map[string]any
 		if err := json.Unmarshal([]byte(o.MCP.InputSchema), &parsed); err != nil {
 			t.Fatalf("op %s %s input schema not JSON: %v", o.Method, o.Path, err)
 		}
 		if parsed["type"] != "object" {
 			t.Fatalf("op %s %s input schema type = %v, want object", o.Method, o.Path, parsed["type"])
+		}
+		resolveSchema(t, o.Method+" "+o.Path+" input", o.MCP.InputSchema)
+
+		// The output schema (when present) must resolve too.
+		if o.MCP.OutputSchema != "" {
+			resolveSchema(t, o.Method+" "+o.Path+" output", o.MCP.OutputSchema)
 		}
 	}
 

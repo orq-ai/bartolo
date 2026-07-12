@@ -4,6 +4,14 @@ All notable changes to Bartolo will be documented in this file.
 
 The project was restarted on 2026-04-09 as a new public release stream under the Bartolo name.
 
+## 2026-07-12
+
+- Added MCP (Model Context Protocol) server generation. Every generated CLI now has an `mcp` subcommand that exposes the API's operations as MCP tools for clients like Claude Code, Claude Desktop, and Cursor.
+- Each eligible operation becomes a tool with a JSON Schema (2020-12) input schema (path/query/header params + JSON request body) and an output schema from the first 2xx JSON response. Results are returned as `structuredContent`, and upstream API errors surface as `isError` results with a structured `{status, body}` payload.
+- Tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`) are derived from the HTTP method; outbound auth reuses the CLI's existing env vars and profiles.
+- Added `mcp list` to print the tool manifest as JSON, runtime filtering flags (`--tools`, `--groups`, `--read-only`), and Streamable HTTP transport (`--http`) with inbound auth modes (`--http-auth none|bearer|oauth`, including RFC 9728 protected-resource metadata and a `<PREFIX>_MCP_TOKEN` static bearer token).
+- SSE-only, multipart/binary, `deprecated`, and `x-mcp-ignore` operations are excluded from the tool surface (and reported in the generate summary); operations offering JSON and SSE are included using the JSON media type.
+
 ## 2026-05-02 (v0.4.3)
 
 - Bumped Bartolo to v0.4.3.

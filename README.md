@@ -71,6 +71,88 @@ Every generated CLI starts with a useful operator surface:
 - `--json`, `--output-format`, and `--query` make automation and projection straightforward.
 - Grouped nouns like `prompts`, `files`, or `human-evals` feel closer to a product CLI than a path translator.
 
+## MCP
+
+Every generated CLI is also a [Model Context Protocol](https://modelcontextprotocol.io) server. Running `generate` emits an `mcp` subcommand that exposes the API's operations as MCP tools for clients such as Claude Code, Claude Desktop, and Cursor.
+
+What gets generated:
+
+- An `mcp` subcommand on the CLI (`my-cli mcp`) that serves over stdio by default.
+- One tool per eligible operation, named `<group>_<leaf>` (or just the leaf for ungrouped ops).
+- A JSON Schema (2020-12) input schema per tool, derived from the operation's path/query/header params and JSON request body, plus an output schema from the first 2xx JSON response.
+- Results returned as `structuredContent` (plus a JSON text block). Upstream API errors surface as `isError` tool results with a structured `{status, body}` payload rather than protocol errors.
+- Tool annotations derived from the HTTP method: `readOnlyHint` for GET/HEAD, `destructiveHint` for DELETE, `idempotentHint` for GET/HEAD/PUT/DELETE.
+- Outbound auth reuses the CLI's existing runtime, so the same env vars and profiles authenticate MCP tool calls.
+
+Inspect the tool manifest without a client:
+
+```sh
+my-cli mcp list
+```
+
+### stdio quickstart
+
+Add the server to Claude Code:
+
+```sh
+claude mcp add my-cli -- my-cli mcp
+```
+
+Or configure Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "my-cli": {
+      "command": "my-cli",
+      "args": ["mcp"],
+      "env": {
+        "MY_CLI_API_KEY": "your-token"
+      }
+    }
+  }
+}
+```
+
+Replace `MY_CLI_API_KEY` with the auth env var your CLI reports under `my-cli doctor`.
+
+### HTTP mode
+
+Serve over Streamable HTTP instead of stdio:
+
+```sh
+my-cli mcp --http 127.0.0.1:8484
+```
+
+Inbound auth for HTTP is selected with `--http-auth`:
+
+- `none` (default) — allowed only on a loopback address unless `--http-insecure` is set.
+- `bearer` — a static token read from the `<PREFIX>_MCP_TOKEN` env var, compared in constant time.
+- `oauth` — an OAuth 2.1 resource server that validates JWTs against the authorization server's JWKS (`--http-oauth-issuer`, `--http-oauth-audience`, and optional `--http-oauth-jwks`/`--http-oauth-scopes`) and serves RFC 9728 protected-resource metadata at `/.well-known/oauth-protected-resource`.
+
+The inbound HTTP credential only authorizes the request; it is never forwarded to the upstream API.
+
+### Filtering tools
+
+Large APIs produce many tools. Narrow the exposed set with:
+
+- `--tools a,b,c` — expose only these tools by exact name.
+- `--groups g1,g2` — expose only tools in these command groups.
+- `--read-only` — expose only tools annotated `readOnlyHint`.
+
+The flags compose, so `--groups files --read-only` exposes the read-only tools within the `files` group. They apply to both `mcp` and `mcp list`.
+
+### Excluded operations
+
+Some operations are not bridged as tools and are reported (with reasons) in the generate summary:
+
+- SSE-only operations (only `text/event-stream` responses) — operations offering JSON **and** SSE are included using the JSON media type.
+- Multipart/binary request bodies (`multipart/form-data`, `application/octet-stream`).
+- `deprecated: true` operations.
+- Operations marked `x-mcp-ignore`.
+
+Known v1 limitation: optional query/header parameters equal to their zero value (`false`, `0`, `""`) are dropped by the generated client runtime, so an MCP caller cannot send an explicit `false`/`0`/`""` for an optional param. Required params and body fields are unaffected.
+
 ## Schema Shaping
 
 Bartolo will synthesize a decent CLI from a plain schema, but it gets significantly better when the schema carries product intent.
@@ -84,6 +166,7 @@ Bartolo will synthesize a decent CLI from a plain schema, but it gets significan
 | `x-cli-ignore` | Exclude a path, operation, or parameter entirely. |
 | `x-cli-name` | Override a generated CLI name for an API, operation, or parameter. |
 | `x-cli-waiters` | Add polling-based waiter commands and follow-up flags. |
+| `x-mcp-ignore` | Exclude an operation from the generated MCP tool surface (it still generates a CLI command). |
 
 Bartolo also groups operations automatically from:
 

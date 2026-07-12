@@ -95,7 +95,7 @@ func initGeneratedRuntime() {
 				return nil, nil, errors.Wrap(err, "unmarshalling response failed")
 			}
 		} else {
-			return nil, nil, errors.Errorf("HTTP %d: %s", resp.StatusCode, resp.String())
+			return nil, nil, &bartolocli.HTTPError{StatusCode: resp.StatusCode, Headers: resp.Header, Body: resp.Bytes()}
 		}
 
 		after := bartolocli.HandleAfter(handlerPath, params, resp, decoded)
@@ -166,7 +166,7 @@ func initGeneratedRuntime() {
 					return nil, nil, errors.Wrap(err, "unmarshalling response failed")
 				}
 			} else {
-				return nil, nil, errors.Errorf("HTTP %d: %s", resp.StatusCode, resp.String())
+				return nil, nil, &bartolocli.HTTPError{StatusCode: resp.StatusCode, Headers: resp.Header, Body: resp.Bytes()}
 			}
 
 			after := bartolocli.HandleAfter(handlerPath, params, resp, decoded)
