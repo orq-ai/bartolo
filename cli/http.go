@@ -27,6 +27,24 @@ var (
 	ErrCannotUnmarshal = errors.New("Unable to unmarshal response")
 )
 
+// HTTPError represents a non-2xx HTTP response from an upstream API call. It
+// carries the structured status/headers/body so callers (such as the MCP
+// server) can surface them as structured error results rather than a bare
+// string. Its Error() string is intentionally identical to the message
+// previously produced by the generated client funcs so existing CLI behavior
+// is unchanged.
+type HTTPError struct {
+	StatusCode int
+	Headers    http.Header
+	Body       []byte
+}
+
+// Error implements the error interface, rendering the same "HTTP %d: %s"
+// message that generated client funcs historically returned.
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, string(e.Body))
+}
+
 func indent(value string) string {
 	trimmed := strings.TrimSuffix(value, "\x1b[0m")
 	trimmed = strings.TrimRight(trimmed, "\n")
