@@ -24,7 +24,9 @@ func Register(root *cobra.Command) {
 
 	registerRootCommands(root)
 	{{- range .Groups }}
+	{{- if .HasCLICommands }}
 	register{{ .GoName }}Commands(root)
+	{{- end }}
 	{{- end }}
 	{{- if .HasMCPTools }}
 	root.AddCommand(mcpserver.Command(viper.GetString("app-name"), root.Version, mcpTools, mcpserver.SetInstructions(mcpInstructions)))

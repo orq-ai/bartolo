@@ -33,17 +33,9 @@ var templateFS embed.FS
 const projectConfigFilename = ".bartolo.json"
 const bartoloVersion = "0.4.3"
 
-// OpenAPI Extensions
-const (
-	ExtAliases     = "x-cli-aliases"
-	ExtDescription = "x-cli-description"
-	ExtGroup       = "x-cli-group"
-	ExtIgnore      = "x-cli-ignore"
-	ExtHidden      = "x-cli-hidden"
-	ExtName        = "x-cli-name"
-	ExtWaiters     = "x-cli-waiters"
-	ExtMCPIgnore   = "x-mcp-ignore"
-)
+// OpenAPI vendor extensions are resolved through the helpers in extensions.go,
+// which walk the canonical x-bartolo-* namespace and its legacy x-cli-*/x-mcp-*
+// aliases. See extensions.go for the full key map and precedence rules.
 
 // Param describes an OpenAPI parameter (path, query, header, etc)
 type Param struct {
@@ -84,6 +76,10 @@ type Operation struct {
 	CommandPath    string
 	LeafName       string
 	MCP            *MCPTool
+	// CLIExcluded marks an operation that must not generate a CLI command
+	// (x-bartolo-cli-ignore) while still entering the IR so it can be exposed
+	// as an MCP tool and have its generated client func emitted.
+	CLIExcluded bool
 }
 
 // BodyField describes a generated request-body flag for a simple top-level
@@ -108,6 +104,32 @@ type CommandGroup struct {
 	Hidden      bool
 	Operations  []*Operation
 	Description string
+}
+
+// cliVisibleOperations returns the operations that generate a CLI command,
+// dropping any marked CLIExcluded (x-bartolo-cli-ignore). CLI-excluded ops still
+// exist in the IR so they can be exposed as MCP tools.
+func cliVisibleOperations(ops []*Operation) []*Operation {
+	out := make([]*Operation, 0, len(ops))
+	for _, op := range ops {
+		if op.CLIExcluded {
+			continue
+		}
+		out = append(out, op)
+	}
+	return out
+}
+
+// HasCLICommands reports whether the group has at least one operation that
+// generates a CLI command. Groups whose operations are all CLI-excluded emit no
+// group command file and are not registered.
+func (g *CommandGroup) HasCLICommands() bool {
+	for _, op := range g.Operations {
+		if !op.CLIExcluded {
+			return true
+		}
+	}
+	return false
 }
 
 // Waiter describes a special command that blocks until a condition has been
@@ -258,13 +280,13 @@ type CommandsTemplateData struct {
 // for a loaded and dereferenced OpenAPI 3 document.
 func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 	apiName := shortName
-	if api.Info.Extensions[ExtName] != nil {
-		apiName = extStr(api.Info.Extensions[ExtName])
+	if name := extString(api.Info.Extensions, extKeyName); name != "" {
+		apiName = name
 	}
 
 	apiDescription := api.Info.Description
-	if api.Info.Extensions[ExtDescription] != nil {
-		apiDescription = extStr(api.Info.Extensions[ExtDescription])
+	if description, ok := extValue(api.Info.Extensions, extKeyDescription); ok {
+		apiDescription = extStr(description)
 	}
 
 	authInit, needsAPIKey, needsOAuth, authSchemes := buildAuthInit(api)
@@ -309,21 +331,29 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 	for _, path := range keys {
 		item := api.Paths.Value(path)
 
-		if item.Extensions[ExtIgnore] != nil {
-			// Ignore this path.
+		if sharedIgnored(item.Extensions) {
+			// Ignore this path everywhere (CLI and MCP).
 			continue
 		}
 
 		pathHidden := false
-		if item.Extensions[ExtHidden] != nil {
-			mustDecodeExt(item.Extensions[ExtHidden], &pathHidden)
+		if hidden, ok := extValue(item.Extensions, extKeyHidden); ok {
+			mustDecodeExt(hidden, &pathHidden)
 		}
 
+		// x-bartolo-cli-ignore at the path level excludes every operation under
+		// the path from the CLI, while still allowing MCP tools.
+		pathCLIExcluded := cliIgnored(item.Extensions)
+
 		for method, operation := range item.Operations() {
-			if operation.Extensions[ExtIgnore] != nil {
-				// Ignore this operation.
+			if sharedIgnored(operation.Extensions) {
+				// Ignore this operation everywhere (CLI and MCP).
 				continue
 			}
+
+			// The op still enters the IR (so it can become an MCP tool) but is
+			// excluded from CLI command generation.
+			cliExcluded := pathCLIExcluded || cliIgnored(operation.Extensions)
 
 			name := operation.OperationID
 			if name == "" {
@@ -332,16 +362,16 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				name = strings.Replace(name, "}", "", -1)
 				name = strings.Trim(name, "-")
 			}
-			explicitLeafName := getPreferredStringExt(operation.Extensions, ExtName)
+			explicitLeafName := extString(operation.Extensions, extKeyName)
 			leafName := explicitLeafName
 			if leafName == "" {
 				leafName = name
 			}
 
 			var aliases []string
-			if operation.Extensions[ExtAliases] != nil {
+			if a, ok := extValue(operation.Extensions, extKeyAliases); ok {
 				// We need to decode the extension value into our string slice.
-				mustDecodeExt(operation.Extensions[ExtAliases], &aliases)
+				mustDecodeExt(a, &aliases)
 			}
 
 			params := getParams(item, method)
@@ -351,8 +381,8 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 			shortExplicit := short != ""
 
 			description := operation.Description
-			if operation.Extensions[ExtDescription] != nil {
-				description = extStr(operation.Extensions[ExtDescription])
+			if d, ok := extValue(operation.Extensions, extKeyDescription); ok {
+				description = extStr(d)
 			}
 
 			reqMt, reqSchema, reqExamples, bodyFields := getRequestInfo(operation)
@@ -403,8 +433,8 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 			method := strings.Title(strings.ToLower(method))
 
 			hidden := pathHidden
-			if operation.Extensions[ExtHidden] != nil {
-				mustDecodeExt(operation.Extensions[ExtHidden], &hidden)
+			if h, ok := extValue(operation.Extensions, extKeyHidden); ok {
+				mustDecodeExt(h, &hidden)
 			}
 
 			group := resolveCommandGroup(path, operation, tagDefs)
@@ -481,6 +511,7 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				Group:          group,
 				CommandPath:    commandPath,
 				LeafName:       leafName,
+				CLIExcluded:    cliExcluded,
 			}
 
 			o.MCP = buildMCPTool(o, operation, item)
@@ -516,10 +547,10 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 
 	assignMCPToolNames(result)
 
-	if api.Extensions[ExtWaiters] != nil {
+	if w, ok := extValue(api.Extensions, extKeyWaiters); ok {
 		var waiters map[string]*Waiter
 
-		mustDecodeExt(api.Extensions[ExtWaiters], &waiters)
+		mustDecodeExt(w, &waiters)
 
 		for name, waiter := range waiters {
 			waiter.CLIName = slug(name)
@@ -691,19 +722,8 @@ func normalizeSpecName(filename string) string {
 	return slug(stem)
 }
 
-func getPreferredStringExt(extensions map[string]interface{}, keys ...string) string {
-	for _, key := range keys {
-		if extensions == nil || extensions[key] == nil {
-			continue
-		}
-		return extStr(extensions[key])
-	}
-
-	return ""
-}
-
 func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map[string]*openapi3.Tag) *CommandGroup {
-	groupName := getPreferredStringExt(operation.Extensions, ExtGroup)
+	groupName := extString(operation.Extensions, extKeyGroup)
 	var tagDef *openapi3.Tag
 
 	if groupName == "" && len(operation.Tags) > 0 {
@@ -728,10 +748,10 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 	hidden := false
 
 	if tagDef != nil {
-		if override := getPreferredStringExt(tagDef.Extensions, ExtName); override != "" {
+		if override := extString(tagDef.Extensions, extKeyName); override != "" {
 			cliName = slug(override)
 		}
-		if description := getPreferredStringExt(tagDef.Extensions, ExtDescription); description != "" {
+		if description := extString(tagDef.Extensions, extKeyDescription); description != "" {
 			long = description
 		} else {
 			long = tagDef.Description
@@ -742,15 +762,15 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		if tagDef.Name != "" {
 			short = tagDef.Name
 		}
-		if tagDef.Extensions[ExtAliases] != nil {
-			mustDecodeExt(tagDef.Extensions[ExtAliases], &aliases)
+		if a, ok := extValue(tagDef.Extensions, extKeyAliases); ok {
+			mustDecodeExt(a, &aliases)
 		}
-		if tagDef.Extensions[ExtHidden] != nil {
-			mustDecodeExt(tagDef.Extensions[ExtHidden], &hidden)
+		if h, ok := extValue(tagDef.Extensions, extKeyHidden); ok {
+			mustDecodeExt(h, &hidden)
 		}
 	}
 
-	if override := getPreferredStringExt(operation.Extensions, ExtGroup); override != "" {
+	if override := extString(operation.Extensions, extKeyGroup); override != "" {
 		cliName = slug(override)
 	}
 
@@ -1062,7 +1082,7 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 	total = append(total, operation.Parameters...)
 
 	for _, p := range total {
-		if p.Value != nil && p.Value.Extensions["x-cli-ignore"] == nil {
+		if p.Value != nil && !sharedIgnored(p.Value.Extensions) {
 			t := "string"
 			tn := "\"\""
 			if p.Value.Schema != nil && p.Value.Schema.Value != nil && p.Value.Schema.Value.Type != nil {
@@ -1079,13 +1099,13 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 			}
 
 			cliName := slug(p.Value.Name)
-			if p.Value.Extensions[ExtName] != nil {
-				cliName = extStr(p.Value.Extensions[ExtName])
+			if name := extString(p.Value.Extensions, extKeyName); name != "" {
+				cliName = name
 			}
 
 			description := p.Value.Description
-			if p.Value.Extensions[ExtDescription] != nil {
-				description = extStr(p.Value.Extensions[ExtDescription])
+			if d, ok := extValue(p.Value.Extensions, extKeyDescription); ok {
+				description = extStr(d)
 			}
 
 			allParams = append(allParams, &Param{
@@ -1213,7 +1233,7 @@ func getBodyFields(schema *openapi3.Schema) []*BodyField {
 		if ref == nil || ref.Value == nil {
 			continue
 		}
-		if ref.Value.Extensions != nil && ref.Value.Extensions[ExtIgnore] != nil {
+		if sharedIgnored(ref.Value.Extensions) {
 			continue
 		}
 
@@ -1223,12 +1243,12 @@ func getBodyFields(schema *openapi3.Schema) []*BodyField {
 		}
 
 		cliName := slug(name)
-		if ref.Value.Extensions != nil && ref.Value.Extensions[ExtName] != nil {
-			cliName = extStr(ref.Value.Extensions[ExtName])
+		if name := extString(ref.Value.Extensions, extKeyName); name != "" {
+			cliName = name
 		}
 		description := ref.Value.Description
-		if ref.Value.Extensions != nil && ref.Value.Extensions[ExtDescription] != nil {
-			description = extStr(ref.Value.Extensions[ExtDescription])
+		if d, ok := extValue(ref.Value.Extensions, extKeyDescription); ok {
+			description = extStr(d)
 		}
 
 		fields = append(fields, &BodyField{
@@ -2868,6 +2888,8 @@ func commandFileNeedsFmt(operations []*Operation) bool {
 func writeGeneratedCommandFiles(api *OpenAPI, shortName string) {
 	resetGeneratedPackage()
 
+	// The client funcs are emitted for EVERY operation in the IR, including
+	// CLI-excluded ops, because generated MCP tool closures call them.
 	writeFormattedFile(
 		filepath.Join("cli", "generated", shortName+"_client.go"),
 		[]byte(renderTemplate("templates/generated_client.tmpl", commandTemplateFuncs(), api)),
@@ -2877,11 +2899,14 @@ func writeGeneratedCommandFiles(api *OpenAPI, shortName string) {
 		[]byte(renderTemplate("templates/generated_register.tmpl", commandTemplateFuncs(), api)),
 	)
 
+	// CLI command generation only sees the CLI-visible operations
+	// (x-bartolo-cli-ignore ops are dropped here but survive in the IR above).
+	rootOps := cliVisibleOperations(api.Operations)
 	rootCommands := &CommandsTemplateData{
 		API:        api,
-		Operations: api.Operations,
+		Operations: rootOps,
 		Waiters:    api.Waiters,
-		NeedsFmt:   commandFileNeedsFmt(api.Operations),
+		NeedsFmt:   commandFileNeedsFmt(rootOps),
 	}
 	writeFormattedFile(
 		filepath.Join("cli", "generated", "root_commands.go"),
@@ -2889,11 +2914,18 @@ func writeGeneratedCommandFiles(api *OpenAPI, shortName string) {
 	)
 
 	for _, group := range api.Groups {
+		groupOps := cliVisibleOperations(group.Operations)
+		if len(groupOps) == 0 {
+			// Every operation in this group is CLI-excluded; skip the group
+			// command file entirely so we don't emit an empty group command.
+			// The register template guards the matching register call.
+			continue
+		}
 		groupData := &CommandsTemplateData{
 			API:        api,
 			Group:      group,
-			Operations: group.Operations,
-			NeedsFmt:   commandFileNeedsFmt(group.Operations),
+			Operations: groupOps,
+			NeedsFmt:   commandFileNeedsFmt(groupOps),
 		}
 		filename := filepath.Join("cli", "generated", slug(group.CLIName)+"_commands.go")
 		writeFormattedFile(

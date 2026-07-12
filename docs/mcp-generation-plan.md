@@ -199,6 +199,8 @@ Protocol-level errors are reserved for unknown tool / malformed JSON-RPC (SDK ha
 
 ### Operation filtering
 
+> Addendum: the extensions below were renamed to the canonical `x-bartolo-*` namespace (`x-cli-ignore` → `x-bartolo-ignore`, `x-mcp-ignore` → `x-bartolo-mcp-ignore`, plus a new CLI-only `x-bartolo-cli-ignore`); the legacy `x-cli-*`/`x-mcp-ignore` names still work. See the README "Schema Shaping" section for the full map.
+
 - Generation-time excludes (recorded with reasons, printed in the generate summary and listed in
   a README section): `x-cli-ignore`/`x-mcp-ignore`, `deprecated: true`, SSE-only operations
   (only `text/event-stream` content — 7 in the Orq spec), multipart/binary request bodies

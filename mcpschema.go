@@ -275,7 +275,7 @@ func mcpParams(item *openapi3.PathItem, op *openapi3.Operation) openapi3.Paramet
 		if p == nil || p.Value == nil {
 			continue
 		}
-		if p.Value.Extensions[ExtIgnore] != nil {
+		if sharedIgnored(p.Value.Extensions) {
 			continue
 		}
 		out = append(out, p)
@@ -417,7 +417,7 @@ func buildMCPTool(o *Operation, op *openapi3.Operation, item *openapi3.PathItem)
 	// before the deprecated policy flag so an op that is both a streaming
 	// endpoint and deprecated is reported by its blocking capability.
 	switch {
-	case op.Extensions[ExtMCPIgnore] != nil:
+	case mcpIgnored(op.Extensions):
 		tool.Excluded = true
 		tool.ExcludedReason = "x-mcp-ignore"
 	case mcpIsSSEOnly(op):

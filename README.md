@@ -6,7 +6,7 @@ It is designed for teams that want more than a thin REST wrapper. The generated 
 
 ## Why Bartolo
 
-- Generates grouped commands from tags or `x-cli-group`, so large APIs feel like product CLIs instead of flat path dumps.
+- Generates grouped commands from tags or `x-bartolo-group`, so large APIs feel like product CLIs instead of flat path dumps.
 - Supports `openapi.yaml`, `openapi.yml`, and `openapi.json`.
 - Handles common OpenAPI 3.1 schema shapes in addition to OpenAPI 3.0.
 - Infers API key and bearer auth, including predictable env vars like `MY_CLI_API_KEY`.
@@ -149,7 +149,7 @@ Some operations are not bridged as tools and are reported (with reasons) in the 
 - SSE-only operations (only `text/event-stream` responses) — operations offering JSON **and** SSE are included using the JSON media type.
 - Multipart/binary request bodies (`multipart/form-data`, `application/octet-stream`).
 - `deprecated: true` operations.
-- Operations marked `x-mcp-ignore`.
+- Operations marked `x-bartolo-mcp-ignore` (or the legacy `x-mcp-ignore`).
 
 Known v1 limitation: optional query/header parameters equal to their zero value (`false`, `0`, `""`) are dropped by the generated client runtime, so an MCP caller cannot send an explicit `false`/`0`/`""` for an optional param. Required params and body fields are unaffected.
 
@@ -157,21 +157,33 @@ Known v1 limitation: optional query/header parameters equal to their zero value 
 
 Bartolo will synthesize a decent CLI from a plain schema, but it gets significantly better when the schema carries product intent.
 
+Bartolo's canonical extension namespace is `x-bartolo-*`. Shared extensions affect the whole generated surface (both the CLI and the MCP tools); the two surface-scoped extensions restrict a single surface.
+
+**Shared (CLI + MCP):**
+
 | Extension | Purpose |
 | --- | --- |
-| `x-cli-aliases` | Add command aliases for operations. |
-| `x-cli-description` | Override CLI-facing help text. |
-| `x-cli-group` | Force an operation into a higher-level noun. |
-| `x-cli-hidden` | Hide a path or operation from normal help. |
-| `x-cli-ignore` | Exclude a path, operation, or parameter entirely. |
-| `x-cli-name` | Override a generated CLI name for an API, operation, or parameter. |
-| `x-cli-waiters` | Add polling-based waiter commands and follow-up flags. |
-| `x-mcp-ignore` | Exclude an operation from the generated MCP tool surface (it still generates a CLI command). |
+| `x-bartolo-aliases` | Add command aliases for operations (rendered in the CLI). |
+| `x-bartolo-description` | Override generated help/description text. |
+| `x-bartolo-group` | Force an operation into a higher-level noun. |
+| `x-bartolo-hidden` | Hide a path or operation from normal CLI help. |
+| `x-bartolo-ignore` | Exclude a path, operation, or parameter entirely (from CLI **and** MCP). |
+| `x-bartolo-name` | Override a generated name for an API, operation, or parameter. |
+| `x-bartolo-waiters` | Add polling-based waiter commands and follow-up flags. |
+
+**Surface-scoped:**
+
+| Extension | Purpose |
+| --- | --- |
+| `x-bartolo-cli-ignore` | Exclude an operation from the CLI only. The operation still becomes an MCP tool (and its client func is still generated). |
+| `x-bartolo-mcp-ignore` | Exclude an operation from the generated MCP tool surface only. It still generates a CLI command. |
+
+**Legacy aliases:** the earlier `x-cli-*` names (`x-cli-aliases`, `x-cli-description`, `x-cli-group`, `x-cli-hidden`, `x-cli-ignore`, `x-cli-name`, `x-cli-waiters`) and `x-mcp-ignore` keep working with no runtime warning. Each maps to the matching shared `x-bartolo-*` key (`x-mcp-ignore` → `x-bartolo-mcp-ignore`). When both a canonical `x-bartolo-*` key and its legacy alias appear on the same element, the canonical value wins. `x-bartolo-ignore` always excludes everywhere, regardless of any surface-scoped flag also present.
 
 Bartolo also groups operations automatically from:
 
 - the first OpenAPI tag
-- `x-cli-group`
+- `x-bartolo-group`
 - the first stable path noun when tags are missing
 
 That fallback matters for large real-world schemas where tagging is inconsistent.

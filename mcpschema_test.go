@@ -440,6 +440,39 @@ paths:
 	}
 }
 
+func TestMCPExclusionBartoloMCPIgnore(t *testing.T) {
+	// The canonical x-bartolo-mcp-ignore excludes from MCP only; the op still
+	// generates a CLI command (CLIExcluded stays false).
+	api := ProcessAPI("example", loadTestSpec(t, `
+openapi: 3.1.0
+info: {title: t, version: "1"}
+paths:
+  /hidden:
+    get:
+      operationId: HiddenThing
+      x-bartolo-mcp-ignore: true
+      responses:
+        "200": {description: ok}
+`))
+	op := findOp(api, "/hidden", "get")
+	if op == nil {
+		t.Fatal("mcp-ignored op must still enter the IR for the CLI")
+	}
+	if !op.MCP.Excluded || op.MCP.ExcludedReason != "x-mcp-ignore" {
+		t.Errorf("x-bartolo-mcp-ignore op should be excluded from MCP, got excluded=%v reason=%q", op.MCP.Excluded, op.MCP.ExcludedReason)
+	}
+	if op.CLIExcluded {
+		t.Error("x-bartolo-mcp-ignore must not exclude the op from the CLI")
+	}
+	cliOps := len(cliVisibleOperations(api.Operations))
+	for _, g := range api.Groups {
+		cliOps += len(cliVisibleOperations(g.Operations))
+	}
+	if cliOps != 1 {
+		t.Errorf("mcp-ignored op should still be a CLI command, got %d CLI ops", cliOps)
+	}
+}
+
 func TestMCPAnnotationMappingPerMethod(t *testing.T) {
 	api := ProcessAPI("example", loadTestSpec(t, `
 openapi: 3.1.0
