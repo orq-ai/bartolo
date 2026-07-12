@@ -42,6 +42,7 @@ const (
 	ExtHidden      = "x-cli-hidden"
 	ExtName        = "x-cli-name"
 	ExtWaiters     = "x-cli-waiters"
+	ExtMCPIgnore   = "x-mcp-ignore"
 )
 
 // Param describes an OpenAPI parameter (path, query, header, etc)
@@ -82,6 +83,7 @@ type Operation struct {
 	Group          *CommandGroup
 	CommandPath    string
 	LeafName       string
+	MCP            *MCPTool
 }
 
 // BodyField describes a generated request-body flag for a simple top-level
@@ -444,6 +446,8 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				LeafName:       leafName,
 			}
 
+			o.MCP = buildMCPTool(o, operation, item)
+
 			operationMap[operation.OperationID] = o
 			if group != nil {
 				group.Operations = append(group.Operations, o)
@@ -472,6 +476,8 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 		})
 		result.Groups = append(result.Groups, group)
 	}
+
+	assignMCPToolNames(result)
 
 	if api.Extensions[ExtWaiters] != nil {
 		var waiters map[string]*Waiter
