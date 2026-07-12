@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/signal"
 	"strings"
 	"syscall"
@@ -14,6 +15,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/orq-ai/bartolo/cli"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 // Option configures the mcp command. Options are applied in order.
@@ -21,6 +23,7 @@ type Option func(*config)
 
 type config struct {
 	instructions string
+	envPrefix    string
 }
 
 // SetInstructions sets the MCP server instructions surfaced to connected
@@ -28,6 +31,14 @@ type config struct {
 // guidance (auth env vars, `auth setup`, etc.).
 func SetInstructions(s string) Option {
 	return func(c *config) { c.instructions = s }
+}
+
+// SetEnvPrefix sets the environment-variable prefix used to derive HTTP-mode
+// secrets (e.g. the static bearer token env var <PREFIX>_MCP_TOKEN). When unset,
+// the prefix is read at runtime from viper's "env-prefix" key (populated by
+// cli.Init), so existing generated register wiring keeps working without change.
+func SetEnvPrefix(prefix string) Option {
+	return func(c *config) { c.envPrefix = prefix }
 }
 
 // filterOptions capture the runtime tool-narrowing flags.
@@ -83,35 +94,85 @@ func Command(appName, version string, tools func() []ToolDef, opts ...Option) *c
 	}
 
 	var (
-		flagTools    []string
-		flagGroups   []string
-		flagReadOnly bool
-		flagHTTP     string
+		flagTools          []string
+		flagGroups         []string
+		flagReadOnly       bool
+		flagHTTP           string
+		flagHTTPAuth       string
+		flagAllowedOrigins []string
+		flagInsecure       bool
+		flagOAuthIssuer    string
+		flagOAuthAudience  string
+		flagOAuthJWKS      string
+		flagOAuthScopes    []string
 	)
+
+	// httpFlagNames are the flags that are only meaningful with --http.
+	httpFlagNames := []string{
+		"http-auth", "http-allowed-origins", "http-insecure",
+		"http-oauth-issuer", "http-oauth-audience", "http-oauth-jwks", "http-oauth-scopes",
+	}
 
 	cmd := &cobra.Command{
 		Use:   "mcp",
 		Short: "Run an MCP (Model Context Protocol) server for this API",
-		Long: "Serve this API's operations as MCP tools over stdio (default), for use\n" +
-			"with MCP clients such as Claude Desktop, Claude Code, and Cursor.\n\n" +
+		Long: "Serve this API's operations as MCP tools for use with MCP clients such as\n" +
+			"Claude Desktop, Claude Code, and Cursor.\n\n" +
+			"Transports:\n" +
+			"  (default)      serve over stdio — the transport MCP clients spawn directly.\n" +
+			"  --http <addr>  serve over Streamable HTTP at <addr> (e.g. 127.0.0.1:8484).\n\n" +
+			"HTTP inbound auth (--http only):\n" +
+			"  --http-auth none     no auth (default; only allowed on a loopback address\n" +
+			"                       unless --http-insecure is set).\n" +
+			"  --http-auth bearer   static bearer token from the " + tokenEnvVar(cfg.envPrefix) + "\n" +
+			"                       environment variable (constant-time compared).\n" +
+			"  --http-auth oauth    OAuth 2.1 resource server: JWTs are validated against the\n" +
+			"                       authorization server's JWKS (--http-oauth-issuer,\n" +
+			"                       --http-oauth-audience, optional --http-oauth-jwks and\n" +
+			"                       --http-oauth-scopes). RFC 9728 protected-resource metadata\n" +
+			"                       is served at " + resourceMetadataPath + ".\n" +
+			"  --http-allowed-origins  comma-separated Origin allow-list; requests carrying an\n" +
+			"                       Origin outside the list are rejected (browser DNS-rebinding\n" +
+			"                       guard). Requests with no Origin header are allowed.\n\n" +
+			"The inbound HTTP credential is used only to authorize the request; it is never\n" +
+			"forwarded to the upstream API.\n\n" +
 			"Use `" + appName + " mcp list` to print the tool manifest as JSON.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if flagHTTP != "" {
-				return fmt.Errorf("http transport not yet supported")
-			}
 			selected := filterTools(tools(), filterOptions{
 				tools:    flagTools,
 				groups:   flagGroups,
 				readOnly: flagReadOnly,
 			})
-			return serveStdio(cmd.Context(), appName, version, cfg.instructions, selected)
+
+			if flagHTTP == "" {
+				for _, name := range httpFlagNames {
+					if cmd.Flags().Changed(name) {
+						return fmt.Errorf("--%s requires --http", name)
+					}
+				}
+				return serveStdio(cmd.Context(), appName, version, cfg.instructions, selected)
+			}
+
+			opts, err := resolveHTTPOptions(cfg.envPrefix, flagHTTP, flagHTTPAuth, flagAllowedOrigins, flagInsecure,
+				flagOAuthIssuer, flagOAuthAudience, flagOAuthJWKS, flagOAuthScopes)
+			if err != nil {
+				return err
+			}
+			return serveHTTP(cmd.Context(), appName, version, cfg.instructions, selected, opts)
 		},
 	}
 
 	cmd.Flags().StringSliceVar(&flagTools, "tools", nil, "Only expose these tools (comma-separated exact names)")
 	cmd.Flags().StringSliceVar(&flagGroups, "groups", nil, "Only expose tools in these groups (comma-separated)")
 	cmd.Flags().BoolVar(&flagReadOnly, "read-only", false, "Only expose read-only (safe) tools")
-	cmd.Flags().StringVar(&flagHTTP, "http", "", "Serve over Streamable HTTP at this address (not yet supported)")
+	cmd.Flags().StringVar(&flagHTTP, "http", "", "Serve over Streamable HTTP at this address (e.g. 127.0.0.1:8484)")
+	cmd.Flags().StringVar(&flagHTTPAuth, "http-auth", authModeNone, "Inbound HTTP auth mode: none|bearer|oauth (requires --http)")
+	cmd.Flags().StringSliceVar(&flagAllowedOrigins, "http-allowed-origins", nil, "Allowed Origin header values, comma-separated (requires --http)")
+	cmd.Flags().BoolVar(&flagInsecure, "http-insecure", false, "Allow binding a non-loopback address with --http-auth none (requires --http)")
+	cmd.Flags().StringVar(&flagOAuthIssuer, "http-oauth-issuer", "", "OAuth authorization server issuer (required for --http-auth oauth)")
+	cmd.Flags().StringVar(&flagOAuthAudience, "http-oauth-audience", "", "OAuth audience / canonical resource URI (required for --http-auth oauth)")
+	cmd.Flags().StringVar(&flagOAuthJWKS, "http-oauth-jwks", "", "JWKS URL (default: discovered from the issuer's AS metadata)")
+	cmd.Flags().StringSliceVar(&flagOAuthScopes, "http-oauth-scopes", nil, "Required OAuth scopes, comma-separated (all must be present)")
 
 	listCmd := &cobra.Command{
 		Use:   "list",
@@ -131,6 +192,59 @@ func Command(appName, version string, tools func() []ToolDef, opts ...Option) *c
 
 	cmd.AddCommand(listCmd)
 	return cmd
+}
+
+// tokenEnvVar returns the environment-variable name that holds the static bearer
+// token for --http-auth bearer. The prefix is the explicit SetEnvPrefix value,
+// falling back to viper's runtime "env-prefix" (set by cli.Init).
+func tokenEnvVar(envPrefix string) string {
+	if envPrefix == "" {
+		envPrefix = viper.GetString("env-prefix")
+	}
+	if envPrefix == "" {
+		return "MCP_TOKEN"
+	}
+	return envPrefix + "_MCP_TOKEN"
+}
+
+// resolveHTTPOptions validates the --http* flag combination and materializes the
+// httpServeOptions consumed by serveHTTP.
+func resolveHTTPOptions(envPrefix, addr, authMode string, allowedOrigins []string, insecure bool,
+	oauthIssuer, oauthAudience, oauthJWKS string, oauthScopes []string) (httpServeOptions, error) {
+	opts := httpServeOptions{
+		addr:           addr,
+		authMode:       authMode,
+		allowedOrigins: allowedOrigins,
+		insecure:       insecure,
+	}
+
+	switch authMode {
+	case authModeNone:
+		// nothing to resolve
+	case authModeBearer:
+		token := os.Getenv(tokenEnvVar(envPrefix))
+		if token == "" {
+			return httpServeOptions{}, fmt.Errorf("--http-auth bearer requires the %s environment variable to be set", tokenEnvVar(envPrefix))
+		}
+		opts.token = token
+	case authModeOAuth:
+		if oauthIssuer == "" {
+			return httpServeOptions{}, errors.New("--http-auth oauth requires --http-oauth-issuer")
+		}
+		if oauthAudience == "" {
+			return httpServeOptions{}, errors.New("--http-auth oauth requires --http-oauth-audience")
+		}
+		opts.oauth = oauthConfig{
+			issuer:   oauthIssuer,
+			audience: oauthAudience,
+			jwksURL:  oauthJWKS,
+			scopes:   oauthScopes,
+		}
+	default:
+		return httpServeOptions{}, fmt.Errorf("invalid --http-auth %q (want none|bearer|oauth)", authMode)
+	}
+
+	return opts, nil
 }
 
 // manifestTool is the JSON shape emitted by `mcp list`.
