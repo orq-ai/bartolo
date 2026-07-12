@@ -5,6 +5,10 @@ package generated
 
 import (
 	bartolocli "github.com/orq-ai/bartolo/cli"
+	{{- if .HasMCPTools }}
+	"github.com/orq-ai/bartolo/mcpserver"
+	"github.com/spf13/viper"
+	{{- end }}
 	"github.com/spf13/cobra"
 )
 
@@ -21,5 +25,8 @@ func Register(root *cobra.Command) {
 	registerRootCommands(root)
 	{{- range .Groups }}
 	register{{ .GoName }}Commands(root)
+	{{- end }}
+	{{- if .HasMCPTools }}
+	root.AddCommand(mcpserver.Command(viper.GetString("app-name"), root.Version, mcpTools, mcpserver.SetInstructions(mcpInstructions)))
 	{{- end }}
 }

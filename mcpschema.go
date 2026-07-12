@@ -684,3 +684,110 @@ func mustCompactJSON(value any) string {
 	}
 	return string(data)
 }
+
+// rawJSONLiteral renders s as a Go raw-string literal for embedding in the
+// generated mcp_tools.go. Compact JSON schemas never contain newlines but may
+// carry backticks inside markdown descriptions, which a raw string literal
+// cannot hold — so on any backtick the value is emitted as a concatenation
+// (`part` + "`" + `part`), the only way to place a backtick in Go source.
+func rawJSONLiteral(s string) string {
+	if !strings.Contains(s, "`") {
+		return "`" + s + "`"
+	}
+	parts := strings.Split(s, "`")
+	for i := range parts {
+		parts[i] = "`" + parts[i] + "`"
+	}
+	return strings.Join(parts, " + \"`\" + ")
+}
+
+// includedMCPTools collects every non-excluded MCP tool across the root
+// operations and all groups, preserving a deterministic order (root ops first,
+// then groups in order). Used by both HasMCPTools and the template builder.
+func (o *OpenAPI) includedMCPOperations() []*Operation {
+	out := make([]*Operation, 0)
+	for _, op := range o.Operations {
+		if op.MCP != nil && !op.MCP.Excluded {
+			out = append(out, op)
+		}
+	}
+	for _, g := range o.Groups {
+		for _, op := range g.Operations {
+			if op.MCP != nil && !op.MCP.Excluded {
+				out = append(out, op)
+			}
+		}
+	}
+	return out
+}
+
+// HasMCPTools reports whether at least one operation is exposed as an MCP tool.
+// The generated register.go only mounts the `mcp` command (and the generator
+// only emits mcp_tools.go) when this is true.
+func (o *OpenAPI) HasMCPTools() bool {
+	return len(o.includedMCPOperations()) > 0
+}
+
+// MCPInstructions builds the server instructions string surfaced to MCP
+// clients: the CLI name, the API title, and short outbound-auth guidance drawn
+// from the generated AuthDoc. Kept intentionally brief for LLM context hygiene.
+func (o *OpenAPI) MCPInstructions() string {
+	name := o.CommandName
+	if name == "" {
+		name = o.Name
+	}
+	title := o.Title
+	if title == "" {
+		title = o.Name
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s exposes the %s as MCP tools.", name, title)
+
+	if o.AuthDoc != nil && o.AuthDoc.Enabled {
+		switch {
+		case len(o.AuthDoc.EnvVars) > 0:
+			fmt.Fprintf(&b, " Authenticate by setting the %s environment variable", o.AuthDoc.EnvVars[0])
+			if o.AuthDoc.ProfileCommand != "" {
+				fmt.Fprintf(&b, " or running `%s`", o.AuthDoc.ProfileCommand)
+			}
+			b.WriteString(".")
+		case o.AuthDoc.ProfileCommand != "":
+			fmt.Fprintf(&b, " Authenticate by running `%s`.", o.AuthDoc.ProfileCommand)
+		}
+	}
+
+	return b.String()
+}
+
+// MCPTemplateData is the render model for templates/generated_mcp.tmpl.
+type MCPTemplateData struct {
+	API   *OpenAPI
+	Tools []*MCPToolTemplate
+}
+
+// MCPToolTemplate is one included operation, flattened with the API's public Go
+// name (used to reference the generated client func) and its group slug (used
+// as ToolDef.Group for the runtime --groups filter).
+type MCPToolTemplate struct {
+	Op        *Operation
+	ApiPublic string
+	Group     string
+}
+
+// buildMCPTemplateData assembles the render model for the MCP tools file.
+func buildMCPTemplateData(api *OpenAPI) *MCPTemplateData {
+	data := &MCPTemplateData{API: api}
+	for _, op := range api.includedMCPOperations() {
+		group := ""
+		if op.Group != nil {
+			group = op.Group.CLIName
+		}
+		data.Tools = append(data.Tools, &MCPToolTemplate{
+			Op:        op,
+			ApiPublic: api.PublicGoName,
+			Group:     group,
+		})
+	}
+	return data
+}

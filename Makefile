@@ -45,6 +45,8 @@ smoke:
 		test -x "$$SMOKE_DIR/scripts/build.sh"; \
 		test -x "$$SMOKE_DIR/scripts/install-local.sh"; \
 		test -x "$$SMOKE_DIR/bin/example"; \
-		test -x "$$INSTALL_DIR/example"
+		test -x "$$INSTALL_DIR/example"; \
+		test -f "$$SMOKE_DIR/cli/generated/mcp_tools.go"; \
+		"$$SMOKE_DIR/bin/example" mcp list | grep -q '"inputSchema"'
 
 verify: smoke test

@@ -2579,6 +2579,8 @@ func commandTemplateFuncs() template.FuncMap {
 		"escapeStr": escapeString,
 		"slug":      slug,
 		"title":     strings.Title,
+		"rawJSON":   rawJSONLiteral,
+		"snakeName": snakeName,
 	}
 }
 
@@ -2626,6 +2628,13 @@ func writeGeneratedCommandFiles(api *OpenAPI, shortName string) {
 		writeFormattedFile(
 			filename,
 			[]byte(renderTemplate("templates/generated_group_commands.tmpl", commandTemplateFuncs(), groupData)),
+		)
+	}
+
+	if api.HasMCPTools() {
+		writeFormattedFile(
+			filepath.Join("cli", "generated", "mcp_tools.go"),
+			[]byte(renderTemplate("templates/generated_mcp.tmpl", commandTemplateFuncs(), buildMCPTemplateData(api))),
 		)
 	}
 }
