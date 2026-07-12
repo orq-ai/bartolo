@@ -18,8 +18,9 @@ smoke:
 		SMOKE_ROOT="$$ROOT_DIR/.tmp-smoke"; \
 		mkdir -p "$$SMOKE_ROOT"; \
 		SMOKE_DIR="$$(mktemp -d "$$SMOKE_ROOT/cli.XXXXXX")"; \
+		MCP_DIR="$$(mktemp -d "$$SMOKE_ROOT/mcp.XXXXXX")"; \
 		INSTALL_DIR="$$SMOKE_DIR/local-bin"; \
-		trap 'rm -f "$$GENERATOR_BIN"; rm -rf "$$SMOKE_DIR"' EXIT; \
+		trap 'rm -f "$$GENERATOR_BIN"; rm -rf "$$SMOKE_DIR" "$$MCP_DIR"' EXIT; \
 		go build -o "$$GENERATOR_BIN" .; \
 		cp example-cli/openapi.yaml "$$SMOKE_DIR/openapi.yaml"; \
 		cd "$$SMOKE_DIR"; \
@@ -52,6 +53,20 @@ smoke:
 			'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
 			'{"jsonrpc":"2.0","method":"notifications/initialized"}' \
 			'{"jsonrpc":"2.0","id":2,"method":"tools/list"}'; sleep 2; } \
-			| "$$SMOKE_DIR/bin/example" mcp 2>/dev/null | grep -q '"tools"'
+			| "$$SMOKE_DIR/bin/example" mcp 2>/dev/null | grep -q '"tools"'; \
+		echo "==> smoke: mcp-only target (--targets mcp)"; \
+		cp "$$ROOT_DIR/example-cli/openapi.yaml" "$$MCP_DIR/openapi.yaml"; \
+		cd "$$MCP_DIR"; \
+		"$$GENERATOR_BIN" init mcponly --bartolo-path "$$ROOT_DIR" --targets mcp; \
+		"$$GENERATOR_BIN" generate openapi.yaml; \
+		go build ./...; \
+		test -f "$$MCP_DIR/cli/generated/mcp_tools.go"; \
+		test ! -f "$$MCP_DIR/cli/generated/root_commands.go"; \
+		go build -o "$$MCP_DIR/bin/mcponly" ./cmd/mcponly; \
+		{ printf '%s\n' \
+			'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
+			'{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+			'{"jsonrpc":"2.0","id":2,"method":"tools/list"}'; sleep 2; } \
+			| "$$MCP_DIR/bin/mcponly" 2>/dev/null | grep -q '"tools"'
 
 verify: smoke test

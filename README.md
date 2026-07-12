@@ -153,6 +153,54 @@ Some operations are not bridged as tools and are reported (with reasons) in the 
 
 Known v1 limitation: optional query/header parameters equal to their zero value (`false`, `0`, `""`) are dropped by the generated client runtime, so an MCP caller cannot send an explicit `false`/`0`/`""` for an optional param. Required params and body fields are unaffected.
 
+## Generation Targets
+
+A Bartolo project generates two surfaces from one schema: the **CLI** command tree and the **MCP** server. You choose which surfaces to generate at `init`, and the choice is recorded in `.bartolo.json` under `targets`. Later `generate` / `sync` runs honor that choice and never re-prompt.
+
+The interactive wizard asks:
+
+```
+What should this project generate?
+> CLI + MCP server (recommended)
+  CLI only
+  MCP server only
+```
+
+Or select targets non-interactively with `--targets` (comma-separated `cli` and/or `mcp`):
+
+```sh
+bartolo init my-cli --targets cli        # CLI only
+bartolo init my-mcp --targets mcp        # MCP server only
+bartolo init my-app --targets cli,mcp    # both (the default when --targets is omitted)
+```
+
+Behavior per target set:
+
+- **cli + mcp** (default) — the full surface: CLI commands plus an `mcp` subcommand.
+- **cli only** — no MCP server. `mcp_tools.go` is not emitted, the register wiring drops the `mcp` command, and `go mod tidy` prunes the MCP SDK dependency.
+- **mcp only** — an MCP-first binary. Running the bare binary (`./my-mcp`, no arguments) serves the stdio transport directly, so it drops into an MCP client with no wrapper command. The `mcp`, `mcp list`, `doctor`, and `auth setup` subcommands stay available for inspection and credential bootstrap; no per-operation CLI commands are generated.
+
+Legacy projects created before this feature have no `targets` in `.bartolo.json`. The next interactive `generate` / `sync` asks the question once and persists the answer; a non-interactive run defaults to both surfaces and prints a one-line warning.
+
+### Separate CLI and MCP repos from one schema
+
+To ship the CLI and the MCP server as independent binaries/repos from the same OpenAPI document, scaffold two projects pointed at the same schema and give each a single target:
+
+```sh
+# CLI repo
+mkdir acme-cli && cd acme-cli
+bartolo init acme-cli --targets cli
+bartolo generate ../schema/openapi.yaml
+cd ..
+
+# MCP repo
+mkdir acme-mcp && cd acme-mcp
+bartolo init acme-mcp --targets mcp
+bartolo generate ../schema/openapi.yaml
+```
+
+Each repo owns its own `.bartolo.json`, so re-running `bartolo sync` in either keeps that surface pinned to its recorded target.
+
 ## Schema Shaping
 
 Bartolo will synthesize a decent CLI from a plain schema, but it gets significantly better when the schema carries product intent.

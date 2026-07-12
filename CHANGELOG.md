@@ -11,6 +11,7 @@ The project was restarted on 2026-04-09 as a new public release stream under the
 - Tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`) are derived from the HTTP method; outbound auth reuses the CLI's existing env vars and profiles.
 - Added `mcp list` to print the tool manifest as JSON, runtime filtering flags (`--tools`, `--groups`, `--read-only`), and Streamable HTTP transport (`--http`) with inbound auth modes (`--http-auth none|bearer|oauth`, including RFC 9728 protected-resource metadata and a `<PREFIX>_MCP_TOKEN` static bearer token).
 - SSE-only, multipart/binary, `deprecated`, and `x-mcp-ignore` operations are excluded from the tool surface (and reported in the generate summary); operations offering JSON and SSE are included using the JSON media type.
+- Added generation targets: `bartolo init` now asks (or takes `--targets cli,mcp`) which surfaces to generate, recorded in `.bartolo.json` under `targets` and honored by `generate` / `sync` without re-prompting. `cli` only skips the MCP server (and prunes the MCP SDK dependency on tidy); `mcp` only produces an MCP-first binary whose bare invocation serves stdio directly while keeping `mcp`, `doctor`, and `auth setup`. Legacy configs without `targets` migrate on the next run (interactive prompt, or default-both with a warning when non-interactive).
 
 ## 2026-05-02 (v0.4.3)
 

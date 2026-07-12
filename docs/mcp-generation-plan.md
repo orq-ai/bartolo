@@ -32,6 +32,8 @@ Quality bar:
   server with RFC 9728 protected-resource metadata.
 - End-to-end tests drive the generated server with a real MCP client (go-sdk) in CI.
 
+Addendum (post-v1): generation is now target-scoped — `.bartolo.json` records `targets` (`cli`/`mcp`), so a project can emit CLI-only, MCP-only (an MCP-first binary whose bare invocation serves stdio), or both; `OpenAPI.TargetMCP` gates `HasMCPTools`.
+
 ## Verified constraints (do not re-derive; these were checked)
 
 | Fact | Evidence |

@@ -72,6 +72,7 @@ func TestGenerateTwoSchemeSpecBuildsCLI(t *testing.T) {
 		EnvPrefix:           "TWOSCHEME",
 		DefaultOutputFormat: "json",
 		APIKeyEnvVar:        "TWOSCHEME_API_KEY",
+		Targets:             []string{"cli", "mcp"},
 	}
 	if err := writeProjectScaffold(config, false); err != nil {
 		t.Fatalf("writeProjectScaffold: %v", err)

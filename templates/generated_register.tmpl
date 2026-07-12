@@ -22,13 +22,28 @@ func Register(root *cobra.Command) {
 	root.Short = "{{ .Title | escapeStr }}"
 	root.Long = bartolocli.Markdown("{{ .Description }}")
 
+	{{- if .TargetCLI }}
 	registerRootCommands(root)
 	{{- range .Groups }}
 	{{- if .HasCLICommands }}
 	register{{ .GoName }}Commands(root)
 	{{- end }}
 	{{- end }}
+	{{- end }}
 	{{- if .HasMCPTools }}
-	root.AddCommand(mcpserver.Command(viper.GetString("app-name"), root.Version, mcpTools, mcpserver.SetInstructions(mcpInstructions)))
+	mcpCommand := mcpserver.Command(viper.GetString("app-name"), root.Version, mcpTools, mcpserver.SetInstructions(mcpInstructions))
+	root.AddCommand(mcpCommand)
+	{{- if not .TargetCLI }}
+	// MCP-first: with no CLI command surface, the bare binary serves the MCP
+	// stdio transport directly, so `{{ .CommandName }}` with no arguments is
+	// equivalent to `{{ .CommandName }} mcp`. The `mcp`, `doctor`, and
+	// `auth setup` subcommands remain available for inspection and credential
+	// bootstrap. The mcp command's flag set is mirrored onto the root so
+	// `{{ .CommandName }} --http :8484` / `--read-only` etc. work without the
+	// `mcp` subcommand: the flag variables are shared pointers, so the RunE
+	// closure sees them regardless of which command parsed them.
+	root.RunE = mcpCommand.RunE
+	root.Flags().AddFlagSet(mcpCommand.Flags())
+	{{- end }}
 	{{- end }}
 }

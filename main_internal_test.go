@@ -532,6 +532,7 @@ func TestGenerateFromJSONFixtureBuildsCLI(t *testing.T) {
 		EnvPrefix:           "ORQ",
 		DefaultOutputFormat: "json",
 		APIKeyEnvVar:        "ORQ_API_KEY",
+		Targets:             []string{"cli", "mcp"},
 	}
 	if err := writeProjectScaffold(config, false); err != nil {
 		t.Fatalf("writeProjectScaffold: %v", err)

@@ -190,6 +190,75 @@ type ProjectConfig struct {
 	DefaultOutputFormat string `json:"default_output_format,omitempty"`
 	APIKeyEnvVar        string `json:"api_key_env_var,omitempty"`
 	LastSpecPath        string `json:"last_spec_path,omitempty"`
+	// Targets records which surfaces the project generates: "cli" and/or "mcp".
+	// When absent (legacy configs), both surfaces are generated. See
+	// defaultTargets / effectiveTargets.
+	Targets []string `json:"targets,omitempty"`
+}
+
+// defaultTargets is the surface set used when a project does not record an
+// explicit choice: both the CLI commands and the MCP server.
+func defaultTargets() []string {
+	return []string{targetCLI, targetMCP}
+}
+
+const (
+	targetCLI = "cli"
+	targetMCP = "mcp"
+)
+
+// normalizeTargets validates and de-duplicates a list of generation targets,
+// preserving order. Members must be "cli" or "mcp" and the result must be
+// non-empty.
+func normalizeTargets(parts []string) ([]string, error) {
+	seen := make(map[string]bool, len(parts))
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p == "" {
+			continue
+		}
+		if p != targetCLI && p != targetMCP {
+			return nil, fmt.Errorf("invalid target %q (valid targets: %s, %s)", p, targetCLI, targetMCP)
+		}
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("targets cannot be empty (valid targets: %s, %s)", targetCLI, targetMCP)
+	}
+	return out, nil
+}
+
+// parseTargetsFlag parses the scripted `--targets` comma list. An empty value
+// selects the default (both surfaces).
+func parseTargetsFlag(raw string) ([]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultTargets(), nil
+	}
+	return normalizeTargets(strings.Split(raw, ","))
+}
+
+// effectiveTargets returns the recorded targets, defaulting to both surfaces
+// for a nil config or a config without an explicit targets list.
+func (c *ProjectConfig) effectiveTargets() []string {
+	if c == nil || len(c.Targets) == 0 {
+		return defaultTargets()
+	}
+	return c.Targets
+}
+
+// TargetCLI reports whether the CLI command surface should be generated.
+func (c *ProjectConfig) TargetCLI() bool {
+	return containsString(c.effectiveTargets(), targetCLI)
+}
+
+// TargetMCP reports whether the MCP server surface should be generated.
+func (c *ProjectConfig) TargetMCP() bool {
+	return containsString(c.effectiveTargets(), targetMCP)
 }
 
 // AuthDoc describes auth setup to show in a generated README.
@@ -253,6 +322,11 @@ type OpenAPI struct {
 	AuthDoc     *AuthDoc
 	CommandName string
 	Examples    []*READMEExample
+	// TargetCLI / TargetMCP select which surfaces the generator emits. Both
+	// default to true (see ProcessAPI) and are overridden from ProjectConfig at
+	// render time. TargetMCP additionally gates HasMCPTools.
+	TargetCLI bool
+	TargetMCP bool
 }
 
 // AuthScheme is a recognized (or explicitly unsupported) OpenAPI security
@@ -300,6 +374,10 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 		NeedsAPIKeyImport: needsAPIKey,
 		NeedsOAuthImport:  needsOAuth,
 		AuthSchemes:       authSchemes,
+		// Both surfaces default on; generateFromSpec overrides these from the
+		// project's recorded targets before rendering.
+		TargetCLI: true,
+		TargetMCP: true,
 	}
 
 	for _, s := range api.Servers {
@@ -2292,6 +2370,67 @@ func promptSelect(question string, options []selectOption, defaultValue string, 
 	return value, nil
 }
 
+// targetSelectOptions are the surface choices offered by the wizard and the
+// legacy-config migration prompt. Values map to normalized target lists.
+func targetSelectOptions() []selectOption {
+	return []selectOption{
+		{Value: "cli+mcp", Label: "CLI + MCP server (recommended)", Description: "Generate both the command-line surface and the MCP server."},
+		{Value: "cli", Label: "CLI only", Description: "Generate only the command-line surface."},
+		{Value: "mcp", Label: "MCP server only", Description: "Generate an MCP-first binary (bare invocation serves stdio)."},
+	}
+}
+
+// targetsFromSelection maps a target-select value to a normalized target list.
+func targetsFromSelection(value string) []string {
+	switch value {
+	case targetCLI:
+		return []string{targetCLI}
+	case targetMCP:
+		return []string{targetMCP}
+	default:
+		return []string{targetCLI, targetMCP}
+	}
+}
+
+// promptTargets asks the "What should this project generate?" question and
+// returns the normalized target list.
+func promptTargets(color bool) ([]string, error) {
+	value, err := promptSelect("What should this project generate?", targetSelectOptions(), "cli+mcp", color)
+	if err != nil {
+		return nil, err
+	}
+	return targetsFromSelection(value), nil
+}
+
+// ensureConfigTargets resolves the generation targets for an existing project
+// config that predates the targets field. It NEVER prompts during generate/sync
+// when the config already records targets. For a legacy config (no targets):
+// interactive stdin asks the surface question once and persists it; otherwise it
+// defaults to both surfaces and emits a single stderr warning.
+func ensureConfigTargets(config *ProjectConfig) error {
+	if config == nil || len(config.Targets) > 0 {
+		return nil
+	}
+
+	if isInteractiveInput() {
+		color := shouldColorizeWizard()
+		previousDisableColor := surveycore.DisableColor
+		surveycore.DisableColor = !color
+		defer func() { surveycore.DisableColor = previousDisableColor }()
+
+		targets, err := promptTargets(color)
+		if err != nil {
+			return err
+		}
+		config.Targets = targets
+		return nil
+	}
+
+	config.Targets = defaultTargets()
+	fmt.Fprintln(os.Stderr, "warning: .bartolo.json has no \"targets\"; defaulting to CLI + MCP. Set \"targets\" (or run `bartolo init --targets ...`) to choose surfaces.")
+	return nil
+}
+
 func printWizardHeader(color bool) {
 	fmt.Println()
 	fmt.Println(wizardTitle(color, "Bartolo Init Wizard"))
@@ -2320,6 +2459,7 @@ func printWizardSummary(color bool, config *ProjectConfig) {
 	fmt.Printf("%s %s\n", wizardAccent(color, "Env prefix:"), config.EnvPrefix)
 	fmt.Printf("%s %s\n", wizardAccent(color, "API key env var:"), config.APIKeyEnvVar)
 	fmt.Printf("%s %s\n", wizardAccent(color, "Default output:"), config.DefaultOutputFormat)
+	fmt.Printf("%s %s\n", wizardAccent(color, "Targets:"), strings.Join(config.effectiveTargets(), ", "))
 	fmt.Println()
 }
 
@@ -2388,6 +2528,9 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 	defaultFormat, _ := cmd.Flags().GetString("default-format")
 	defaultFormat = normalizeOutputFormat(defaultFormat)
 
+	targetsFlag, _ := cmd.Flags().GetString("targets")
+	var targets []string
+
 	interactive, _ := cmd.Flags().GetBool("interactive")
 	if len(args) == 0 {
 		interactive = true
@@ -2413,7 +2556,7 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 		}
 
 		var err error
-		printWizardStep(color, 1, 3, "CLI identity", "Pick the install name your users will actually type.")
+		printWizardStep(color, 1, 4, "CLI identity", "Pick the install name your users will actually type.")
 		name, err = promptText("What is the name of your CLI?", defaultName, func(value string) error {
 			if strings.TrimSpace(value) == "" {
 				return fmt.Errorf("CLI name cannot be empty")
@@ -2435,7 +2578,7 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 
 		modulePath = firstNonEmpty(modulePath, defaultModulePath(name))
 
-		printWizardStep(color, 2, 3, "Auth defaults", "You can keep the suggested API key env var or replace it with your own convention.")
+		printWizardStep(color, 2, 4, "Auth defaults", "You can keep the suggested API key env var or replace it with your own convention.")
 		apiKeyEnvVar, err = promptText("API key env var", apiKeyEnvVar, func(value string) error {
 			if !isValidEnvVarName(value) {
 				return fmt.Errorf("%s", wizardError(color, "Use only letters, numbers, and underscores, and do not start with a number."))
@@ -2447,12 +2590,19 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 		}
 		fmt.Println()
 
-		printWizardStep(color, 3, 3, "Output format", "Choose the default rendering style for generated CLIs. Use the arrow keys to move and Enter to confirm.")
+		printWizardStep(color, 3, 4, "Output format", "Choose the default rendering style for generated CLIs. Use the arrow keys to move and Enter to confirm.")
 		defaultFormat, err = promptSelect("Default output format", []selectOption{
 			{Value: "json", Label: "json", Description: "Best for agents and automation."},
 			{Value: "yaml", Label: "yaml", Description: "Easy to scan in terminals."},
 			{Value: "toon", Label: "toon", Description: "Human-oriented serialization of data for LLMs."},
 		}, defaultFormat, color)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Println()
+
+		printWizardStep(color, 4, 4, "Generation targets", "Choose which surfaces to generate. Use the arrow keys to move and Enter to confirm.")
+		targets, err = promptTargets(color)
 		if err != nil {
 			return nil, err
 		}
@@ -2470,11 +2620,20 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 			EnvPrefix:           summaryEnvPrefix,
 			DefaultOutputFormat: defaultFormat,
 			APIKeyEnvVar:        apiKeyEnvVar,
+			Targets:             targets,
 		})
 	}
 
 	if name == "" {
 		return nil, fmt.Errorf("missing app name")
+	}
+
+	if targets == nil {
+		var err error
+		targets, err = parseTargetsFlag(targetsFlag)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	envPrefix := strings.ToUpper(strings.ReplaceAll(slug(name), "-", "_"))
@@ -2501,6 +2660,7 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 		EnvPrefix:           envPrefix,
 		DefaultOutputFormat: defaultFormat,
 		APIKeyEnvVar:        apiKeyEnvVar,
+		Targets:             targets,
 	}, nil
 }
 
@@ -2899,39 +3059,44 @@ func writeGeneratedCommandFiles(api *OpenAPI, shortName string) {
 		[]byte(renderTemplate("templates/generated_register.tmpl", commandTemplateFuncs(), api)),
 	)
 
-	// CLI command generation only sees the CLI-visible operations
-	// (x-bartolo-cli-ignore ops are dropped here but survive in the IR above).
-	rootOps := cliVisibleOperations(api.Operations)
-	rootCommands := &CommandsTemplateData{
-		API:        api,
-		Operations: rootOps,
-		Waiters:    api.Waiters,
-		NeedsFmt:   commandFileNeedsFmt(rootOps),
-	}
-	writeFormattedFile(
-		filepath.Join("cli", "generated", "root_commands.go"),
-		[]byte(renderTemplate("templates/generated_root_commands.tmpl", commandTemplateFuncs(), rootCommands)),
-	)
-
-	for _, group := range api.Groups {
-		groupOps := cliVisibleOperations(group.Operations)
-		if len(groupOps) == 0 {
-			// Every operation in this group is CLI-excluded; skip the group
-			// command file entirely so we don't emit an empty group command.
-			// The register template guards the matching register call.
-			continue
-		}
-		groupData := &CommandsTemplateData{
+	// CLI command generation only runs when the CLI surface is a target. In
+	// MCP-only mode no root_commands.go / group command files are emitted, and
+	// the register template omits the matching register calls.
+	if api.TargetCLI {
+		// CLI command generation only sees the CLI-visible operations
+		// (x-bartolo-cli-ignore ops are dropped here but survive in the IR above).
+		rootOps := cliVisibleOperations(api.Operations)
+		rootCommands := &CommandsTemplateData{
 			API:        api,
-			Group:      group,
-			Operations: groupOps,
-			NeedsFmt:   commandFileNeedsFmt(groupOps),
+			Operations: rootOps,
+			Waiters:    api.Waiters,
+			NeedsFmt:   commandFileNeedsFmt(rootOps),
 		}
-		filename := filepath.Join("cli", "generated", slug(group.CLIName)+"_commands.go")
 		writeFormattedFile(
-			filename,
-			[]byte(renderTemplate("templates/generated_group_commands.tmpl", commandTemplateFuncs(), groupData)),
+			filepath.Join("cli", "generated", "root_commands.go"),
+			[]byte(renderTemplate("templates/generated_root_commands.tmpl", commandTemplateFuncs(), rootCommands)),
 		)
+
+		for _, group := range api.Groups {
+			groupOps := cliVisibleOperations(group.Operations)
+			if len(groupOps) == 0 {
+				// Every operation in this group is CLI-excluded; skip the group
+				// command file entirely so we don't emit an empty group command.
+				// The register template guards the matching register call.
+				continue
+			}
+			groupData := &CommandsTemplateData{
+				API:        api,
+				Group:      group,
+				Operations: groupOps,
+				NeedsFmt:   commandFileNeedsFmt(groupOps),
+			}
+			filename := filepath.Join("cli", "generated", slug(group.CLIName)+"_commands.go")
+			writeFormattedFile(
+				filename,
+				[]byte(renderTemplate("templates/generated_group_commands.tmpl", commandTemplateFuncs(), groupData)),
+			)
+		}
 	}
 
 	if api.HasMCPTools() {
@@ -3005,6 +3170,13 @@ func generateFromSpec(specPath string) error {
 
 	templateData := ProcessAPI(shortName, swagger)
 	config := loadProjectConfig()
+	if config != nil {
+		if err := ensureConfigTargets(config); err != nil {
+			return err
+		}
+		templateData.TargetCLI = config.TargetCLI()
+		templateData.TargetMCP = config.TargetMCP()
+	}
 	enrichOpenAPIForREADME(templateData, config)
 	writeGeneratedCommandFiles(templateData, shortName)
 	writeGeneratedREADME(templateData)
@@ -3025,6 +3197,12 @@ func syncCmd(cmd *cobra.Command, args []string) {
 	config.BartoloVersion = bartoloVersion
 	if config.AppVersion == "" {
 		config.AppVersion = "0.1.0"
+	}
+	// Resolve targets once here (prompting/warning for legacy configs) and
+	// persist them via writeProjectScaffold, so the generateFromSpec call below
+	// reloads a config that already records targets and never re-prompts.
+	if err := ensureConfigTargets(config); err != nil {
+		log.Fatal(err)
 	}
 	if err := writeProjectScaffold(config, true); err != nil {
 		log.Fatal(err)
@@ -3070,6 +3248,7 @@ func main() {
 	initCommand.Flags().String("bartolo-path", "", "Local path to the bartolo repo to use via go.mod replace during development")
 	initCommand.Flags().String("api-key-env-var", "", "Custom API key environment variable for generated CLIs")
 	initCommand.Flags().String("default-format", "json", "Default output format for generated CLIs [json, yaml, toon]")
+	initCommand.Flags().String("targets", "", "Comma-separated generation targets [cli, mcp] (default: both)")
 	root.AddCommand(initCommand)
 
 	root.AddCommand(&cobra.Command{

@@ -78,6 +78,7 @@ func TestGenerateCLIIgnoredOpBuildsMCPToolAndClientFunc(t *testing.T) {
 		EnvPrefix:           "CLIIGNORE",
 		DefaultOutputFormat: "json",
 		APIKeyEnvVar:        "CLIIGNORE_API_KEY",
+		Targets:             []string{"cli", "mcp"},
 	}
 	if err := writeProjectScaffold(config, false); err != nil {
 		t.Fatalf("writeProjectScaffold: %v", err)

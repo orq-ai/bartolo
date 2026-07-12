@@ -721,11 +721,12 @@ func (o *OpenAPI) includedMCPOperations() []*Operation {
 	return out
 }
 
-// HasMCPTools reports whether at least one operation is exposed as an MCP tool.
-// The generated register.go only mounts the `mcp` command (and the generator
-// only emits mcp_tools.go) when this is true.
+// HasMCPTools reports whether the MCP surface should be emitted: the MCP target
+// must be enabled AND at least one operation must be exposed as an MCP tool. The
+// generated register.go only mounts the `mcp` command (and the generator only
+// emits mcp_tools.go) when this is true.
 func (o *OpenAPI) HasMCPTools() bool {
-	return len(o.includedMCPOperations()) > 0
+	return o.TargetMCP && len(o.includedMCPOperations()) > 0
 }
 
 // MCPInstructions builds the server instructions string surfaced to MCP
