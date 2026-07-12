@@ -178,6 +178,21 @@ type AuthDoc struct {
 	ProfileCommand  string
 	Summary         string
 	ProfileRequired bool
+	// Schemes documents each recognized security scheme (populated for
+	// multi-scheme and OAuth2 specs). When empty, the single-scheme fields
+	// above drive the README auth section.
+	Schemes []*AuthDocScheme
+	// ManualNotes lists schemes that could not be auto-wired and need manual
+	// setup (openIdConnect, http basic, etc.).
+	ManualNotes []string
+}
+
+// AuthDocScheme documents a single security scheme in a generated README.
+type AuthDocScheme struct {
+	Name     string
+	Kind     string
+	TokenURL string
+	Default  bool
 }
 
 // READMEExample is a copy-pasteable command example for a generated CLI.
@@ -206,9 +221,27 @@ type OpenAPI struct {
 	Operations   []*Operation
 	Waiters      []*Waiter
 	AuthInit     string
-	AuthDoc      *AuthDoc
-	CommandName  string
-	Examples     []*READMEExample
+	// NeedsAPIKeyImport / NeedsOAuthImport tell the client template which auth
+	// runtime packages the emitted AuthInit lines actually reference.
+	NeedsAPIKeyImport bool
+	NeedsOAuthImport  bool
+	// AuthSchemes captures the recognized security schemes emitted into
+	// AuthInit so README generation can document each one.
+	AuthSchemes []*AuthScheme
+	AuthDoc     *AuthDoc
+	CommandName string
+	Examples    []*READMEExample
+}
+
+// AuthScheme is a recognized (or explicitly unsupported) OpenAPI security
+// scheme captured during generation for README documentation.
+type AuthScheme struct {
+	Name      string // OpenAPI security scheme name
+	Kind      string // human-readable kind, e.g. "Bearer token", "OAuth2 client credentials"
+	TokenURL  string // OAuth2 token endpoint, when applicable
+	Default   bool   // true for the scheme registered as the default auth type
+	Supported bool   // false → documented as requiring manual setup
+	Manual    string // reason/instructions when unsupported
 }
 
 // CommandsTemplateData describes a generated commands file for either the
@@ -234,13 +267,17 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 		apiDescription = extStr(api.Info.Extensions[ExtDescription])
 	}
 
+	authInit, needsAPIKey, needsOAuth, authSchemes := buildAuthInit(api)
 	result := &OpenAPI{
-		Name:         apiName,
-		GoName:       toGoName(shortName, false),
-		PublicGoName: toGoName(shortName, true),
-		Title:        api.Info.Title,
-		Description:  escapeString(apiDescription),
-		AuthInit:     getAuthInit(api),
+		Name:              apiName,
+		GoName:            toGoName(shortName, false),
+		PublicGoName:      toGoName(shortName, true),
+		Title:             api.Info.Title,
+		Description:       escapeString(apiDescription),
+		AuthInit:          authInit,
+		NeedsAPIKeyImport: needsAPIKey,
+		NeedsOAuthImport:  needsOAuth,
+		AuthSchemes:       authSchemes,
 	}
 
 	for _, s := range api.Servers {
@@ -1481,68 +1518,236 @@ func effectiveBodySchema(schema *openapi3.Schema) (*openapi3.Schema, bool) {
 	return schema, nullable
 }
 
-func getAuthInit(api *openapi3.T) string {
-	_, scheme := getRequiredSecurityScheme(api)
-	if scheme == nil {
-		return ""
+// collectSecuritySchemeNames returns every distinct security scheme name
+// referenced by the API's top-level security and any operation-level security.
+// `ordered` preserves the order those names first appear in the top-level
+// api.Security list (used to pick the default auth type); `all` is the full set
+// including operation-only references.
+func collectSecuritySchemeNames(api *openapi3.T) (ordered []string, all []string) {
+	if api == nil {
+		return nil, nil
 	}
+
+	seenAll := make(map[string]bool)
+	seenOrdered := make(map[string]bool)
+
+	addOrdered := func(reqs openapi3.SecurityRequirements) {
+		for _, req := range reqs {
+			// A requirement object can list several schemes; sort its keys for
+			// determinism (Go map iteration order is random).
+			names := make([]string, 0, len(req))
+			for name := range req {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				if !seenOrdered[name] {
+					seenOrdered[name] = true
+					ordered = append(ordered, name)
+				}
+			}
+		}
+	}
+	addAll := func(reqs openapi3.SecurityRequirements) {
+		for _, req := range reqs {
+			for name := range req {
+				if !seenAll[name] {
+					seenAll[name] = true
+					all = append(all, name)
+				}
+			}
+		}
+	}
+
+	addOrdered(api.Security)
+	addAll(api.Security)
+	if api.Paths != nil {
+		for _, item := range api.Paths.Map() {
+			for _, operation := range item.Operations() {
+				if operation.Security != nil {
+					addAll(*operation.Security)
+				}
+			}
+		}
+	}
+
+	sort.Strings(all)
+	return ordered, all
+}
+
+// buildAuthInit emits the runtime auth registration code injected into the
+// generated client's initGeneratedRuntime(). It collects every recognized
+// security scheme (top-level + operation-level), emits one typed init per
+// scheme, registers a default auth type, and reports which runtime packages the
+// emitted code references so the template can import them conditionally.
+func buildAuthInit(api *openapi3.T) (authInit string, needsAPIKey bool, needsOAuth bool, schemes []*AuthScheme) {
+	if api == nil || api.Components == nil || api.Components.SecuritySchemes == nil {
+		return "", false, false, nil
+	}
+
+	ordered, all := collectSecuritySchemeNames(api)
+	if len(all) == 0 {
+		return "", false, false, nil
+	}
+
+	var lines []string
+	var emittedNames []string
+
+	for _, name := range all {
+		schemeRef := api.Components.SecuritySchemes[name]
+		if schemeRef == nil || schemeRef.Value == nil {
+			continue
+		}
+		scheme := schemeRef.Value
+		line, kind, tokenURL, pkg := authInitLine(name, scheme)
+		if line == "" {
+			// Unsupported scheme: record it for the README as manual setup.
+			schemes = append(schemes, &AuthScheme{
+				Name:      name,
+				Kind:      unsupportedSchemeKind(scheme),
+				Supported: false,
+				Manual:    unsupportedSchemeReason(scheme),
+			})
+			continue
+		}
+
+		lines = append(lines, line)
+		emittedNames = append(emittedNames, name)
+		switch pkg {
+		case "apikey":
+			needsAPIKey = true
+		case "oauth":
+			needsOAuth = true
+		}
+		schemes = append(schemes, &AuthScheme{
+			Name:      name,
+			Kind:      kind,
+			TokenURL:  tokenURL,
+			Supported: true,
+		})
+	}
+
+	if len(emittedNames) == 0 {
+		// Only unsupported schemes were present. Keep AuthInit empty (unchanged
+		// behavior) but retain the manual-setup notes for the README.
+		return "", false, false, schemes
+	}
+
+	// Pick the default auth type: the first scheme in the top-level security
+	// order that we actually emitted, else the first emitted scheme (already
+	// sorted, since `all` is sorted).
+	defaultName := ""
+	for _, name := range ordered {
+		if containsString(emittedNames, name) {
+			defaultName = name
+			break
+		}
+	}
+	if defaultName == "" {
+		defaultName = emittedNames[0]
+	}
+
+	lines = append(lines, fmt.Sprintf("bartolocli.SetDefaultAuthType(%q)", defaultName))
+
+	for _, s := range schemes {
+		if s.Name == defaultName {
+			s.Default = true
+		}
+	}
+
+	return strings.Join(lines, "\n"), needsAPIKey, needsOAuth, schemes
+}
+
+// authInitLine returns the runtime init call for one security scheme, a
+// human-readable kind, an optional OAuth token URL, and which runtime package
+// ("apikey" or "oauth") the call references. It returns an empty line for
+// unsupported schemes.
+func authInitLine(name string, scheme *openapi3.SecurityScheme) (line, kind, tokenURL, pkg string) {
 	switch scheme.Type {
 	case "apiKey":
 		switch scheme.In {
 		case "header":
-			return fmt.Sprintf("apikey.Init(%q, apikey.LocationHeader)", scheme.Name)
+			return fmt.Sprintf("apikey.InitWithType(%q, %q, apikey.LocationHeader)", name, scheme.Name), "API key (header)", "", "apikey"
 		case "query":
-			return fmt.Sprintf("apikey.Init(%q, apikey.LocationQuery)", scheme.Name)
+			return fmt.Sprintf("apikey.InitWithType(%q, %q, apikey.LocationQuery)", name, scheme.Name), "API key (query)", "", "apikey"
 		case "cookie":
-			return fmt.Sprintf("apikey.Init(%q, apikey.LocationCookie)", scheme.Name)
+			return fmt.Sprintf("apikey.InitWithType(%q, %q, apikey.LocationCookie)", name, scheme.Name), "API key (cookie)", "", "apikey"
 		}
 	case "http":
 		if strings.EqualFold(scheme.Scheme, "bearer") {
-			return "apikey.InitBearer(\"Authorization\")"
+			return fmt.Sprintf("apikey.InitBearerWithType(%q, \"Authorization\")", name), "Bearer token", "", "apikey"
+		}
+	case "oauth2":
+		if scheme.Flows != nil {
+			if flow := scheme.Flows.ClientCredentials; flow != nil {
+				return fmt.Sprintf("oauth.InitClientCredentialsWithType(%q, %q%s)", name, flow.TokenURL, oauthScopesArg(flow)),
+					"OAuth2 client credentials", flow.TokenURL, "oauth"
+			}
+			if flow := scheme.Flows.AuthorizationCode; flow != nil {
+				return fmt.Sprintf("oauth.InitAuthCodeWithType(%q, \"\", %q, %q%s)", name, flow.AuthorizationURL, flow.TokenURL, oauthScopesArg(flow)),
+					"OAuth2 authorization code", flow.TokenURL, "oauth"
+			}
 		}
 	}
 
-	return ""
+	return "", "", "", ""
 }
 
-func getRequiredSecurityScheme(api *openapi3.T) (string, *openapi3.SecurityScheme) {
-	if api == nil || api.Components == nil || api.Components.SecuritySchemes == nil {
-		return "", nil
+// oauthScopesArg renders the trailing `, oauth.Scopes(...)` option for an OAuth
+// flow, or "" when the flow declares no scopes.
+func oauthScopesArg(flow *openapi3.OAuthFlow) string {
+	if flow == nil || len(flow.Scopes) == 0 {
+		return ""
 	}
+	scopes := make([]string, 0, len(flow.Scopes))
+	for scope := range flow.Scopes {
+		scopes = append(scopes, scope)
+	}
+	sort.Strings(scopes)
+	quoted := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		quoted = append(quoted, fmt.Sprintf("%q", scope))
+	}
+	return ", oauth.Scopes(" + strings.Join(quoted, ", ") + ")"
+}
 
-	required := make(map[string]bool)
-	addRequirements := func(reqs openapi3.SecurityRequirements) {
-		for _, req := range reqs {
-			for name := range req {
-				required[name] = true
-			}
+func unsupportedSchemeKind(scheme *openapi3.SecurityScheme) string {
+	switch scheme.Type {
+	case "openIdConnect":
+		return "OpenID Connect"
+	case "http":
+		if strings.EqualFold(scheme.Scheme, "basic") {
+			return "HTTP Basic"
+		}
+		return "HTTP " + scheme.Scheme
+	case "oauth2":
+		return "OAuth2 (unsupported flow)"
+	}
+	return scheme.Type
+}
+
+func unsupportedSchemeReason(scheme *openapi3.SecurityScheme) string {
+	switch scheme.Type {
+	case "openIdConnect":
+		return "OpenID Connect discovery is not auto-wired; configure the token endpoint manually."
+	case "http":
+		if strings.EqualFold(scheme.Scheme, "basic") {
+			return "HTTP Basic auth is not auto-wired; set credentials manually."
+		}
+		return "This HTTP auth scheme is not auto-wired; configure it manually."
+	case "oauth2":
+		return "Only clientCredentials and authorizationCode OAuth2 flows are auto-wired; configure this flow manually."
+	}
+	return "This security scheme is not auto-wired; configure it manually."
+}
+
+func containsString(values []string, target string) bool {
+	for _, v := range values {
+		if v == target {
+			return true
 		}
 	}
-
-	addRequirements(api.Security)
-	for _, item := range api.Paths.Map() {
-		for _, operation := range item.Operations() {
-			if operation.Security != nil {
-				addRequirements(*operation.Security)
-			}
-		}
-	}
-
-	if len(required) != 1 {
-		return "", nil
-	}
-
-	var schemeName string
-	for name := range required {
-		schemeName = name
-	}
-
-	schemeRef := api.Components.SecuritySchemes[schemeName]
-	if schemeRef == nil || schemeRef.Value == nil {
-		return "", nil
-	}
-
-	return schemeName, schemeRef.Value
+	return false
 }
 
 func uniqueStrings(values []string) []string {
@@ -2319,34 +2524,99 @@ func getAuthDocFromProject(api *OpenAPI, project *ProjectConfig) *AuthDoc {
 }
 
 func getAuthDocFromSpec(api *OpenAPI, envPrefix string) *AuthDoc {
-	// This wrapper exists so README generation can use the env prefix written by `init`.
-	// We reconstruct from the original auth init marker rather than trying to parse it later.
-	switch api.AuthInit {
-	case "":
+	// Documentation is derived from the recognized security schemes captured
+	// during generation (api.AuthSchemes), so OAuth2 and multi-scheme specs get
+	// accurate README auth sections rather than a misleading "API key" default.
+	schemes := api.AuthSchemes
+	if len(schemes) == 0 {
 		return &AuthDoc{
 			Enabled: false,
 			Summary: "This CLI does not require configured authentication metadata from the OpenAPI spec.",
 		}
-	case "apikey.InitBearer(\"Authorization\")":
-		return &AuthDoc{
-			Enabled:         true,
-			Kind:            "Bearer token",
-			EnvVars:         uniqueStrings([]string{envPrefix + "_TOKEN", envPrefix + "_API_KEY", envPrefix + "_AUTHORIZATION"}),
-			ProfileCommand:  "<binary> auth setup",
-			ProfileRequired: true,
-			Summary:         "The generated CLI supports bearer token authentication from environment variables or a stored profile.",
+	}
+
+	supported := make([]*AuthScheme, 0, len(schemes))
+	var manualNotes []string
+	for _, s := range schemes {
+		if s.Supported {
+			supported = append(supported, s)
+			continue
 		}
-	default:
-		// Any other auto-generated auth init today is API-key based.
+		manualNotes = append(manualNotes, fmt.Sprintf("`%s` (%s): %s", s.Name, s.Kind, s.Manual))
+	}
+
+	// No auto-wired scheme: document the manual setup only.
+	if len(supported) == 0 {
 		return &AuthDoc{
-			Enabled:         true,
-			Kind:            "API key",
-			EnvVars:         uniqueStrings([]string{envPrefix + "_API_KEY"}),
-			ProfileCommand:  "<binary> auth setup",
-			ProfileRequired: true,
-			Summary:         "The generated CLI supports API key authentication from either environment variables or a stored profile.",
+			Enabled:     true,
+			Summary:     "This CLI's OpenAPI spec declares authentication that Bartolo could not auto-wire. Configure it manually before making API calls.",
+			ManualNotes: manualNotes,
 		}
 	}
+
+	// Single supported scheme with no manual notes keeps the classic, compact
+	// README auth section (backward compatible with the bearer/api-key output).
+	if len(supported) == 1 && len(manualNotes) == 0 {
+		return singleSchemeAuthDoc(supported[0], envPrefix)
+	}
+
+	// Multiple schemes (or a mix with manual ones): document each scheme and
+	// which one is the default.
+	doc := &AuthDoc{
+		Enabled:         true,
+		ProfileCommand:  "<binary> auth setup",
+		ProfileRequired: true,
+		ManualNotes:     manualNotes,
+		Summary:         "The generated CLI supports multiple authentication schemes. The default scheme is used when no profile selects a type explicitly.",
+	}
+	var envVars []string
+	for _, s := range supported {
+		doc.Schemes = append(doc.Schemes, &AuthDocScheme{
+			Name:     s.Name,
+			Kind:     s.Kind,
+			TokenURL: s.TokenURL,
+			Default:  s.Default,
+		})
+		envVars = append(envVars, schemeEnvVars(s, envPrefix)...)
+	}
+	doc.EnvVars = uniqueStrings(envVars)
+	return doc
+}
+
+func singleSchemeAuthDoc(s *AuthScheme, envPrefix string) *AuthDoc {
+	doc := &AuthDoc{
+		Enabled:         true,
+		Kind:            s.Kind,
+		ProfileCommand:  "<binary> auth setup",
+		ProfileRequired: true,
+	}
+
+	switch {
+	case strings.HasPrefix(s.Kind, "OAuth2"):
+		summary := "The generated CLI authenticates with " + s.Kind + " using a stored profile. Run `auth setup` to save the client ID/secret."
+		if s.TokenURL != "" {
+			summary += " Token endpoint: " + s.TokenURL + "."
+		}
+		doc.Summary = summary
+	case s.Kind == "Bearer token":
+		doc.EnvVars = uniqueStrings([]string{envPrefix + "_TOKEN", envPrefix + "_API_KEY", envPrefix + "_AUTHORIZATION"})
+		doc.Summary = "The generated CLI supports bearer token authentication from environment variables or a stored profile."
+	default:
+		doc.EnvVars = uniqueStrings([]string{envPrefix + "_API_KEY"})
+		doc.Summary = "The generated CLI supports API key authentication from either environment variables or a stored profile."
+	}
+
+	return doc
+}
+
+func schemeEnvVars(s *AuthScheme, envPrefix string) []string {
+	switch {
+	case s.Kind == "Bearer token":
+		return []string{envPrefix + "_TOKEN", envPrefix + "_API_KEY", envPrefix + "_AUTHORIZATION"}
+	case strings.HasPrefix(s.Kind, "API key"):
+		return []string{envPrefix + "_API_KEY"}
+	}
+	return nil
 }
 
 func buildREADMEExamples(api *OpenAPI) []*READMEExample {

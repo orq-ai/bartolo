@@ -47,6 +47,14 @@ Check the generated setup before making requests:
 {{- if .AuthDoc.Enabled }}
 
 {{ .AuthDoc.Summary }}
+{{- if .AuthDoc.Schemes }}
+
+Security schemes:
+{{- range .AuthDoc.Schemes }}
+- `{{ .Name }}` — {{ .Kind }}{{ if .Default }} (default){{ end }}{{ if .TokenURL }}; token endpoint `{{ .TokenURL }}`{{ end }}
+{{- end }}
+{{- end }}
+{{- if .AuthDoc.EnvVars }}
 
 Environment variables:
 {{- range .AuthDoc.EnvVars }}
@@ -54,12 +62,22 @@ Environment variables:
 {{- end }}
 
 Project-local `.env` and `.env.local` files are loaded automatically if present.
+{{- end }}
+{{- if .AuthDoc.ProfileCommand }}
 
 Profile setup:
 
 ```sh
 {{ .AuthDoc.ProfileCommand }}
 ```
+{{- end }}
+{{- if .AuthDoc.ManualNotes }}
+
+The following schemes require manual configuration:
+{{- range .AuthDoc.ManualNotes }}
+- {{ . }}
+{{- end }}
+{{- end }}
 {{- else }}
 
 {{ .AuthDoc.Summary }}

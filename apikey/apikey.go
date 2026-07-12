@@ -148,16 +148,29 @@ func defaultEnvVars(name string, prefix string) []string {
 // have called `cli.Init()`. Passing `extra` values will set additional custom
 // keys to store for each profile.
 func Init(name string, in Location, extra ...string) {
-	initWithPrefix(name, in, "", extra...)
+	initWithPrefix("", name, in, "", extra...)
 }
 
 // InitBearer configures a standard Authorization: Bearer <token> flow.
 func InitBearer(name string, extra ...string) {
-	initWithPrefix(name, LocationHeader, "Bearer ", extra...)
+	initWithPrefix("", name, LocationHeader, "Bearer ", extra...)
 }
 
-func initWithPrefix(name string, in Location, prefix string, extra ...string) {
-	cli.UseAuth("", &Handler{
+// InitWithType is like Init but registers the handler under an explicit auth
+// type name so that multiple auth schemes can coexist in a single CLI. Use an
+// empty type name only for single-scheme CLIs (see Init).
+func InitWithType(typeName string, name string, in Location, extra ...string) {
+	initWithPrefix(typeName, name, in, "", extra...)
+}
+
+// InitBearerWithType is like InitBearer but registers the handler under an
+// explicit auth type name so that multiple auth schemes can coexist.
+func InitBearerWithType(typeName string, name string, extra ...string) {
+	initWithPrefix(typeName, name, LocationHeader, "Bearer ", extra...)
+}
+
+func initWithPrefix(typeName string, name string, in Location, prefix string, extra ...string) {
+	cli.UseAuth(typeName, &Handler{
 		Name:    name,
 		In:      in,
 		Keys:    extra,

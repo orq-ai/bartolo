@@ -49,3 +49,36 @@ func TestSaveAuthProfile(t *testing.T) {
 		t.Fatalf("credentials.json not written: %v", err)
 	}
 }
+
+func TestResolveAuthHandlerDefault(t *testing.T) {
+	AuthHandlers = make(map[string]AuthHandler)
+	defaultAuthType = ""
+	t.Cleanup(func() {
+		AuthHandlers = make(map[string]AuthHandler)
+		defaultAuthType = ""
+	})
+
+	AuthHandlers["alpha"] = stubAuthHandler{}
+	AuthHandlers["beta"] = stubAuthHandler{}
+
+	// Two typed handlers, typeless profile, no default → nil (error preserved).
+	if name, handler := resolveAuthHandler(map[string]string{}); handler != nil || name != "" {
+		t.Fatalf("expected nil handler without default, got %q/%v", name, handler)
+	}
+
+	// Explicit profile type wins.
+	if name, handler := resolveAuthHandler(map[string]string{"type": "beta"}); name != "beta" || handler == nil {
+		t.Fatalf("expected beta handler for explicit type, got %q/%v", name, handler)
+	}
+
+	// Default handler used for a typeless profile.
+	SetDefaultAuthType("alpha")
+	if name, handler := resolveAuthHandler(map[string]string{}); name != "alpha" || handler == nil {
+		t.Fatalf("expected alpha handler from default, got %q/%v", name, handler)
+	}
+
+	// Explicit type still wins over a configured default.
+	if name, handler := resolveAuthHandler(map[string]string{"type": "beta"}); name != "beta" || handler == nil {
+		t.Fatalf("expected explicit type to win over default, got %q/%v", name, handler)
+	}
+}

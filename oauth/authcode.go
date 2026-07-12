@@ -110,14 +110,22 @@ func (ac *AuthorizationCodeTokenSource) Token() (*oauth2.Token, error) {
 	}()
 
 	// Open auth URL in browser, print for manual use in case open fails.
-	fmt.Println("Open your browser to log in using the URL:")
-	fmt.Println(url)
+	// These MUST go to stderr: under stdio MCP transport stdout carries the
+	// JSON-RPC protocol and any stray write corrupts the stream.
+	fmt.Fprintln(cli.Stderr, "Open your browser to log in using the URL:")
+	fmt.Fprintln(cli.Stderr, url)
 	open(url)
 
 	// Get code from handler, exchange it for a token, and then return it. This
-	// channel read blocks until one code becomes available.
-	// There is currently no timeout.
-	code := <-codeChan
+	// channel read blocks until one code becomes available or the timeout
+	// elapses (guarding against a user who never completes the browser flow).
+	var code string
+	select {
+	case code = <-codeChan:
+	case <-time.After(5 * time.Minute):
+		s.Shutdown(context.Background())
+		return nil, fmt.Errorf("timed out waiting for authorization code after 5 minutes")
+	}
 	s.Shutdown(context.Background())
 
 	payload := fmt.Sprintf("grant_type=authorization_code&client_id=%s&code_verifier=%s&code=%s&redirect_uri=http://localhost:8484/", ac.ClientID, verifier, code)
@@ -150,6 +158,15 @@ func (h *AuthCodeHandler) OnRequest(log *zerolog.Logger, request *http.Request) 
 		// or generate a new one from the issuing server.
 		profile := cli.GetProfile()
 
+		// The client ID may be supplied at construction time (single-scheme
+		// CLIs) or stored per-profile via `auth setup`. Prefer the stored
+		// profile value when present so generated CLIs can emit an empty
+		// constructor arg and resolve the client ID at runtime.
+		clientID := h.ClientID
+		if stored := profile["client_id"]; stored != "" {
+			clientID = stored
+		}
+
 		params := url.Values{}
 		if h.getParamsFunc != nil {
 			// Backward-compatibility with old call style, only used internally.
@@ -160,7 +177,7 @@ func (h *AuthCodeHandler) OnRequest(log *zerolog.Logger, request *http.Request) 
 		}
 
 		source := &AuthorizationCodeTokenSource{
-			ClientID:       h.ClientID,
+			ClientID:       clientID,
 			AuthorizeURL:   h.AuthorizeURL,
 			TokenURL:       h.TokenURL,
 			EndpointParams: &params,
@@ -171,7 +188,7 @@ func (h *AuthCodeHandler) OnRequest(log *zerolog.Logger, request *http.Request) 
 		// it to wrap the auth code token source with a refreshing source.
 		refreshKey := "profiles." + viper.GetString("profile") + ".refresh"
 		refreshSource := RefreshTokenSource{
-			ClientID:       h.ClientID,
+			ClientID:       clientID,
 			TokenURL:       h.TokenURL,
 			EndpointParams: &params,
 			RefreshToken:   cli.Cache.GetString(refreshKey),
@@ -190,6 +207,17 @@ func (h *AuthCodeHandler) OnRequest(log *zerolog.Logger, request *http.Request) 
 // profile-related extra variables to store them alongside the default profile
 // information.
 func InitAuthCode(clientID string, authorizeURL string, tokenURL string, options ...func(*config) error) {
+	InitAuthCodeWithType("", clientID, authorizeURL, tokenURL, options...)
+}
+
+// InitAuthCodeWithType is like InitAuthCode but registers the handler under an
+// explicit auth type name so that multiple auth schemes can coexist in a single
+// CLI. Use an empty type name only for single-scheme CLIs.
+//
+// The client ID may be passed here or left empty and supplied per-profile via
+// `auth setup` (the "client-id" profile key). A stored profile value takes
+// precedence over the constructor argument.
+func InitAuthCodeWithType(typeName string, clientID string, authorizeURL string, tokenURL string, options ...func(*config) error) {
 	var c config
 
 	for _, option := range options {
@@ -203,7 +231,9 @@ func InitAuthCode(clientID string, authorizeURL string, tokenURL string, options
 		AuthorizeURL: authorizeURL,
 		TokenURL:     tokenURL,
 		Scopes:       c.scopes,
-		Keys:         c.extra,
+		// Always store a client-id in the profile so `auth setup` prompts for
+		// it; this lets the generator emit an empty constructor client ID.
+		Keys: append([]string{"client-id"}, c.extra...),
 
 		// Since you can pass a function to get params, we can't use the normal
 		// preset `Params` field. We use an internal field here for backwards
@@ -211,5 +241,5 @@ func InitAuthCode(clientID string, authorizeURL string, tokenURL string, options
 		getParamsFunc: c.getParams,
 	}
 
-	cli.UseAuth("", handler)
+	cli.UseAuth(typeName, handler)
 }

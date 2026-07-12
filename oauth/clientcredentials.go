@@ -79,6 +79,13 @@ func (h *ClientCredentialsHandler) OnRequest(log *zerolog.Logger, request *http.
 // profile-related extra variables to store them alongside the default profile
 // information.
 func InitClientCredentials(tokenURL string, options ...func(*config) error) {
+	InitClientCredentialsWithType("", tokenURL, options...)
+}
+
+// InitClientCredentialsWithType is like InitClientCredentials but registers the
+// handler under an explicit auth type name so that multiple auth schemes can
+// coexist in a single CLI. Use an empty type name only for single-scheme CLIs.
+func InitClientCredentialsWithType(typeName string, tokenURL string, options ...func(*config) error) {
 	var c config
 
 	for _, option := range options {
@@ -94,7 +101,7 @@ func InitClientCredentials(tokenURL string, options ...func(*config) error) {
 	// compatibility only.
 	handler.getParamsFunc = c.getParams
 
-	cli.UseAuth("", handler)
+	cli.UseAuth(typeName, handler)
 
 	// TODO: retry on 401
 	// cli.Client.UseResponse(func(ctx *context.Context, h context.Handler) {

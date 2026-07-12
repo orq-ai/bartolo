@@ -131,6 +131,20 @@ func initAuth() {
 	})
 }
 
+// defaultAuthType is the auth type used when the active profile carries no
+// explicit `type` and more than one handler is registered. Set it via
+// SetDefaultAuthType. This keeps env-var-only (profile-less) invocations working
+// for multi-scheme CLIs.
+var defaultAuthType string
+
+// SetDefaultAuthType records the auth type to fall back to when the active
+// profile has no `type` and multiple auth handlers are registered. Generated
+// CLIs emit this for the first security scheme declared by the spec so that
+// profile-less (environment-variable) callers keep working under multi-auth.
+func SetDefaultAuthType(typeName string) {
+	defaultAuthType = typeName
+}
+
 func resolveAuthHandler(profile map[string]string) (string, AuthHandler) {
 	typeName := profile["type"]
 	if typeName != "" {
@@ -140,6 +154,12 @@ func resolveAuthHandler(profile map[string]string) (string, AuthHandler) {
 	if len(AuthHandlers) == 1 {
 		for name, handler := range AuthHandlers {
 			return name, handler
+		}
+	}
+
+	if defaultAuthType != "" {
+		if handler := AuthHandlers[defaultAuthType]; handler != nil {
+			return defaultAuthType, handler
 		}
 	}
 

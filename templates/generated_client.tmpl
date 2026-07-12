@@ -8,7 +8,8 @@ import (
 	{{ if .Imports.Strings }}"strings"{{ end }}
 	{{ if .Imports.Time }}"time"{{ end }}
 
-	{{ if .AuthInit }}"github.com/orq-ai/bartolo/apikey"{{ end }}
+	{{ if .NeedsAPIKeyImport }}"github.com/orq-ai/bartolo/apikey"{{ end }}
+	{{ if .NeedsOAuthImport }}"github.com/orq-ai/bartolo/oauth"{{ end }}
 	bartolocli "github.com/orq-ai/bartolo/cli"
 	"github.com/pkg/errors"
 	"github.com/spf13/viper"
