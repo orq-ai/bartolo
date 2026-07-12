@@ -1,6 +1,6 @@
 module github.com/orq-ai/bartolo
 
-go 1.23.0
+go 1.25.0
 
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
