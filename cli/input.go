@@ -32,6 +32,10 @@ const nullableFlagSentinel = "null"
 //   - "json": fallback for nested objects, arrays of objects, and
 //     polymorphic unions. Value is parsed as JSON before being merged into
 //     the request body.
+//   - "json-or-string": polymorphic union that includes a string branch (e.g.
+//     `model: string | object`). A value starting with '{', '[' or '"' is
+//     parsed as JSON; any other value is sent through verbatim as a string, so
+//     bare scalars like "openai/gpt-4o" need no double-quoting.
 type BodyField struct {
 	Name        string
 	FlagName    string
@@ -96,6 +100,8 @@ func AddBodyFieldFlags(cmd *cobra.Command, fields []BodyField) {
 			cmd.Flags().StringToString(field.FlagName, nil, description+" (key=value, repeatable)")
 		case "json":
 			cmd.Flags().String(field.FlagName, "", description+" (JSON value, e.g. '{\"k\":1}' or '[1,2]')")
+		case "json-or-string":
+			cmd.Flags().String(field.FlagName, "", description+" (plain string, or JSON for objects/arrays, e.g. '{\"k\":1}')")
 		case "enum-string":
 			cmd.Flags().String(field.FlagName, "", description)
 			if len(field.Enum) > 0 {
@@ -231,6 +237,24 @@ func ApplyBodyFlags(cmd *cobra.Command, params *viper.Viper, mediaType string, b
 				return "", fmt.Errorf("--%s: invalid JSON: %w", field.FlagName, err)
 			}
 			overrides[field.Name] = value
+		case "json-or-string":
+			raw := params.GetString(field.FlagName)
+			trimmed := strings.TrimSpace(raw)
+			// Structured JSON (object/array) and an explicitly-quoted JSON
+			// string are parsed as JSON; any other value is sent through as a
+			// bare string. This lets `--model openai/gpt-4o` work without
+			// double-quoting, while `--model '"openai/gpt-4o"'` (a JSON string
+			// literal) still decodes to the same string for backward
+			// compatibility.
+			if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[' || trimmed[0] == '"') {
+				var value interface{}
+				if err := json.Unmarshal([]byte(trimmed), &value); err != nil {
+					return "", fmt.Errorf("--%s: invalid JSON: %w", field.FlagName, err)
+				}
+				overrides[field.Name] = value
+			} else {
+				overrides[field.Name] = raw
+			}
 		case "enum-string":
 			value := params.GetString(field.FlagName)
 			if len(field.Enum) > 0 {

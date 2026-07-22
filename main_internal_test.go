@@ -499,6 +499,56 @@ func TestGetBodyFieldsUnionsOneOfBranches(t *testing.T) {
 	}
 }
 
+func TestBodyFieldTypeStringUnionUsesJSONOrString(t *testing.T) {
+	doc, err := loadOpenAPIDocument([]byte(`{
+  "openapi": "3.1.0",
+  "info": {"title": "String unions", "version": "1"},
+  "paths": {
+    "/agents": {
+      "post": {
+        "operationId": "CreateAgent",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {"anyOf": [{"type": "string"}, {"type": "object", "properties": {"id": {"type": "string"}}}]},
+                  "input": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "object"}}]},
+                  "config": {"oneOf": [{"type": "object", "properties": {"a": {"type": "string"}}}, {"type": "array", "items": {"type": "object"}}]}
+                }
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("loadOpenAPIDocument: %v", err)
+	}
+
+	schema := doc.Paths.Value("/agents").Post.RequestBody.Value.Content.Get("application/json").Schema.Value
+	got := map[string]string{}
+	for _, f := range getBodyFields(schema) {
+		got[f.Name] = f.Type
+	}
+
+	// Unions with a string branch accept a bare string; unions without one stay strict JSON.
+	if got["model"] != "json-or-string" {
+		t.Errorf("model: type = %q, want json-or-string", got["model"])
+	}
+	if got["input"] != "json-or-string" {
+		t.Errorf("input: type = %q, want json-or-string", got["input"])
+	}
+	if got["config"] != "json" {
+		t.Errorf("config (object|array, no string branch): type = %q, want json", got["config"])
+	}
+}
+
 func TestLoadOpenAPIDocumentSupportsNumericExclusiveBounds(t *testing.T) {
 	doc, err := loadOpenAPIDocument([]byte(`{
   "openapi": "3.1.0",
