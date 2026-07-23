@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
@@ -497,6 +498,173 @@ func TestGetBodyFieldsUnionsOneOfBranches(t *testing.T) {
 			t.Errorf("field %q: type = %q, want %q", name, got[name], typ)
 		}
 	}
+
+	for _, f := range fields {
+		if f.Name == "strategy" {
+			if !reflect.DeepEqual(f.Enum, []string{"token", "semantic"}) {
+				t.Errorf("strategy enum = %v, want the union of both branches [token semantic]", f.Enum)
+			}
+		}
+	}
+}
+
+func TestGetBodyFieldsUnionsDiscriminatorEnums(t *testing.T) {
+	doc, err := loadOpenAPIDocument([]byte(`{
+  "openapi": "3.1.0",
+  "info": {"title": "Discriminator union", "version": "1"},
+  "paths": {
+    "/tools": {
+      "post": {
+        "operationId": "CreateTool",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {"type": "object", "required": ["type"], "properties": {"type": {"type": "string", "enum": ["function"]}, "status": {"type": "string", "enum": ["live", "draft"]}}},
+                  {"type": "object", "required": ["type"], "properties": {"type": {"type": "string", "enum": ["http"]}, "status": {"type": "string", "enum": ["live", "draft"]}}},
+                  {"type": "object", "required": ["type"], "properties": {"type": {"type": "string", "enum": ["mcp"]}, "status": {"type": "string", "enum": ["live", "draft"]}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("loadOpenAPIDocument: %v", err)
+	}
+
+	schema := doc.Paths.Value("/tools").Post.RequestBody.Value.Content.Get("application/json").Schema.Value
+	fields := getBodyFields(schema)
+
+	byName := map[string]*BodyField{}
+	for _, f := range fields {
+		byName[f.Name] = f
+	}
+
+	typeField := byName["type"]
+	if typeField == nil {
+		t.Fatal("missing field \"type\"")
+	}
+	if typeField.Type != "enum-string" {
+		t.Errorf("type field: type = %q, want enum-string", typeField.Type)
+	}
+	if !reflect.DeepEqual(typeField.Enum, []string{"function", "http", "mcp"}) {
+		t.Errorf("type enum = %v, want [function http mcp] (union across all branches, in branch order)", typeField.Enum)
+	}
+
+	statusField := byName["status"]
+	if statusField == nil {
+		t.Fatal("missing field \"status\"")
+	}
+	if !reflect.DeepEqual(statusField.Enum, []string{"live", "draft"}) {
+		t.Errorf("status enum = %v, want [live draft] (identical branch enums must not duplicate)", statusField.Enum)
+	}
+
+	// The union must be built on a copy: the source branch schemas are shared
+	// $ref components in real specs and must never be widened in place.
+	firstBranch := schema.OneOf[0].Value.Properties["type"].Value
+	if len(firstBranch.Enum) != 1 {
+		t.Errorf("source branch enum was mutated: %v, want [function]", firstBranch.Enum)
+	}
+}
+
+func TestGetBodyFieldsDropsEnumWhenUnionBranchAllowsAnyString(t *testing.T) {
+	doc, err := loadOpenAPIDocument([]byte(`{
+  "openapi": "3.1.0",
+  "info": {"title": "Enum vs plain string", "version": "1"},
+  "paths": {
+    "/things": {
+      "post": {
+        "operationId": "CreateThing",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {"type": "object", "properties": {"mode": {"type": "string", "enum": ["auto"]}}},
+                  {"type": "object", "properties": {"mode": {"type": "string"}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("loadOpenAPIDocument: %v", err)
+	}
+
+	schema := doc.Paths.Value("/things").Post.RequestBody.Value.Content.Get("application/json").Schema.Value
+	fields := getBodyFields(schema)
+
+	for _, f := range fields {
+		if f.Name != "mode" {
+			continue
+		}
+		if f.Type != "string" {
+			t.Errorf("mode field: type = %q, want plain string (one branch accepts any string, so no enum validation)", f.Type)
+		}
+		if len(f.Enum) != 0 {
+			t.Errorf("mode enum = %v, want empty", f.Enum)
+		}
+		return
+	}
+	t.Fatal("missing field \"mode\"")
+}
+
+func TestGetBodyFieldsKeepsFirstBranchOnTypeConflict(t *testing.T) {
+	doc, err := loadOpenAPIDocument([]byte(`{
+  "openapi": "3.1.0",
+  "info": {"title": "Type conflict", "version": "1"},
+  "paths": {
+    "/things": {
+      "post": {
+        "operationId": "CreateThing",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {"type": "object", "properties": {"config": {"type": "string", "enum": ["default"]}}},
+                  {"type": "object", "properties": {"config": {"type": "object", "properties": {"url": {"type": "string"}}}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("loadOpenAPIDocument: %v", err)
+	}
+
+	schema := doc.Paths.Value("/things").Post.RequestBody.Value.Content.Get("application/json").Schema.Value
+	fields := getBodyFields(schema)
+
+	for _, f := range fields {
+		if f.Name != "config" {
+			continue
+		}
+		if f.Type != "enum-string" || !reflect.DeepEqual(f.Enum, []string{"default"}) {
+			t.Errorf("config field = (%q, %v), want first-wins (enum-string, [default]) when branch types conflict", f.Type, f.Enum)
+		}
+		return
+	}
+	t.Fatal("missing field \"config\"")
 }
 
 func TestLoadOpenAPIDocumentSupportsNumericExclusiveBounds(t *testing.T) {

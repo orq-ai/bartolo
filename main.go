@@ -1272,7 +1272,11 @@ func bodyFieldType(schema *openapi3.Schema) string {
 // branch (host's own properties win on conflict). For `allOf` the Required
 // list is the union of all branches; for `oneOf`/`anyOf` it is the
 // intersection (a field is only universally required if every branch
-// requires it). Returns the schema unchanged when there is nothing to merge.
+// requires it). When the same string-enum property appears in several
+// `oneOf`/`anyOf` branches with different values — the discriminated-union
+// `type`/`strategy` pattern — the merged property carries the union of all
+// branch enums instead of just the first branch's values. Returns the schema
+// unchanged when there is nothing to merge.
 func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 	if schema == nil {
 		return schema
@@ -1286,6 +1290,10 @@ func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 		Properties: openapi3.Schemas{},
 	}
 
+	// Properties collected from the host schema or an `allOf` branch are
+	// authoritative constraints and are never widened by union branches.
+	protected := map[string]struct{}{}
+
 	collectProps := func(src *openapi3.Schema) {
 		if src == nil {
 			return
@@ -1293,6 +1301,35 @@ func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 		for name, ref := range src.Properties {
 			if _, exists := merged.Properties[name]; !exists {
 				merged.Properties[name] = ref
+				protected[name] = struct{}{}
+			}
+		}
+		if src.AdditionalProperties.Schema != nil && merged.AdditionalProperties.Schema == nil {
+			merged.AdditionalProperties.Schema = src.AdditionalProperties.Schema
+		}
+		if src.AdditionalProperties.Has != nil && merged.AdditionalProperties.Has == nil {
+			merged.AdditionalProperties.Has = src.AdditionalProperties.Has
+		}
+	}
+
+	// collectUnionProps is collectProps for `oneOf`/`anyOf` branches: a value
+	// only has to satisfy one branch, so when the same property collides
+	// across branches its string enums are unioned rather than first-wins.
+	collectUnionProps := func(src *openapi3.Schema) {
+		if src == nil {
+			return
+		}
+		for name, ref := range src.Properties {
+			existing, exists := merged.Properties[name]
+			if !exists {
+				merged.Properties[name] = ref
+				continue
+			}
+			if _, ok := protected[name]; ok {
+				continue
+			}
+			if widened := unionEnumSchema(existing, ref); widened != nil {
+				merged.Properties[name] = widened
 			}
 		}
 		if src.AdditionalProperties.Schema != nil && merged.AdditionalProperties.Schema == nil {
@@ -1340,7 +1377,7 @@ func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 		if flat != nil && flat.Type != nil && flat.Type.Is("null") {
 			continue
 		}
-		collectProps(flat)
+		collectUnionProps(flat)
 
 		branchRequired := map[string]struct{}{}
 		if flat != nil {
@@ -1380,6 +1417,70 @@ func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 	}
 
 	return merged
+}
+
+// unionEnumSchema resolves a property collision between two `oneOf`/`anyOf`
+// branches. When both sides are string schemas and the existing one carries
+// an enum, it returns a replacement ref: the union of both enums when the
+// incoming side is also enumerated, or a plain string (enum dropped) when the
+// incoming branch accepts any string — enforcing a partial enum would reject
+// values some branch allows. Returns nil when the existing ref should be kept
+// as-is. The replacement wraps a copy; the source schemas are shared `$ref`
+// components and are never mutated.
+func unionEnumSchema(existing, incoming *openapi3.SchemaRef) *openapi3.SchemaRef {
+	if existing == nil || incoming == nil {
+		return nil
+	}
+	exEff, exNullable := effectiveBodySchema(existing.Value)
+	inEff, inNullable := effectiveBodySchema(incoming.Value)
+	if exEff == nil || inEff == nil {
+		return nil
+	}
+	if exEff.Type == nil || !exEff.Type.Is("string") || inEff.Type == nil || !inEff.Type.Is("string") {
+		return nil
+	}
+	if len(exEff.Enum) == 0 {
+		// Already accepts any string; nothing to widen.
+		return nil
+	}
+
+	clone := *exEff
+	if exNullable || inNullable {
+		clone.Nullable = true
+	}
+	if clone.Description == "" {
+		clone.Description = inEff.Description
+	}
+
+	if len(inEff.Enum) == 0 {
+		clone.Enum = nil
+		return &openapi3.SchemaRef{Value: &clone}
+	}
+
+	seen := map[string]struct{}{}
+	union := make([]interface{}, 0, len(exEff.Enum)+len(inEff.Enum))
+	for _, raw := range exEff.Enum {
+		key := fmt.Sprintf("%T:%v", raw, raw)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		union = append(union, raw)
+	}
+	for _, raw := range inEff.Enum {
+		key := fmt.Sprintf("%T:%v", raw, raw)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		union = append(union, raw)
+	}
+	if len(union) == len(exEff.Enum) {
+		// No new values; keep the existing ref untouched.
+		return nil
+	}
+	clone.Enum = union
+	return &openapi3.SchemaRef{Value: &clone}
 }
 
 func bodyFieldEnum(schema *openapi3.Schema, fieldType string) []string {
