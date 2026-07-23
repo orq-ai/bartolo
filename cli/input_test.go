@@ -206,6 +206,55 @@ func TestApplyBodyFlagsJSONFallback(t *testing.T) {
 	assert.JSONEq(t, `{"documents":[{"id":"a"},{"id":"b"}],"invoke_options":{"timeout":30}}`, body)
 }
 
+func TestApplyBodyFlagsJSONOrString(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "model", FlagName: "model", Type: "json-or-string"},
+	}
+
+	// Bare string passes through verbatim — no double-quoting required.
+	bare := applyBody(t, fields, map[string][]string{"model": {"openai/gpt-4o"}}, ``)
+	assert.JSONEq(t, `{"model":"openai/gpt-4o"}`, bare)
+
+	// Structured values (object/array) are parsed as JSON.
+	obj := applyBody(t, fields, map[string][]string{"model": {`{"id":"openai/gpt-4o","retry":{"count":2}}`}}, ``)
+	assert.JSONEq(t, `{"model":{"id":"openai/gpt-4o","retry":{"count":2}}}`, obj)
+
+	arr := applyBody(t, []cli.BodyField{{Name: "input", FlagName: "input", Type: "json-or-string"}},
+		map[string][]string{"input": {`[{"role":"user"}]`}}, ``)
+	assert.JSONEq(t, `{"input":[{"role":"user"}]}`, arr)
+
+	// A plain string containing spaces stays a string.
+	text := applyBody(t, []cli.BodyField{{Name: "input", FlagName: "input", Type: "json-or-string"}},
+		map[string][]string{"input": {"plain text"}}, ``)
+	assert.JSONEq(t, `{"input":"plain text"}`, text)
+
+	// Backward compat: the old double-quoting workaround (a JSON string literal)
+	// still decodes to the same bare string, not a doubly-quoted one.
+	quoted := applyBody(t, fields, map[string][]string{"model": {`"openai/gpt-4o"`}}, ``)
+	assert.JSONEq(t, `{"model":"openai/gpt-4o"}`, quoted)
+}
+
+func TestApplyBodyFlagsJSONOrStringRejectsInvalidJSON(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "model", FlagName: "model", Type: "json-or-string"},
+	}
+
+	cmd := &cobra.Command{Use: "test"}
+	cli.AddBodyFieldFlags(cmd, fields)
+	// A value that opens like structured JSON but is malformed still errors.
+	if err := cmd.Flags().Set("model", `{"id":`); err != nil {
+		t.Fatalf("set model: %v", err)
+	}
+	params := viper.New()
+	if err := params.BindPFlags(cmd.Flags()); err != nil {
+		t.Fatalf("bind flags: %v", err)
+	}
+
+	if _, err := cli.ApplyBodyFlags(cmd, params, "application/json", ``, fields); err == nil {
+		t.Fatal("expected JSON parse error for malformed object")
+	}
+}
+
 func TestApplyBodyFlagsJSONRejectsInvalid(t *testing.T) {
 	fields := []cli.BodyField{
 		{Name: "documents", FlagName: "documents", Type: "json"},

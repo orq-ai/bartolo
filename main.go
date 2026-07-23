@@ -1209,7 +1209,13 @@ func bodyFieldType(schema *openapi3.Schema) string {
 	effective, nullable := effectiveBodySchema(schema)
 	if effective == nil {
 		// Polymorphic shapes (multi-branch oneOf/anyOf) fall back to a JSON
-		// string flag so users can still drive them from the CLI.
+		// string flag so users can still drive them from the CLI. When one of
+		// the branches is a plain string (e.g. `model: string | object`), use a
+		// flag that accepts a bare string OR JSON, so users don't have to
+		// double-quote scalar values like model IDs.
+		if unionHasStringBranch(schema) {
+			return "json-or-string"
+		}
 		return "json"
 	}
 	if effective.Type == nil {
@@ -1265,6 +1271,29 @@ func bodyFieldType(schema *openapi3.Schema) string {
 		return base + "-nullable"
 	}
 	return base
+}
+
+// unionHasStringBranch reports whether a multi-branch `oneOf`/`anyOf` schema has
+// at least one branch that resolves to a plain string scalar. Used to decide
+// whether a polymorphic body field should accept a bare string in addition to
+// JSON.
+func unionHasStringBranch(schema *openapi3.Schema) bool {
+	if schema == nil {
+		return false
+	}
+	branches := make([]*openapi3.SchemaRef, 0, len(schema.AnyOf)+len(schema.OneOf))
+	branches = append(branches, schema.AnyOf...)
+	branches = append(branches, schema.OneOf...)
+	for _, br := range branches {
+		if br == nil || br.Value == nil {
+			continue
+		}
+		inner, _ := effectiveBodySchema(br.Value)
+		if scalarType(inner) == "string" {
+			return true
+		}
+	}
+	return false
 }
 
 // mergeAllOf flattens an `allOf`, `oneOf`, or `anyOf` request-body composition
