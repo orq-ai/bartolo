@@ -4,6 +4,26 @@ All notable changes to Bartolo will be documented in this file.
 
 The project was restarted on 2026-04-09 as a new public release stream under the Bartolo name.
 
+## 2026-08-07 (v0.4.5)
+
+- Bumped Bartolo to v0.4.5.
+- Fixed error paths exiting `0`. Generated `main.go` discarded the error from `Root.Execute()`, so cobra-level failures (unknown command, unknown flag) printed an error and reported success, while operation-level failures exited `1` via `log.Fatal`. Added `cli.Execute`, which returns a process exit code: `0` on success, `2` for usage errors, `1` for runtime failures.
+- Fixed `<cli> <group> <unknown>` printing the group's help and exiting `0`. Cobra only rejects unknown commands at the root, and short-circuits a command without a handler to "show help" before argument validation runs, so group commands now reject an unknown subcommand explicitly.
+- Fixed error output going to stdout. `Root` used the deprecated `SetOutput`, which points both streams at stdout, so errors corrupted piped output. Errors now go to stderr and stdout stays clean.
+
+**Existing generated CLIs must update `main.go`** — Bartolo only writes it at `init` time and will not overwrite it on regeneration:
+
+```diff
+-	bartolocli.Root.Execute()
++	os.Exit(bartolocli.Execute())
+```
+
+## 2026-07-23 (v0.4.4)
+
+- Released as v0.4.4 without a version bump — `bartoloVersion` stayed at `0.4.3` in the tagged commit. Consumers should pin v0.4.5 or later.
+- Accepted bare strings for string-or-object union body flags. Union body fields with a string branch (e.g. `model: string | object`) now generate as "json-or-string": values starting with `{`, `[` or `"` are parsed as JSON, anything else passes through as a plain string, so `--model openai/gpt-4o` no longer fails with "invalid JSON".
+- Unioned enum values across `oneOf` / `anyOf` branches in body flag generation. Discriminated-union bodies whose branches each carry a single-value `type` enum merged first-wins, so the generated flag only accepted the first branch's value. Colliding string enums are now unioned (deduped, branch order), and the enum is dropped entirely when one branch accepts any string.
+
 ## 2026-05-02 (v0.4.3)
 
 - Bumped Bartolo to v0.4.3.
