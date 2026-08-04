@@ -421,6 +421,8 @@ Standard input allows you to send in whatever data is required to make a success
 
 Note: Windows PowerShell and other shells that do not support input redirection via ¬<¬ will need to pipe input instead, for example: ¬cat input.json | my-cli command¬. This may load the entire input file into memory.
 
+Standard input is only read when it can actually supply the body. A redirect from a file is always read, and a pipe is read whenever nothing else supplied the body. When the body already came from ¬--from-file¬, ¬--example¬, shorthand or the generated field flags, a pipe that has no data ready is skipped rather than waited on, so a command never hangs on the open idle stdin that CI runners and process spawners hand their children by default. Pass ¬--stdin¬ to require piped input and wait for it unconditionally.
+
 ## Body Helper Flags
 
 Commands that accept a request body also support:
