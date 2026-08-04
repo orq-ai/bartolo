@@ -7,6 +7,26 @@ The project was restarted on 2026-04-09 as a new public release stream under the
 ## 2026-08-07 (v0.4.5)
 
 - Bumped Bartolo to v0.4.5.
+- **Renamed the global JMESPath flag from `-q, --query` to `-j, --jmespath`.** `query` is the single most common field name in a request body, and the collision below was unfixable while the CLI owned the name. Endpoints now keep the obvious `--query` flag, and the filter every command advertises is `-j, --jmespath`. The `-q` shorthand is gone with the name it abbreviated.
+
+  ```
+  orq traces search --from ... --to ... -j 'data[0].trace_id'          # was -q
+  orq traces search --from ... --to ... --jmespath 'data[0].trace_id'  # was --query
+  orq traces search --from ... --to ... --query 'checkout'             # now the request body's query field
+  ```
+
+  The viper key and its environment variable follow the flag (`ORQ_QUERY` -> `ORQ_JMESPATH`).
+
+  `--json` deliberately has no shorthand, and must not gain one: `-j` is easily read as short for `--json`, and because `--jmespath` takes a value a stray `-j` consumes the following argument rather than failing cleanly. A test guards this.
+
+- Fixed generated parameter and body-field flags shadowing global flags. Cobra merges the root's persistent flags into a command with pflag's `AddFlagSet`, which skips any name the command already uses, so a body field named `query` did not just win `--query` — it removed the global `-q, --query` flag from that command entirely. `-q` failed with `unknown shorthand flag: 'q' in -q`, and `--query` silently sent the user's JMESPath expression to the server as a body field. The same applied to `--json`, `--output-format` (and `-o`), `--profile`, `--raw`, `--server` and `--verbose`, and a body field named `example`, `stdin`, `from-file` or `help` made pflag panic at startup.
+
+  Renaming the global fixes `query` itself; the rest are handled generically. A colliding flag is now renamed rather than dropped: a body field is exposed as `--body-<name>` and a parameter as `--param-<name>`, both still reading and writing the original field name on the wire. The rename is listed in the command's long help, annotated on the flag, and printed as a generator warning. A parameter that collides with a body field on the same command is renamed too, since registering the same flag twice panics.
+
+  `cli.ResolveGeneratedFlagName` applies the same renaming at runtime, so an existing CLI is fixed by bumping its `github.com/orq-ai/bartolo` dependency even before it is regenerated. Regenerate to also pick up the corrected help text.
+
+- Fixed non-reproducible generator output. `getRequestInfo` picked a request body example and a media type by ranging over maps, so regenerating from an unchanged spec produced a different `Example` string on every run. Both are now selected in sorted order.
+
 - Fixed error paths exiting `0`. Generated `main.go` discarded the error from `Root.Execute()`, so cobra-level failures (unknown command, unknown flag) printed an error and reported success, while operation-level failures exited `1` via `log.Fatal`. Added `cli.Execute`, which returns a process exit code: `0` on success, `2` for usage errors, `1` for runtime failures.
 - Fixed `<cli> <group> <unknown>` printing the group's help and exiting `0`. Cobra only rejects unknown commands at the root, and short-circuits a command without a handler to "show help" before argument validation runs, so group commands now reject an unknown subcommand explicitly.
 - Fixed error output going to stdout. `Root` used the deprecated `SetOutput`, which points both streams at stdout, so errors corrupted piped output. Errors now go to stderr and stdout stays clean.

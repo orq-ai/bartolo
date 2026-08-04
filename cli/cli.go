@@ -149,8 +149,15 @@ func Init(config *Config) {
 	AddGlobalFlag("verbose", "", "Enable verbose log output", false)
 	AddGlobalFlag("output-format", "o", "Output format [json, yaml, toon]", outputFormatOrDefault(config.DefaultOutputFormat))
 	AddGlobalFlag("json", "", "Alias for --output-format json", false)
-	AddGlobalFlag("query", "q", "Filter / project results using JMESPath", "")
-	AddGlobalFlag("raw", "", "Output result of query as raw rather than an escaped JSON string or list", false)
+	// Named `jmespath` rather than `query` so it cannot collide with the many
+	// endpoints whose request body or query string has a `query` field. The old
+	// `-q` shorthand went with it: it abbreviated a name that no longer exists.
+	//
+	// Note that `-j` is easily mistaken for `--json`, which deliberately has no
+	// shorthand. Because this flag takes a value, a stray `-j` consumes the next
+	// argument, so keep `--json` shorthand-free.
+	AddGlobalFlag("jmespath", "j", "Filter / project results using JMESPath", "")
+	AddGlobalFlag("raw", "", "Output result of --jmespath as raw rather than an escaped JSON string or list", false)
 	AddGlobalFlag("server", "", "Override server URL", "")
 }
 

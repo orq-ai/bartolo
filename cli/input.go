@@ -44,6 +44,15 @@ type BodyField struct {
 	Enum        []string
 }
 
+// flagName returns the name this body field is actually registered under. A
+// field whose name collides with a global flag (`raw`, `profile`, ...) is
+// exposed as `--body-<name>` so the global keeps working on the command. The
+// generator already emits the resolved name; this repeats it so CLIs generated
+// before the fix are corrected by a dependency bump alone.
+func (f BodyField) flagName() string {
+	return ResolveGeneratedFlagName("body", f.FlagName)
+}
+
 // DeepAssign recursively merges a source map into the target.
 func DeepAssign(target, source map[string]interface{}) {
 	for k, v := range source {
@@ -79,39 +88,43 @@ func AddBodyFieldFlags(cmd *cobra.Command, fields []BodyField) {
 		if strings.TrimSpace(description) == "" {
 			description = field.Name
 		}
+		name := field.flagName()
+		if name != field.FlagName {
+			description += fmt.Sprintf(" (body field %q, renamed to keep the global --%s flag available)", field.Name, field.FlagName)
+		}
 		switch field.Type {
 		case "bool":
-			cmd.Flags().Bool(field.FlagName, false, description)
+			cmd.Flags().Bool(name, false, description)
 		case "int64":
-			cmd.Flags().Int64(field.FlagName, 0, description)
+			cmd.Flags().Int64(name, 0, description)
 		case "float64":
-			cmd.Flags().Float64(field.FlagName, 0, description)
+			cmd.Flags().Float64(name, 0, description)
 		case "string-nullable", "bool-nullable", "int64-nullable", "float64-nullable":
-			cmd.Flags().String(field.FlagName, "", description+` (pass "null" to send JSON null)`)
+			cmd.Flags().String(name, "", description+` (pass "null" to send JSON null)`)
 		case "string-slice":
-			cmd.Flags().StringSlice(field.FlagName, nil, description+" (repeatable)")
+			cmd.Flags().StringSlice(name, nil, description+" (repeatable)")
 		case "int64-slice":
-			cmd.Flags().Int64Slice(field.FlagName, nil, description+" (repeatable)")
+			cmd.Flags().Int64Slice(name, nil, description+" (repeatable)")
 		case "float64-slice":
-			cmd.Flags().Float64Slice(field.FlagName, nil, description+" (repeatable)")
+			cmd.Flags().Float64Slice(name, nil, description+" (repeatable)")
 		case "bool-slice":
-			cmd.Flags().BoolSlice(field.FlagName, nil, description+" (repeatable)")
+			cmd.Flags().BoolSlice(name, nil, description+" (repeatable)")
 		case "string-map":
-			cmd.Flags().StringToString(field.FlagName, nil, description+" (key=value, repeatable)")
+			cmd.Flags().StringToString(name, nil, description+" (key=value, repeatable)")
 		case "json":
-			cmd.Flags().String(field.FlagName, "", description+" (JSON value, e.g. '{\"k\":1}' or '[1,2]')")
+			cmd.Flags().String(name, "", description+" (JSON value, e.g. '{\"k\":1}' or '[1,2]')")
 		case "json-or-string":
-			cmd.Flags().String(field.FlagName, "", description+" (plain string, or JSON for objects/arrays, e.g. '{\"k\":1}')")
+			cmd.Flags().String(name, "", description+" (plain string, or JSON for objects/arrays, e.g. '{\"k\":1}')")
 		case "enum-string":
-			cmd.Flags().String(field.FlagName, "", description)
+			cmd.Flags().String(name, "", description)
 			if len(field.Enum) > 0 {
 				values := append([]string{}, field.Enum...)
-				_ = cmd.RegisterFlagCompletionFunc(field.FlagName, func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+				_ = cmd.RegisterFlagCompletionFunc(name, func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
 					return values, cobra.ShellCompDirectiveNoFileComp
 				})
 			}
 		default:
-			cmd.Flags().String(field.FlagName, "", description)
+			cmd.Flags().String(name, "", description)
 		}
 	}
 }
@@ -145,100 +158,101 @@ func ApplyBodyFlags(cmd *cobra.Command, params *viper.Viper, mediaType string, b
 
 	overrides := map[string]interface{}{}
 	for _, field := range fields {
-		flag := cmd.Flags().Lookup(field.FlagName)
+		name := field.flagName()
+		flag := cmd.Flags().Lookup(name)
 		if flag == nil || !flag.Changed {
 			continue
 		}
 
 		switch field.Type {
 		case "bool":
-			overrides[field.Name] = params.GetBool(field.FlagName)
+			overrides[field.Name] = params.GetBool(name)
 		case "int64":
-			overrides[field.Name] = params.GetInt64(field.FlagName)
+			overrides[field.Name] = params.GetInt64(name)
 		case "float64":
-			overrides[field.Name] = params.GetFloat64(field.FlagName)
+			overrides[field.Name] = params.GetFloat64(name)
 		case "string-nullable":
-			raw := params.GetString(field.FlagName)
+			raw := params.GetString(name)
 			if raw == nullableFlagSentinel {
 				overrides[field.Name] = nil
 			} else {
 				overrides[field.Name] = raw
 			}
 		case "bool-nullable":
-			raw := strings.TrimSpace(params.GetString(field.FlagName))
+			raw := strings.TrimSpace(params.GetString(name))
 			if raw == nullableFlagSentinel {
 				overrides[field.Name] = nil
 				break
 			}
 			value, err := strconv.ParseBool(raw)
 			if err != nil {
-				return "", fmt.Errorf("--%s: %w", field.FlagName, err)
+				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = value
 		case "int64-nullable":
-			raw := strings.TrimSpace(params.GetString(field.FlagName))
+			raw := strings.TrimSpace(params.GetString(name))
 			if raw == nullableFlagSentinel {
 				overrides[field.Name] = nil
 				break
 			}
 			value, err := strconv.ParseInt(raw, 10, 64)
 			if err != nil {
-				return "", fmt.Errorf("--%s: %w", field.FlagName, err)
+				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = value
 		case "float64-nullable":
-			raw := strings.TrimSpace(params.GetString(field.FlagName))
+			raw := strings.TrimSpace(params.GetString(name))
 			if raw == nullableFlagSentinel {
 				overrides[field.Name] = nil
 				break
 			}
 			value, err := strconv.ParseFloat(raw, 64)
 			if err != nil {
-				return "", fmt.Errorf("--%s: %w", field.FlagName, err)
+				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = value
 		case "string-slice":
-			values, err := cmd.Flags().GetStringSlice(field.FlagName)
+			values, err := cmd.Flags().GetStringSlice(name)
 			if err != nil {
-				return "", fmt.Errorf("--%s: %w", field.FlagName, err)
+				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = values
 		case "int64-slice":
-			values, err := cmd.Flags().GetInt64Slice(field.FlagName)
+			values, err := cmd.Flags().GetInt64Slice(name)
 			if err != nil {
-				return "", fmt.Errorf("--%s: %w", field.FlagName, err)
+				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = values
 		case "float64-slice":
-			values, err := cmd.Flags().GetFloat64Slice(field.FlagName)
+			values, err := cmd.Flags().GetFloat64Slice(name)
 			if err != nil {
-				return "", fmt.Errorf("--%s: %w", field.FlagName, err)
+				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = values
 		case "bool-slice":
-			values, err := cmd.Flags().GetBoolSlice(field.FlagName)
+			values, err := cmd.Flags().GetBoolSlice(name)
 			if err != nil {
-				return "", fmt.Errorf("--%s: %w", field.FlagName, err)
+				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = values
 		case "string-map":
-			values, err := cmd.Flags().GetStringToString(field.FlagName)
+			values, err := cmd.Flags().GetStringToString(name)
 			if err != nil {
-				return "", fmt.Errorf("--%s: %w", field.FlagName, err)
+				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = values
 		case "json":
-			raw := strings.TrimSpace(params.GetString(field.FlagName))
+			raw := strings.TrimSpace(params.GetString(name))
 			if raw == "" {
 				continue
 			}
 			var value interface{}
 			if err := json.Unmarshal([]byte(raw), &value); err != nil {
-				return "", fmt.Errorf("--%s: invalid JSON: %w", field.FlagName, err)
+				return "", fmt.Errorf("--%s: invalid JSON: %w", name, err)
 			}
 			overrides[field.Name] = value
 		case "json-or-string":
-			raw := params.GetString(field.FlagName)
+			raw := params.GetString(name)
 			trimmed := strings.TrimSpace(raw)
 			// Structured JSON (object/array) and an explicitly-quoted JSON
 			// string are parsed as JSON; any other value is sent through as a
@@ -249,14 +263,14 @@ func ApplyBodyFlags(cmd *cobra.Command, params *viper.Viper, mediaType string, b
 			if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[' || trimmed[0] == '"') {
 				var value interface{}
 				if err := json.Unmarshal([]byte(trimmed), &value); err != nil {
-					return "", fmt.Errorf("--%s: invalid JSON: %w", field.FlagName, err)
+					return "", fmt.Errorf("--%s: invalid JSON: %w", name, err)
 				}
 				overrides[field.Name] = value
 			} else {
 				overrides[field.Name] = raw
 			}
 		case "enum-string":
-			value := params.GetString(field.FlagName)
+			value := params.GetString(name)
 			if len(field.Enum) > 0 {
 				allowed := false
 				for _, candidate := range field.Enum {
@@ -266,12 +280,12 @@ func ApplyBodyFlags(cmd *cobra.Command, params *viper.Viper, mediaType string, b
 					}
 				}
 				if !allowed {
-					return "", fmt.Errorf("--%s: %q is not one of [%s]", field.FlagName, value, strings.Join(field.Enum, ", "))
+					return "", fmt.Errorf("--%s: %q is not one of [%s]", name, value, strings.Join(field.Enum, ", "))
 				}
 			}
 			overrides[field.Name] = value
 		default:
-			overrides[field.Name] = params.GetString(field.FlagName)
+			overrides[field.Name] = params.GetString(name)
 		}
 	}
 
