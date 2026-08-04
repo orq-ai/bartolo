@@ -1,6 +1,7 @@
 package cli_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -87,16 +88,49 @@ func TestDeepAssignOverwrite(t *testing.T) {
 	assert.JSONEq(t, expected, result)
 }
 
-func TestGetBodyUsesGeneratedExample(t *testing.T) {
+func TestPrintBodyExample(t *testing.T) {
+	var buf bytes.Buffer
+	orig := cli.Stdout
+	cli.Stdout = &buf
+	t.Cleanup(func() { cli.Stdout = orig })
+
 	params := viper.New()
 	params.Set("example", true)
 
-	body, err := cli.GetBody("application/json", nil, params, []string{"hello: world"})
-	if err != nil {
-		t.Fatalf("GetBody with example: %v", err)
+	if !cli.PrintBodyExample(params, `{"hello": "world"}`) {
+		t.Fatal("expected PrintBodyExample to print")
 	}
+	assert.Equal(t, "{\"hello\": \"world\"}\n", buf.String())
+}
 
-	assert.JSONEq(t, `{"hello":"world"}`, body)
+func TestPrintBodyExampleSkipsWhenUnsetOrEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	orig := cli.Stdout
+	cli.Stdout = &buf
+	t.Cleanup(func() { cli.Stdout = orig })
+
+	assert.False(t, cli.PrintBodyExample(viper.New(), `{"hello": "world"}`))
+
+	params := viper.New()
+	params.Set("example", true)
+	assert.False(t, cli.PrintBodyExample(params, ""))
+	assert.False(t, cli.PrintBodyExample(nil, `{"hello": "world"}`))
+
+	assert.Empty(t, buf.String())
+}
+
+func TestPrintBodyExampleTakesPrecedenceOverFromFile(t *testing.T) {
+	var buf bytes.Buffer
+	orig := cli.Stdout
+	cli.Stdout = &buf
+	t.Cleanup(func() { cli.Stdout = orig })
+
+	params := viper.New()
+	params.Set("example", true)
+	params.Set("from-file", "does-not-matter.json")
+
+	assert.True(t, cli.PrintBodyExample(params, `{"hello": "world"}`))
+	assert.Equal(t, "{\"hello\": \"world\"}\n", buf.String())
 }
 
 func TestGetBodyMergesFileAndShorthand(t *testing.T) {
@@ -109,7 +143,7 @@ func TestGetBodyMergesFileAndShorthand(t *testing.T) {
 	params := viper.New()
 	params.Set("from-file", filename)
 
-	body, err := cli.GetBody("application/json", []string{"count:", "2"}, params, nil)
+	body, err := cli.GetBody("application/json", []string{"count:", "2"}, params)
 	if err != nil {
 		t.Fatalf("GetBody with file: %v", err)
 	}
@@ -121,7 +155,7 @@ func TestGetBodyRejectsExplicitStdinWithoutPipe(t *testing.T) {
 	params := viper.New()
 	params.Set("stdin", true)
 
-	if _, err := cli.GetBody("application/json", nil, params, nil); err == nil {
+	if _, err := cli.GetBody("application/json", nil, params); err == nil {
 		t.Fatal("expected stdin error")
 	}
 }

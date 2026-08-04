@@ -163,7 +163,7 @@ func newRequestCommand() *cobra.Command {
 				req = req.AddHeader(strings.TrimSpace(name), strings.TrimSpace(value))
 			}
 
-			body, err := GetBody(params.GetString("content-type"), args[2:], params, nil)
+			body, err := GetBody(params.GetString("content-type"), args[2:], params)
 			if err != nil {
 				return err
 			}

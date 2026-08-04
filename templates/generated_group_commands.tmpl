@@ -88,6 +88,9 @@ func register{{ $group.GoName }}Commands(root *cobra.Command) {
 			{{ range $ex := .Examples }}
 				examples += "  " + {{ $group.GoName }}Cmd.CommandPath() + " {{ $operation.Use }} {{ $ex }}\n"
 			{{ end }}
+			{{- if .BodyExample }}
+				examples += "  " + {{ $group.GoName }}Cmd.CommandPath() + " {{ $operation.Use }} --example\n"
+			{{- end }}
 
 			cmd := &cobra.Command{
 				Use: "{{ .Use | escapeStr }}",
@@ -107,11 +110,12 @@ func register{{ $group.GoName }}Commands(root *cobra.Command) {
 				Args:    cobra.MinimumNArgs({{ len .RequiredParams }}),
 				Run: func(cmd *cobra.Command, args []string) {
 					{{- if .CanHaveBody }}
-					body, err := bartolocli.GetBody("{{ .MediaType | escapeStr }}", args[{{ len .RequiredParams }}:], params, []string{
-						{{- range .Examples }}
-						"{{ . | escapeStr }}",
-						{{- end }}
-					})
+					{{- if .BodyExample }}
+					if bartolocli.PrintBodyExample(params, "{{ .BodyExample | escapeStr }}") {
+						return
+					}
+					{{- end }}
+					body, err := bartolocli.GetBody("{{ .MediaType | escapeStr }}", args[{{ len .RequiredParams }}:], params)
 					if err != nil {
 						log.Fatal().Err(err).Msg("unable to get body")
 					}
@@ -173,6 +177,9 @@ func register{{ $group.GoName }}Commands(root *cobra.Command) {
 
 			{{- if .CanHaveBody }}
 			bartolocli.AddBodyFlags(cmd)
+			{{- if .BodyExample }}
+			bartolocli.AddExampleFlag(cmd)
+			{{- end }}
 			bartolocli.AddBodyFieldFlags(cmd, {{ template "bodyFields" . }})
 			{{- end }}
 			{{ template "params" . }}

@@ -75,6 +75,7 @@ type Operation struct {
 	OptionalParams []*Param
 	MediaType      string
 	Examples       []string
+	BodyExample    string
 	BodyFields     []*BodyField
 	Hidden         bool
 	NeedsResponse  bool
@@ -316,7 +317,8 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				description = extStr(operation.Extensions[ExtDescription])
 			}
 
-			reqMt, reqSchema, reqExamples, bodyFields := getRequestInfo(operation)
+			reqInfo := getRequestInfo(operation)
+			reqMt, reqSchema, reqExamples, bodyFields := reqInfo.mediaType, reqInfo.summary, reqInfo.examples, reqInfo.bodyFields
 
 			var examples []string
 			if len(reqExamples) > 0 {
@@ -437,6 +439,7 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				OptionalParams: optionalParams,
 				MediaType:      reqMt,
 				Examples:       examples,
+				BodyExample:    reqInfo.exampleBody,
 				BodyFields:     bodyFields,
 				Hidden:         hidden,
 				Group:          group,
@@ -1085,13 +1088,16 @@ func getOptionalParams(allParams []*Param) []*Param {
 	return optional
 }
 
-func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}, []*BodyField) {
-	type requestInfo struct {
-		summary    string
-		examples   []interface{}
-		bodyFields []*BodyField
-	}
+// requestInfo describes the request body of an operation for one media type.
+type requestInfo struct {
+	mediaType   string
+	summary     string
+	examples    []interface{}
+	exampleBody string
+	bodyFields  []*BodyField
+}
 
+func getRequestInfo(op *openapi3.Operation) requestInfo {
 	mts := make(map[string]requestInfo)
 
 	if op.RequestBody != nil && op.RequestBody.Value != nil {
@@ -1109,9 +1115,15 @@ func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}, []*B
 
 			if item.Example != nil {
 				examples = append(examples, item.Example)
-			} else {
-				for _, ex := range item.Examples {
-					if ex.Value != nil {
+			} else if len(item.Examples) > 0 {
+				// Sort the named examples so generated output is stable.
+				names := make([]string, 0, len(item.Examples))
+				for name := range item.Examples {
+					names = append(names, name)
+				}
+				sort.Strings(names)
+				for _, name := range names {
+					if ex := item.Examples[name]; ex != nil && ex.Value != nil && ex.Value.Value != nil {
 						examples = append(examples, ex.Value.Value)
 						break
 					}
@@ -1119,9 +1131,11 @@ func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}, []*B
 			}
 
 			mts[mt] = requestInfo{
-				summary:    summary,
-				examples:   examples,
-				bodyFields: bodyFields,
+				mediaType:   mt,
+				summary:     summary,
+				examples:    examples,
+				exampleBody: buildExampleBody(mt, item),
+				bodyFields:  bodyFields,
 			}
 		}
 	}
@@ -1129,23 +1143,23 @@ func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}, []*B
 	// Prefer JSON.
 	for mt, item := range mts {
 		if strings.Contains(mt, "json") {
-			return mt, item.summary, item.examples, item.bodyFields
+			return item
 		}
 	}
 
 	// Fall back to YAML next.
 	for mt, item := range mts {
 		if strings.Contains(mt, "yaml") {
-			return mt, item.summary, item.examples, item.bodyFields
+			return item
 		}
 	}
 
 	// Last resort: return the first we find!
-	for mt, item := range mts {
-		return mt, item.summary, item.examples, item.bodyFields
+	for _, item := range mts {
+		return item
 	}
 
-	return "", "", nil, nil
+	return requestInfo{}
 }
 
 func getBodyFields(schema *openapi3.Schema) []*BodyField {
