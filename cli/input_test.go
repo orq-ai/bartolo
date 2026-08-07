@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -124,6 +125,200 @@ func TestGetBodyRejectsExplicitStdinWithoutPipe(t *testing.T) {
 	if _, err := cli.GetBody("application/json", nil, params, nil); err == nil {
 		t.Fatal("expected stdin error")
 	}
+}
+
+// withStdin points os.Stdin at f for the duration of the test.
+func withStdin(t *testing.T, f *os.File) {
+	t.Helper()
+
+	previous := os.Stdin
+	os.Stdin = f
+	t.Cleanup(func() { os.Stdin = previous })
+}
+
+// idleStdinPipe installs an open pipe on stdin that nobody ever writes to,
+// which is what CI runners and process spawners hand a child by default.
+func idleStdinPipe(t *testing.T) {
+	t.Helper()
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("open pipe: %v", err)
+	}
+	t.Cleanup(func() {
+		writer.Close()
+		reader.Close()
+	})
+
+	withStdin(t, reader)
+}
+
+// bodyFlagCommand builds a command carrying the shared and generated body
+// flags, bound to a viper instance the same way the generated CLI binds them.
+func bodyFlagCommand(t *testing.T, fields []cli.BodyField, sets map[string]string) (*cobra.Command, *viper.Viper) {
+	t.Helper()
+
+	cmd := &cobra.Command{Use: "test"}
+	cli.AddBodyFlags(cmd)
+	cli.AddBodyFieldFlags(cmd, fields)
+
+	for name, value := range sets {
+		if err := cmd.Flags().Set(name, value); err != nil {
+			t.Fatalf("set --%s=%s: %v", name, value, err)
+		}
+	}
+
+	params := viper.New()
+	if err := params.BindPFlags(cmd.Flags()); err != nil {
+		t.Fatalf("bind flags: %v", err)
+	}
+
+	return cmd, params
+}
+
+// resolveBody runs GetBodyWithFlags under a deadline so a regression that
+// reintroduces the blocking stdin read fails instead of hanging the suite.
+func resolveBody(t *testing.T, cmd *cobra.Command, args []string, params *viper.Viper, fields []cli.BodyField) (string, error) {
+	t.Helper()
+
+	type outcome struct {
+		body string
+		err  error
+	}
+
+	done := make(chan outcome, 1)
+	go func() {
+		body, err := cli.GetBodyWithFlags(cmd, "application/json", args, params, nil, fields)
+		done <- outcome{body: body, err: err}
+	}()
+
+	select {
+	case result := <-done:
+		return result.body, result.err
+	case <-time.After(10 * time.Second):
+		t.Fatal("GetBodyWithFlags blocked on stdin")
+		return "", nil
+	}
+}
+
+func TestGetBodyIgnoresIdleStdinPipeWhenFlagsSupplyBody(t *testing.T) {
+	idleStdinPipe(t)
+
+	fields := []cli.BodyField{{Name: "key", FlagName: "key", Type: "string"}}
+	cmd, params := bodyFlagCommand(t, fields, map[string]string{"key": "k"})
+
+	body, err := resolveBody(t, cmd, nil, params, fields)
+	if err != nil {
+		t.Fatalf("GetBodyWithFlags: %v", err)
+	}
+
+	assert.JSONEq(t, `{"key":"k"}`, body)
+}
+
+func TestGetBodyIgnoresIdleStdinPipeWhenShorthandSuppliesBody(t *testing.T) {
+	idleStdinPipe(t)
+
+	body, err := resolveBody(t, nil, []string{"key:", "k"}, viper.New(), nil)
+	if err != nil {
+		t.Fatalf("GetBodyWithFlags: %v", err)
+	}
+
+	assert.JSONEq(t, `{"key":"k"}`, body)
+}
+
+func TestGetBodyIgnoresIdleStdinPipeWhenFileSuppliesBody(t *testing.T) {
+	idleStdinPipe(t)
+
+	filename := filepath.Join(t.TempDir(), "body.json")
+	if err := os.WriteFile(filename, []byte(`{"hello":"world"}`), 0600); err != nil {
+		t.Fatalf("write body file: %v", err)
+	}
+
+	params := viper.New()
+	params.Set("from-file", filename)
+
+	body, err := resolveBody(t, nil, nil, params, nil)
+	if err != nil {
+		t.Fatalf("GetBodyWithFlags: %v", err)
+	}
+
+	assert.JSONEq(t, `{"hello":"world"}`, body)
+}
+
+// A pipe that actually carries data is still read even when flags also supply
+// fields, so `cat body.json | cli create --key k` keeps working.
+func TestGetBodyReadsPipedBodyUnderneathFlags(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("open pipe: %v", err)
+	}
+	t.Cleanup(func() { reader.Close() })
+
+	if _, err := writer.WriteString(`{"hello":"world","key":"from-stdin"}`); err != nil {
+		t.Fatalf("write pipe: %v", err)
+	}
+	writer.Close()
+
+	withStdin(t, reader)
+
+	fields := []cli.BodyField{{Name: "key", FlagName: "key", Type: "string"}}
+	cmd, params := bodyFlagCommand(t, fields, map[string]string{"key": "from-flag"})
+
+	body, err := resolveBody(t, cmd, nil, params, fields)
+	if err != nil {
+		t.Fatalf("GetBodyWithFlags: %v", err)
+	}
+
+	assert.JSONEq(t, `{"hello":"world","key":"from-flag"}`, body)
+}
+
+// A redirect from a regular file never blocks, so it is read regardless of what
+// else supplied the body -- `cli command <input.json field: value` is a
+// documented combination.
+func TestGetBodyReadsRedirectedFileUnderneathShorthand(t *testing.T) {
+	filename := filepath.Join(t.TempDir(), "body.json")
+	if err := os.WriteFile(filename, []byte(`{"hello":"world"}`), 0600); err != nil {
+		t.Fatalf("write body file: %v", err)
+	}
+
+	file, err := os.Open(filename)
+	if err != nil {
+		t.Fatalf("open body file: %v", err)
+	}
+	t.Cleanup(func() { file.Close() })
+
+	withStdin(t, file)
+
+	body, err := resolveBody(t, nil, []string{"count:", "2"}, viper.New(), nil)
+	if err != nil {
+		t.Fatalf("GetBodyWithFlags: %v", err)
+	}
+
+	assert.JSONEq(t, `{"hello":"world","count":2}`, body)
+}
+
+// Without any other source stdin is the only thing that can supply the body, so
+// it is still read to completion.
+func TestGetBodyReadsPipedBodyWhenNothingElseSuppliesIt(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("open pipe: %v", err)
+	}
+	t.Cleanup(func() { reader.Close() })
+
+	go func() {
+		writer.WriteString(`{"hello":"world"}`)
+		writer.Close()
+	}()
+
+	withStdin(t, reader)
+
+	body, err := resolveBody(t, nil, nil, viper.New(), nil)
+	if err != nil {
+		t.Fatalf("GetBodyWithFlags: %v", err)
+	}
+
+	assert.JSONEq(t, `{"hello":"world"}`, body)
 }
 
 func applyBody(t *testing.T, fields []cli.BodyField, sets map[string][]string, base string) string {

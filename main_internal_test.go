@@ -270,6 +270,22 @@ func TestResolveInitConfigRejectsInvalidModulePath(t *testing.T) {
 	}
 }
 
+func TestResolveInitConfigRejectsUnknownDefaultFormat(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("interactive", false, "")
+	cmd.Flags().String("module-path", "", "")
+	cmd.Flags().String("api-key-env-var", "", "")
+	cmd.Flags().String("default-format", "not-a-format", "")
+
+	_, err := resolveInitConfig(cmd, []string{"demo-cli"})
+	if err == nil {
+		t.Fatal("expected unknown default format error")
+	}
+	if !strings.Contains(err.Error(), "is not one of [json, yaml, toon]") {
+		t.Fatalf("expected the error to name the allowed formats, got %q", err)
+	}
+}
+
 func TestGenerateFromJSONFixtureBuildsCLI(t *testing.T) {
 	repoRoot, err := os.Getwd()
 	if err != nil {

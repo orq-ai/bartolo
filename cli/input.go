@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/orq-ai/bartolo/shorthand"
 	"github.com/rs/zerolog/log"
@@ -132,21 +133,64 @@ func AddBodyFieldFlags(cmd *cobra.Command, fields []BodyField) {
 // GetBody returns the request body if one was passed via stdin, a file, a
 // generated example, or shorthand CLI arguments.
 func GetBody(mediaType string, args []string, params *viper.Viper, examples []string) (string, error) {
-	body, err := loadBaseBody(params, mediaType, examples)
+	return GetBodyWithFlags(nil, mediaType, args, params, examples, nil)
+}
+
+// GetBodyWithFlags resolves the request body from every supported source and
+// overlays the generated typed body flags, lowest precedence first: stdin,
+// --from-file or --example, then shorthand CLI arguments, then body flags.
+//
+// Passing cmd and fields lets the resolver see whether the body is already
+// satisfied before it decides to read stdin, which is what keeps a command
+// from blocking on an idle pipe. See loadBaseBody for the stdin rules.
+func GetBodyWithFlags(cmd *cobra.Command, mediaType string, args []string, params *viper.Viper, examples []string, fields []BodyField) (string, error) {
+	body, err := loadBaseBody(params, mediaType, examples, bodySuppliedElsewhere(cmd, params, args, fields))
 	if err != nil {
 		return "", err
 	}
 
-	if len(args) == 0 {
-		return body, nil
+	if len(args) > 0 {
+		result, err := shorthand.ParseAndBuild("stdin", strings.Join(args, " "))
+		if err != nil {
+			return "", err
+		}
+
+		body, err = mergeStructuredBody(mediaType, body, result)
+		if err != nil {
+			return "", err
+		}
 	}
 
-	result, err := shorthand.ParseAndBuild("stdin", strings.Join(args, " "))
-	if err != nil {
-		return "", err
+	return ApplyBodyFlags(cmd, params, mediaType, body, fields)
+}
+
+// bodySuppliedElsewhere reports whether a source other than stdin has already
+// produced request-body content.
+func bodySuppliedElsewhere(cmd *cobra.Command, params *viper.Viper, args []string, fields []BodyField) bool {
+	if len(args) > 0 {
+		return true
 	}
 
-	return mergeStructuredBody(mediaType, body, result)
+	if params != nil {
+		if strings.TrimSpace(params.GetString("from-file")) != "" {
+			return true
+		}
+		if params.GetBool("example") {
+			return true
+		}
+	}
+
+	if cmd == nil {
+		return false
+	}
+
+	for _, field := range fields {
+		if flag := cmd.Flags().Lookup(field.FlagName); flag != nil && flag.Changed {
+			return true
+		}
+	}
+
+	return false
 }
 
 // ApplyBodyFlags overlays generated typed body flags on top of the parsed
@@ -296,7 +340,12 @@ func ApplyBodyFlags(cmd *cobra.Command, params *viper.Viper, mediaType string, b
 	return mergeStructuredBody(mediaType, body, overrides)
 }
 
-func loadBaseBody(params *viper.Viper, mediaType string, examples []string) (string, error) {
+// stdinPipeGrace is how long an implicit stdin read waits for a writer that
+// may still be starting up before it gives up and falls back to the body that
+// was already supplied by flags, --from-file or shorthand.
+const stdinPipeGrace = 250 * time.Millisecond
+
+func loadBaseBody(params *viper.Viper, mediaType string, examples []string, bodyElsewhere bool) (string, error) {
 	if params != nil {
 		if filename := strings.TrimSpace(params.GetString("from-file")); filename != "" {
 			input, err := ioutil.ReadFile(filename)
@@ -319,22 +368,60 @@ func loadBaseBody(params *viper.Viper, mediaType string, examples []string) (str
 		}
 	}
 
-	info, err := os.Stdin.Stat()
+	// Resolve stdin once: an abandoned read below outlives this call, and it
+	// must not race with anything that reassigns os.Stdin afterwards.
+	stdin := os.Stdin
+
+	info, err := stdin.Stat()
 	if err != nil {
 		return "", err
 	}
 
+	isTerminal := (info.Mode() & os.ModeCharDevice) != 0
+
+	// --stdin means the caller insists on piped input, so wait for it however
+	// long it takes.
 	if params != nil && params.GetBool("stdin") {
-		if (info.Mode() & os.ModeCharDevice) != 0 {
+		if isTerminal {
 			return "", fmt.Errorf("stdin requested but no piped input was detected")
 		}
+		return readStdin(stdin)
 	}
 
-	if (info.Mode() & os.ModeCharDevice) != 0 {
+	if isTerminal {
 		return "", nil
 	}
 
-	input, err := ioutil.ReadAll(os.Stdin)
+	// A redirect from a regular file (`cmd < body.json`) always reaches EOF, so
+	// it can be read unconditionally. Shorthand is documented to layer on top of
+	// exactly that form.
+	if info.Mode().IsRegular() {
+		return readStdin(stdin)
+	}
+
+	// stdin is a pipe, FIFO or socket. Reading one that nobody ever writes to
+	// blocks forever, and an open idle stdin is precisely what CI runners, task
+	// runners and subprocess.Popen / child_process.spawn hand a child by
+	// default. Only wait on it indefinitely when it is the sole possible source
+	// of the body.
+	if !bodyElsewhere {
+		return readStdin(stdin)
+	}
+
+	body, ok, err := readStdinWithin(stdin, stdinPipeGrace)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		log.Debug().Msg("stdin is a pipe with no data pending; using the body from flags, --from-file or shorthand instead")
+		return "", nil
+	}
+
+	return body, nil
+}
+
+func readStdin(stdin *os.File) (string, error) {
+	input, err := ioutil.ReadAll(stdin)
 	if err != nil {
 		return "", err
 	}
@@ -342,6 +429,32 @@ func loadBaseBody(params *viper.Viper, mediaType string, examples []string) (str
 	body := string(input)
 	log.Debug().Msgf("Body from stdin is: %s", body)
 	return body, nil
+}
+
+// readStdinWithin reads stdin but reports ok=false if nothing has arrived
+// within the grace period. An abandoned read stays parked in its goroutine
+// until the process exits, which is harmless for a short-lived CLI.
+func readStdinWithin(stdin *os.File, grace time.Duration) (string, bool, error) {
+	type result struct {
+		body string
+		err  error
+	}
+
+	done := make(chan result, 1)
+	go func() {
+		body, err := readStdin(stdin)
+		done <- result{body: body, err: err}
+	}()
+
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+
+	select {
+	case r := <-done:
+		return r.body, true, r.err
+	case <-timer.C:
+		return "", false, nil
+	}
 }
 
 func mergeStructuredBody(mediaType string, body string, result map[string]interface{}) (string, error) {

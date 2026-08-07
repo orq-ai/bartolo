@@ -123,17 +123,13 @@ func registerRootCommands(root *cobra.Command) {
 				Args:    cobra.MinimumNArgs({{ len .RequiredParams }}),
 				Run: func(cmd *cobra.Command, args []string) {
 					{{- if .CanHaveBody }}
-					body, err := bartolocli.GetBody("{{ .MediaType | escapeStr }}", args[{{ len .RequiredParams }}:], params, []string{
+					body, err := bartolocli.GetBodyWithFlags(cmd, "{{ .MediaType | escapeStr }}", args[{{ len .RequiredParams }}:], params, []string{
 						{{- range .Examples }}
 						"{{ . | escapeStr }}",
 						{{- end }}
-					})
+					}, {{ template "bodyFields" . }})
 					if err != nil {
 						log.Fatal().Err(err).Msg("unable to get body")
-					}
-					body, err = bartolocli.ApplyBodyFlags(cmd, params, "{{ .MediaType | escapeStr }}", body, {{ template "bodyFields" . }})
-					if err != nil {
-						log.Fatal().Err(err).Msg("unable to apply body flags")
 					}
 					{{- end }}
 

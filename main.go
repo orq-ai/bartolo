@@ -2217,24 +2217,18 @@ func promptInterrupted(err error) bool {
 	return err == surveyterminal.InterruptErr
 }
 
-func normalizeOutputFormat(value string) string {
-	if format, ok := parseOutputFormat(value); ok {
-		return format
-	}
-	return "json"
-}
+// outputFormats are the values accepted by `--default-format`, mirroring the
+// formats the generated CLIs support.
+var outputFormats = []string{"json", "yaml", "toon"}
 
 func parseOutputFormat(value string) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "json":
-		return "json", true
-	case "yaml":
-		return "yaml", true
-	case "toon":
-		return "toon", true
-	default:
-		return "", false
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	for _, format := range outputFormats {
+		if normalized == format {
+			return format, true
+		}
 	}
+	return "", false
 }
 
 func isValidEnvVarName(value string) bool {
@@ -2398,7 +2392,12 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 	apiKeyEnvVar = strings.TrimSpace(apiKeyEnvVar)
 
 	defaultFormat, _ := cmd.Flags().GetString("default-format")
-	defaultFormat = normalizeOutputFormat(defaultFormat)
+	// Reject an unknown format instead of quietly generating a JSON CLI.
+	defaultFormat, ok := parseOutputFormat(defaultFormat)
+	if !ok {
+		rejected, _ := cmd.Flags().GetString("default-format")
+		return nil, fmt.Errorf("--default-format: %q is not one of [%s]", rejected, strings.Join(outputFormats, ", "))
+	}
 
 	interactive, _ := cmd.Flags().GetBool("interactive")
 	if len(args) == 0 {
@@ -2994,7 +2993,7 @@ func main() {
 	initCommand.Flags().String("module-path", "", "Go module path for the generated CLI project")
 	initCommand.Flags().String("bartolo-path", "", "Local path to the bartolo repo to use via go.mod replace during development")
 	initCommand.Flags().String("api-key-env-var", "", "Custom API key environment variable for generated CLIs")
-	initCommand.Flags().String("default-format", "json", "Default output format for generated CLIs [json, yaml, toon]")
+	initCommand.Flags().String("default-format", "json", fmt.Sprintf("Default output format for generated CLIs [%s]", strings.Join(outputFormats, ", ")))
 	root.AddCommand(initCommand)
 
 	root.AddCommand(&cobra.Command{
