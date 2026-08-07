@@ -524,3 +524,110 @@ func TestApplyBodyFlagsOverridesStructuredBody(t *testing.T) {
 
 	assert.JSONEq(t, `{"instructions":"updated"}`, body)
 }
+
+// A body field whose name matches a global flag used to take that flag's long
+// name, which made cobra drop the global from the command entirely — including
+// its shorthand, so `-o` stopped resolving on a command with an `output-format`
+// body field.
+func TestBodyFieldFlagsDoNotShadowGlobalFlags(t *testing.T) {
+	root := &cobra.Command{Use: "orq"}
+	root.PersistentFlags().StringP("output-format", "o", "toon", "Output format")
+	root.PersistentFlags().Bool("raw", false, "Output result of --jmespath as raw")
+
+	cmd := &cobra.Command{Use: "generate", Run: func(*cobra.Command, []string) {}}
+	root.AddCommand(cmd)
+
+	fields := []cli.BodyField{
+		{Name: "output_format", FlagName: "output-format", Type: "string"},
+		{Name: "raw", FlagName: "raw", Type: "bool"},
+		{Name: "prompt", FlagName: "prompt", Type: "string"},
+	}
+	cli.AddBodyFieldFlags(cmd, fields)
+
+	// The body fields moved out of the way...
+	assert.NotNil(t, cmd.Flags().Lookup("body-output-format"))
+	assert.NotNil(t, cmd.Flags().Lookup("body-raw"))
+	assert.Nil(t, cmd.Flags().Lookup("output-format"), "body field must not claim a global flag name")
+
+	// ...so the globals and their shorthands still resolve on this command.
+	root.SetArgs([]string{"generate", "-o", "json", "--body-output-format", "png", "--prompt", "a cat"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	outputFormat, err := root.PersistentFlags().GetString("output-format")
+	if err != nil {
+		t.Fatalf("get global output-format: %v", err)
+	}
+	assert.Equal(t, "json", outputFormat)
+
+	params := viper.New()
+	if err := params.BindPFlags(cmd.Flags()); err != nil {
+		t.Fatalf("bind flags: %v", err)
+	}
+
+	body, err := cli.ApplyBodyFlags(cmd, params, "application/json", ``, fields)
+	if err != nil {
+		t.Fatalf("ApplyBodyFlags: %v", err)
+	}
+
+	// The renamed flag still writes the original body key.
+	assert.JSONEq(t, `{"output_format":"png","prompt":"a cat"}`, body)
+}
+
+// The JMESPath filter is named `jmespath` so that `query` — by far the most
+// common colliding field name — stays available to endpoints.
+func TestBodyFieldNamedQueryKeepsItsFlag(t *testing.T) {
+	root := &cobra.Command{Use: "orq"}
+	root.PersistentFlags().StringP("jmespath", "j", "", "Filter / project results using JMESPath")
+
+	cmd := &cobra.Command{Use: "search", Run: func(*cobra.Command, []string) {}}
+	root.AddCommand(cmd)
+
+	fields := []cli.BodyField{{Name: "query", FlagName: "query", Type: "string"}}
+	cli.AddBodyFieldFlags(cmd, fields)
+
+	assert.NotNil(t, cmd.Flags().Lookup("query"), "endpoints keep the obvious --query name")
+
+	root.SetArgs([]string{"search", "--query", "checkout", "-j", "data[0].trace_id"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	jmespath, err := root.PersistentFlags().GetString("jmespath")
+	if err != nil {
+		t.Fatalf("get global jmespath: %v", err)
+	}
+	assert.Equal(t, "data[0].trace_id", jmespath)
+
+	params := viper.New()
+	if err := params.BindPFlags(cmd.Flags()); err != nil {
+		t.Fatalf("bind flags: %v", err)
+	}
+
+	body, err := cli.ApplyBodyFlags(cmd, params, "application/json", ``, fields)
+	if err != nil {
+		t.Fatalf("ApplyBodyFlags: %v", err)
+	}
+	assert.JSONEq(t, `{"query":"checkout"}`, body)
+}
+
+// pflag panics when a flag is registered twice, so a body field colliding with
+// one of the shared request-body flags has to be renamed as well.
+func TestBodyFieldFlagsDoNotCollideWithRequestBodyFlags(t *testing.T) {
+	cmd := &cobra.Command{Use: "test"}
+	cli.AddBodyFlags(cmd)
+
+	fields := []cli.BodyField{
+		{Name: "example", FlagName: "example", Type: "string"},
+		{Name: "stdin", FlagName: "stdin", Type: "bool"},
+	}
+
+	assert.NotPanics(t, func() { cli.AddBodyFieldFlags(cmd, fields) })
+	assert.NotNil(t, cmd.Flags().Lookup("body-example"))
+	assert.NotNil(t, cmd.Flags().Lookup("body-stdin"))
+
+	// The real request-body flags kept their types.
+	assert.Equal(t, "string", cmd.Flags().Lookup("from-file").Value.Type())
+	assert.Equal(t, "bool", cmd.Flags().Lookup("example").Value.Type())
+}

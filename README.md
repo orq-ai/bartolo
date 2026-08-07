@@ -68,7 +68,8 @@ Every generated CLI starts with a useful operator surface:
 - `doctor` shows config, auth source, and selected server.
 - `request` provides a raw escape hatch for unmodeled endpoints.
 - `default-format` shows or persists the preferred default output format.
-- `--json`, `--output-format`, and `--query` make automation and projection straightforward.
+- `--json`, `--output-format`, and `-j`/`--jmespath` make automation and projection straightforward.
+- Generated flags never shadow a global: a body field or parameter named after one (`raw`, `profile`, `output-format`, ...) is exposed as `--body-<name>` or `--param-<name>`.
 - Grouped nouns like `prompts`, `files`, or `human-evals` feel closer to a product CLI than a path translator.
 
 ## Schema Shaping
