@@ -115,13 +115,9 @@ func register{{ $group.GoName }}Commands(root *cobra.Command) {
 						return
 					}
 					{{- end }}
-					body, err := bartolocli.GetBody("{{ .MediaType | escapeStr }}", args[{{ len .RequiredParams }}:], params)
+					body, err := bartolocli.GetBodyWithFlags(cmd, "{{ .MediaType | escapeStr }}", args[{{ len .RequiredParams }}:], params, {{ template "bodyFields" . }})
 					if err != nil {
 						log.Fatal().Err(err).Msg("unable to get body")
-					}
-					body, err = bartolocli.ApplyBodyFlags(cmd, params, "{{ .MediaType | escapeStr }}", body, {{ template "bodyFields" . }})
-					if err != nil {
-						log.Fatal().Err(err).Msg("unable to apply body flags")
 					}
 					{{- end }}
 

@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
@@ -266,6 +267,22 @@ func TestResolveInitConfigRejectsInvalidModulePath(t *testing.T) {
 
 	if _, err := resolveInitConfig(cmd, []string{"demo-cli"}); err == nil {
 		t.Fatal("expected invalid module path error")
+	}
+}
+
+func TestResolveInitConfigRejectsUnknownDefaultFormat(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("interactive", false, "")
+	cmd.Flags().String("module-path", "", "")
+	cmd.Flags().String("api-key-env-var", "", "")
+	cmd.Flags().String("default-format", "not-a-format", "")
+
+	_, err := resolveInitConfig(cmd, []string{"demo-cli"})
+	if err == nil {
+		t.Fatal("expected unknown default format error")
+	}
+	if !strings.Contains(err.Error(), "is not one of [json, yaml, toon]") {
+		t.Fatalf("expected the error to name the allowed formats, got %q", err)
 	}
 }
 
@@ -766,5 +783,116 @@ func TestLoadOpenAPIDocumentSupportsNumericExclusiveBounds(t *testing.T) {
 	}
 	if !schema.ExclusiveMin {
 		t.Fatal("expected exclusiveMinimum=true after normalization")
+	}
+}
+
+func TestProcessAPIRenamesFlagsThatShadowGlobals(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Traces API
+  version: "1"
+tags:
+  - name: Traces
+paths:
+  /v2/traces/search:
+    post:
+      operationId: TracesSearch
+      summary: Search traces
+      tags:
+        - Traces
+      parameters:
+        - in: query
+          name: profile
+          schema:
+            type: string
+        - in: query
+          name: page_token
+          schema:
+            type: string
+        - in: query
+          name: query
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query:
+                  type: string
+                raw:
+                  type: boolean
+                limit:
+                  type: integer
+      responses:
+        "200":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+	if len(api.Groups) != 1 || len(api.Groups[0].Operations) != 1 {
+		t.Fatalf("expected a single grouped operation, got %+v", api.Groups)
+	}
+	op := api.Groups[0].Operations[0]
+
+	bodyFlags := map[string]string{}
+	for _, field := range op.BodyFields {
+		bodyFlags[field.Name] = field.CLIName
+	}
+	expectedBody := map[string]string{
+		// `query` is not reserved — the global JMESPath flag is `--jmespath`.
+		"query": "query",
+		"raw":   "body-raw",
+		"limit": "limit",
+	}
+	if !reflect.DeepEqual(bodyFlags, expectedBody) {
+		t.Fatalf("body flag names: got %+v, want %+v", bodyFlags, expectedBody)
+	}
+
+	paramFlags := map[string]string{}
+	for _, param := range op.OptionalParams {
+		paramFlags[param.Name] = param.CLIName
+	}
+	expectedParams := map[string]string{
+		"profile":    "param-profile",
+		"page_token": "page-token",
+		// A param and a body field both named `query`: the body field claims
+		// the name first, so the param has to move — registering both would
+		// make pflag panic.
+		"query": "param-query",
+	}
+	if !reflect.DeepEqual(paramFlags, expectedParams) {
+		t.Fatalf("param flag names: got %+v, want %+v", paramFlags, expectedParams)
+	}
+
+	// The renamed param must still be looked up under its new name and sent
+	// under the original wire name.
+	for _, param := range op.OptionalParams {
+		if param.Name == "profile" && param.GoName != "paramParamProfile" {
+			t.Fatalf("renamed param Go name: got %q", param.GoName)
+		}
+	}
+
+	if !strings.Contains(op.Long, "--body-raw") {
+		t.Fatalf("expected the renamed flags to be documented in help, got:\n%s", op.Long)
+	}
+}
+
+func TestReserveGeneratedFlagNamesResolvesParamBodyCollision(t *testing.T) {
+	bodyFields := []*BodyField{{Name: "limit", CLIName: "limit"}}
+	optionalParams := []*Param{{Name: "limit", CLIName: "limit"}}
+
+	renamed := reserveGeneratedFlagNames(bodyFields, optionalParams)
+
+	if bodyFields[0].CLIName != "limit" {
+		t.Fatalf("body field should keep the name it claimed first, got %q", bodyFields[0].CLIName)
+	}
+	if optionalParams[0].CLIName != "param-limit" {
+		t.Fatalf("colliding param should be renamed, got %q", optionalParams[0].CLIName)
+	}
+	if len(renamed) != 1 || renamed[0].To != "param-limit" {
+		t.Fatalf("unexpected rename record: %+v", renamed)
 	}
 }

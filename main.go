@@ -22,6 +22,7 @@ import (
 	surveycore "github.com/AlecAivazis/survey/v2/core"
 	surveyterminal "github.com/AlecAivazis/survey/v2/terminal"
 	"github.com/getkin/kin-openapi/openapi3"
+	bartolocli "github.com/orq-ai/bartolo/cli"
 	"github.com/orq-ai/bartolo/shorthand"
 	"github.com/spf13/cobra"
 	yamlv3 "gopkg.in/yaml.v3"
@@ -320,6 +321,15 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 			reqInfo := getRequestInfo(operation)
 			reqMt, reqSchema, reqExamples, bodyFields := reqInfo.mediaType, reqInfo.summary, reqInfo.examples, reqInfo.bodyFields
 
+			renamedFlags := reserveGeneratedFlagNames(bodyFields, optionalParams)
+			for _, r := range renamedFlags {
+				kind, _ := bartolocli.ReservedFlagName(r.From)
+				if kind == "" {
+					kind = "another flag on this command"
+				}
+				log.Printf("warning: %s %s: --%s collides with %s, exposing it as --%s", method, path, r.From, kind, r.To)
+			}
+
 			var examples []string
 			if len(reqExamples) > 0 {
 				wroteHeader := false
@@ -361,6 +371,12 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 					"Scalar, nullable scalar (pass `null` for JSON null), enum, repeatable list (`--field a --field b`), " +
 					"and string map (`--field key=value`) fields use typed flags. " +
 					"Nested objects, arrays of objects, and polymorphic unions accept a JSON string (e.g. `--field '{\"k\":1}'`)."
+			}
+			if len(renamedFlags) > 0 {
+				description += "\n\nRenamed flags (the original names belong to global flags):\n"
+				for _, r := range renamedFlags {
+					description += fmt.Sprintf("- `%s` is `--%s` (not `--%s`)\n", r.Field, r.To, r.From)
+				}
 			}
 
 			method := strings.Title(strings.ToLower(method))
@@ -1116,12 +1132,16 @@ func getRequestInfo(op *openapi3.Operation) requestInfo {
 			if item.Example != nil {
 				examples = append(examples, item.Example)
 			} else if len(item.Examples) > 0 {
-				// Sort the named examples so generated output is stable.
+				// Examples is a map, so pick by sorted name rather than
+				// whichever key Go's randomized iteration happens to yield —
+				// otherwise regenerating from an unchanged spec produces a
+				// different example every time.
 				names := make([]string, 0, len(item.Examples))
 				for name := range item.Examples {
 					names = append(names, name)
 				}
 				sort.Strings(names)
+
 				for _, name := range names {
 					if ex := item.Examples[name]; ex != nil && ex.Value != nil && ex.Value.Value != nil {
 						examples = append(examples, ex.Value.Value)
@@ -1140,26 +1160,110 @@ func getRequestInfo(op *openapi3.Operation) requestInfo {
 		}
 	}
 
+	// Walk media types in a stable order for the same reason.
+	mediaTypes := make([]string, 0, len(mts))
+	for mt := range mts {
+		mediaTypes = append(mediaTypes, mt)
+	}
+	sort.Strings(mediaTypes)
+
 	// Prefer JSON.
-	for mt, item := range mts {
+	for _, mt := range mediaTypes {
 		if strings.Contains(mt, "json") {
-			return item
+			return mts[mt]
 		}
 	}
 
 	// Fall back to YAML next.
-	for mt, item := range mts {
+	for _, mt := range mediaTypes {
 		if strings.Contains(mt, "yaml") {
-			return item
+			return mts[mt]
 		}
 	}
 
 	// Last resort: return the first we find!
-	for _, item := range mts {
-		return item
+	for _, mt := range mediaTypes {
+		return mts[mt]
 	}
 
 	return requestInfo{}
+}
+
+// renamedFlag records a generated flag that had to be renamed to avoid a
+// collision, so the change can be surfaced in help text and generator output.
+type renamedFlag struct {
+	Field string
+	From  string
+	To    string
+}
+
+// reserveGeneratedFlagNames renames generated flags whose names would collide
+// with a global flag, a cobra built-in, or another flag on the same command.
+//
+// pflag's AddFlagSet skips any flag whose name a command already uses, and
+// cobra merges the root's persistent flags through it. A body field named
+// `profile` therefore does not merely win the long name — it drops the global
+// `--profile` from that command entirely, and a global's shorthand goes with
+// it, so `-o` stops resolving on a command with an `output-format` field.
+// Duplicating a request-body flag such as `--stdin` is worse still: pflag
+// panics when the flag is registered twice.
+//
+// Only optional params and body fields become flags. Required params are
+// positional arguments and keep their names. Body fields are reserved first
+// because the generated command registers them first.
+func reserveGeneratedFlagNames(bodyFields []*BodyField, optionalParams []*Param) []renamedFlag {
+	taken := map[string]bool{}
+	var renamed []renamedFlag
+
+	claim := func(prefix, name string) string {
+		resolved := bartolocli.ResolveGeneratedFlagName(prefix, name)
+		if taken[resolved] {
+			// Two sources want the same flag. Prefix (or further qualify) until
+			// the name is free, since registering it twice would panic.
+			resolved = prefix + "-" + name
+			for i := 2; taken[resolved]; i++ {
+				resolved = fmt.Sprintf("%s-%s-%d", prefix, name, i)
+			}
+		}
+		taken[resolved] = true
+		return resolved
+	}
+
+	// Say why a flag moved, right where the user reads the flag list. The
+	// runtime adds the same note for CLIs generated before this fix; it only
+	// does so when it has to rename, so the note is never duplicated here.
+	note := func(kind, name, from string) string {
+		if _, reserved := bartolocli.ReservedFlagName(from); reserved {
+			return fmt.Sprintf(" (%s %q, renamed to keep the global --%s flag available)", kind, name, from)
+		}
+		return fmt.Sprintf(" (%s %q, renamed to avoid a duplicate --%s flag)", kind, name, from)
+	}
+
+	for _, field := range bodyFields {
+		resolved := claim("body", field.CLIName)
+		if resolved != field.CLIName {
+			renamed = append(renamed, renamedFlag{Field: field.Name, From: field.CLIName, To: resolved})
+			description := strings.TrimSpace(field.Description)
+			if description == "" {
+				description = field.Name
+			}
+			field.Description = description + note("body field", field.Name, field.CLIName)
+			field.CLIName = resolved
+			field.GoName = toGoName("body "+resolved, false)
+		}
+	}
+
+	for _, param := range optionalParams {
+		resolved := claim("param", param.CLIName)
+		if resolved != param.CLIName {
+			renamed = append(renamed, renamedFlag{Field: param.Name, From: param.CLIName, To: resolved})
+			param.Description = strings.TrimSpace(param.Description) + note("parameter", param.Name, param.CLIName)
+			param.CLIName = resolved
+			param.GoName = toGoName("param "+resolved, false)
+		}
+	}
+
+	return renamed
 }
 
 func getBodyFields(schema *openapi3.Schema) []*BodyField {
@@ -2118,24 +2222,18 @@ func promptInterrupted(err error) bool {
 	return err == surveyterminal.InterruptErr
 }
 
-func normalizeOutputFormat(value string) string {
-	if format, ok := parseOutputFormat(value); ok {
-		return format
-	}
-	return "json"
-}
+// outputFormats are the values accepted by `--default-format`, mirroring the
+// formats the generated CLIs support.
+var outputFormats = []string{"json", "yaml", "toon"}
 
 func parseOutputFormat(value string) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "json":
-		return "json", true
-	case "yaml":
-		return "yaml", true
-	case "toon":
-		return "toon", true
-	default:
-		return "", false
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	for _, format := range outputFormats {
+		if normalized == format {
+			return format, true
+		}
 	}
+	return "", false
 }
 
 func isValidEnvVarName(value string) bool {
@@ -2299,7 +2397,12 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 	apiKeyEnvVar = strings.TrimSpace(apiKeyEnvVar)
 
 	defaultFormat, _ := cmd.Flags().GetString("default-format")
-	defaultFormat = normalizeOutputFormat(defaultFormat)
+	// Reject an unknown format instead of quietly generating a JSON CLI.
+	defaultFormat, ok := parseOutputFormat(defaultFormat)
+	if !ok {
+		rejected, _ := cmd.Flags().GetString("default-format")
+		return nil, fmt.Errorf("--default-format: %q is not one of [%s]", rejected, strings.Join(outputFormats, ", "))
+	}
 
 	interactive, _ := cmd.Flags().GetBool("interactive")
 	if len(args) == 0 {
@@ -2895,7 +2998,7 @@ func main() {
 	initCommand.Flags().String("module-path", "", "Go module path for the generated CLI project")
 	initCommand.Flags().String("bartolo-path", "", "Local path to the bartolo repo to use via go.mod replace during development")
 	initCommand.Flags().String("api-key-env-var", "", "Custom API key environment variable for generated CLIs")
-	initCommand.Flags().String("default-format", "json", "Default output format for generated CLIs [json, yaml, toon]")
+	initCommand.Flags().String("default-format", "json", fmt.Sprintf("Default output format for generated CLIs [%s]", strings.Join(outputFormats, ", ")))
 	root.AddCommand(initCommand)
 
 	root.AddCommand(&cobra.Command{
