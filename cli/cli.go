@@ -452,7 +452,7 @@ Standard input is only read when it can actually supply the body. A redirect fro
 Commands that accept a request body also support:
 
 - ¬--from-file path.json¬ to load the base body from disk.
-- ¬--example¬ to start from the first generated example body.
+- ¬--example¬ to print an example request body and exit without sending a request. It takes precedence over every other body input. Round-trip it: ¬my-cli command --example >body.json¬, edit the file, then ¬my-cli command --from-file body.json¬.
 - ¬--stdin¬ to require piped stdin input explicitly.
 - Generated ¬--field-name¬ flags for simple top-level body properties when Bartolo can infer them safely.
 

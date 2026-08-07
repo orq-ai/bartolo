@@ -78,7 +78,23 @@ func DeepAssign(target, source map[string]interface{}) {
 func AddBodyFlags(cmd *cobra.Command) {
 	cmd.Flags().String("from-file", "", "Read the request body from a file path")
 	cmd.Flags().Bool("stdin", false, "Require request body input from stdin")
-	cmd.Flags().Bool("example", false, "Use the first generated body example as the request body")
+}
+
+// AddExampleFlag installs --example on commands that have a generated example
+// request body.
+func AddExampleFlag(cmd *cobra.Command) {
+	cmd.Flags().Bool("example", false, "Print an example request body for this command and exit without sending a request")
+}
+
+// PrintBodyExample prints the generated example request body when --example
+// was passed and reports whether it did, so the caller can return without
+// sending a request. It takes precedence over every other body input.
+func PrintBodyExample(params *viper.Viper, example string) bool {
+	if params == nil || !params.GetBool("example") || example == "" {
+		return false
+	}
+	fmt.Fprintln(Stdout, example)
+	return true
 }
 
 // AddBodyFieldFlags installs generated typed request-body flags for simple
@@ -130,21 +146,21 @@ func AddBodyFieldFlags(cmd *cobra.Command, fields []BodyField) {
 	}
 }
 
-// GetBody returns the request body if one was passed via stdin, a file, a
-// generated example, or shorthand CLI arguments.
-func GetBody(mediaType string, args []string, params *viper.Viper, examples []string) (string, error) {
-	return GetBodyWithFlags(nil, mediaType, args, params, examples, nil)
+// GetBody returns the request body if one was passed via stdin, a file, or
+// shorthand CLI arguments.
+func GetBody(mediaType string, args []string, params *viper.Viper) (string, error) {
+	return GetBodyWithFlags(nil, mediaType, args, params, nil)
 }
 
 // GetBodyWithFlags resolves the request body from every supported source and
 // overlays the generated typed body flags, lowest precedence first: stdin,
-// --from-file or --example, then shorthand CLI arguments, then body flags.
+// --from-file, then shorthand CLI arguments, then body flags.
 //
 // Passing cmd and fields lets the resolver see whether the body is already
 // satisfied before it decides to read stdin, which is what keeps a command
 // from blocking on an idle pipe. See loadBaseBody for the stdin rules.
-func GetBodyWithFlags(cmd *cobra.Command, mediaType string, args []string, params *viper.Viper, examples []string, fields []BodyField) (string, error) {
-	body, err := loadBaseBody(params, mediaType, examples, bodySuppliedElsewhere(cmd, params, args, fields))
+func GetBodyWithFlags(cmd *cobra.Command, mediaType string, args []string, params *viper.Viper, fields []BodyField) (string, error) {
+	body, err := loadBaseBody(params, bodySuppliedElsewhere(cmd, params, args, fields))
 	if err != nil {
 		return "", err
 	}
@@ -173,9 +189,6 @@ func bodySuppliedElsewhere(cmd *cobra.Command, params *viper.Viper, args []strin
 
 	if params != nil {
 		if strings.TrimSpace(params.GetString("from-file")) != "" {
-			return true
-		}
-		if params.GetBool("example") {
 			return true
 		}
 	}
@@ -345,7 +358,7 @@ func ApplyBodyFlags(cmd *cobra.Command, params *viper.Viper, mediaType string, b
 // was already supplied by flags, --from-file or shorthand.
 const stdinPipeGrace = 250 * time.Millisecond
 
-func loadBaseBody(params *viper.Viper, mediaType string, examples []string, bodyElsewhere bool) (string, error) {
+func loadBaseBody(params *viper.Viper, bodyElsewhere bool) (string, error) {
 	if params != nil {
 		if filename := strings.TrimSpace(params.GetString("from-file")); filename != "" {
 			input, err := ioutil.ReadFile(filename)
@@ -353,18 +366,6 @@ func loadBaseBody(params *viper.Viper, mediaType string, examples []string, body
 				return "", err
 			}
 			return string(input), nil
-		}
-
-		if params.GetBool("example") {
-			if len(examples) == 0 {
-				return "", fmt.Errorf("no generated body example is available for this command")
-			}
-
-			result, err := shorthand.ParseAndBuild("example", examples[0])
-			if err != nil {
-				return "", err
-			}
-			return mergeStructuredBody(mediaType, "", result)
 		}
 	}
 

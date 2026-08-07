@@ -33,7 +33,8 @@ var reservedFlagNames = map[string]string{
 	// Cobra installs this on every command that does not already have it.
 	"help": "built-in flag",
 
-	// Request-body input flags, registered by AddBodyFlags.
+	// Request-body input flags, registered by AddBodyFlags — except
+	// `example`, which AddExampleFlag installs on commands that have one.
 	"example":   "request-body flag",
 	"from-file": "request-body flag",
 	"stdin":     "request-body flag",

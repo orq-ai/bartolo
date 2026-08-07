@@ -103,6 +103,7 @@ func openapiRegister(subcommand bool) {
 		var examples string
 
 		examples += "  " + cli.Root.CommandPath() + " echo hello: world\n"
+		examples += "  " + cli.Root.CommandPath() + " echo --example\n"
 
 		cmd := &cobra.Command{
 			Use:     "echo",
@@ -111,9 +112,10 @@ func openapiRegister(subcommand bool) {
 			Example: examples,
 			Args:    cobra.MinimumNArgs(0),
 			Run: func(cmd *cobra.Command, args []string) {
-				body, err := cli.GetBody("application/json", args[0:], params, []string{
-					"hello: world",
-				})
+				if cli.PrintBodyExample(params, "{\n  \"hello\": \"world\"\n}") {
+					return
+				}
+				body, err := cli.GetBody("application/json", args[0:], params)
 				if err != nil {
 					log.Fatal().Err(err).Msg("Unable to get body")
 				}
@@ -143,6 +145,7 @@ func openapiRegister(subcommand bool) {
 		root.AddCommand(cmd)
 
 		cli.AddBodyFlags(cmd)
+		cli.AddExampleFlag(cmd)
 		cli.AddBodyFieldFlags(cmd, []cli.BodyField{
 			{
 				Name:        "hello",

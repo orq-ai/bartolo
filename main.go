@@ -76,6 +76,7 @@ type Operation struct {
 	OptionalParams []*Param
 	MediaType      string
 	Examples       []string
+	BodyExample    string
 	BodyFields     []*BodyField
 	Hidden         bool
 	NeedsResponse  bool
@@ -317,7 +318,8 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				description = extStr(operation.Extensions[ExtDescription])
 			}
 
-			reqMt, reqSchema, reqExamples, bodyFields := getRequestInfo(operation)
+			reqInfo := getRequestInfo(operation)
+			reqMt, reqSchema, reqExamples, bodyFields := reqInfo.mediaType, reqInfo.summary, reqInfo.examples, reqInfo.bodyFields
 
 			renamedFlags := reserveGeneratedFlagNames(bodyFields, optionalParams)
 			for _, r := range renamedFlags {
@@ -453,6 +455,7 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				OptionalParams: optionalParams,
 				MediaType:      reqMt,
 				Examples:       examples,
+				BodyExample:    reqInfo.exampleBody,
 				BodyFields:     bodyFields,
 				Hidden:         hidden,
 				Group:          group,
@@ -1101,13 +1104,16 @@ func getOptionalParams(allParams []*Param) []*Param {
 	return optional
 }
 
-func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}, []*BodyField) {
-	type requestInfo struct {
-		summary    string
-		examples   []interface{}
-		bodyFields []*BodyField
-	}
+// requestInfo describes the request body of an operation for one media type.
+type requestInfo struct {
+	mediaType   string
+	summary     string
+	examples    []interface{}
+	exampleBody string
+	bodyFields  []*BodyField
+}
 
+func getRequestInfo(op *openapi3.Operation) requestInfo {
 	mts := make(map[string]requestInfo)
 
 	if op.RequestBody != nil && op.RequestBody.Value != nil {
@@ -1125,7 +1131,7 @@ func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}, []*B
 
 			if item.Example != nil {
 				examples = append(examples, item.Example)
-			} else {
+			} else if len(item.Examples) > 0 {
 				// Examples is a map, so pick by sorted name rather than
 				// whichever key Go's randomized iteration happens to yield —
 				// otherwise regenerating from an unchanged spec produces a
@@ -1137,7 +1143,7 @@ func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}, []*B
 				sort.Strings(names)
 
 				for _, name := range names {
-					if ex := item.Examples[name]; ex != nil && ex.Value != nil {
+					if ex := item.Examples[name]; ex != nil && ex.Value != nil && ex.Value.Value != nil {
 						examples = append(examples, ex.Value.Value)
 						break
 					}
@@ -1145,9 +1151,11 @@ func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}, []*B
 			}
 
 			mts[mt] = requestInfo{
-				summary:    summary,
-				examples:   examples,
-				bodyFields: bodyFields,
+				mediaType:   mt,
+				summary:     summary,
+				examples:    examples,
+				exampleBody: buildExampleBody(mt, item),
+				bodyFields:  bodyFields,
 			}
 		}
 	}
@@ -1162,26 +1170,23 @@ func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}, []*B
 	// Prefer JSON.
 	for _, mt := range mediaTypes {
 		if strings.Contains(mt, "json") {
-			item := mts[mt]
-			return mt, item.summary, item.examples, item.bodyFields
+			return mts[mt]
 		}
 	}
 
 	// Fall back to YAML next.
 	for _, mt := range mediaTypes {
 		if strings.Contains(mt, "yaml") {
-			item := mts[mt]
-			return mt, item.summary, item.examples, item.bodyFields
+			return mts[mt]
 		}
 	}
 
 	// Last resort: return the first we find!
 	for _, mt := range mediaTypes {
-		item := mts[mt]
-		return mt, item.summary, item.examples, item.bodyFields
+		return mts[mt]
 	}
 
-	return "", "", nil, nil
+	return requestInfo{}
 }
 
 // renamedFlag records a generated flag that had to be renamed to avoid a
