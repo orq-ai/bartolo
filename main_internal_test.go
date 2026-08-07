@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
@@ -266,6 +267,22 @@ func TestResolveInitConfigRejectsInvalidModulePath(t *testing.T) {
 
 	if _, err := resolveInitConfig(cmd, []string{"demo-cli"}); err == nil {
 		t.Fatal("expected invalid module path error")
+	}
+}
+
+func TestResolveInitConfigRejectsUnknownDefaultFormat(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("interactive", false, "")
+	cmd.Flags().String("module-path", "", "")
+	cmd.Flags().String("api-key-env-var", "", "")
+	cmd.Flags().String("default-format", "not-a-format", "")
+
+	_, err := resolveInitConfig(cmd, []string{"demo-cli"})
+	if err == nil {
+		t.Fatal("expected unknown default format error")
+	}
+	if !strings.Contains(err.Error(), "is not one of [json, yaml, toon]") {
+		t.Fatalf("expected the error to name the allowed formats, got %q", err)
 	}
 }
 
