@@ -122,7 +122,14 @@ func Init(config *Config) {
 		},
 	}
 
-	Root.SetOutput(Stdout)
+	Root.SetOut(Stdout)
+	Root.SetErr(Stderr)
+
+	// Flag parsing failures are usage errors. Setting this on the root is
+	// enough: cobra walks up to the nearest parent that has one.
+	Root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		return NewUsageError(err)
+	})
 
 	Root.AddCommand(&cobra.Command{
 		Use:   "help-config",

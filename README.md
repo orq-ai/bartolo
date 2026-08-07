@@ -100,7 +100,11 @@ Generated CLIs keep a normal `main.go`, so you can still add middleware, flags, 
 ```go
 package main
 
-import "github.com/orq-ai/bartolo/cli"
+import (
+	"os"
+
+	"github.com/orq-ai/bartolo/cli"
+)
 
 func main() {
 	cli.Init(&cli.Config{
@@ -112,9 +116,15 @@ func main() {
 
 	registerGeneratedCommands()
 	registerCustomCommands()
-	cli.Root.Execute()
+	os.Exit(cli.Execute())
 }
 ```
+
+`cli.Execute` runs the root command and returns the process exit code: `0` on
+success, `2` for usage errors (unknown command, bad flag, wrong argument count),
+and `1` for anything that failed while running. Passing it to `os.Exit` is what
+makes failures visible to `set -e` scripts and CI. Calling `cli.Root.Execute()`
+directly discards the error and always exits `0`.
 
 ## Local Development
 
