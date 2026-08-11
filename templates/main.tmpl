@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+
 	custom "{{ .ModulePath }}/cli/custom"
 	generated "{{ .ModulePath }}/cli/generated"
 	bartolocli "github.com/orq-ai/bartolo/cli"
@@ -18,5 +20,5 @@ func main() {
 	generated.Register(bartolocli.Root)
 	custom.Register(bartolocli.Root)
 
-	bartolocli.Root.Execute()
+	os.Exit(bartolocli.Execute())
 }

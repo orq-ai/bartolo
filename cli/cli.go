@@ -93,6 +93,17 @@ func Init(config *Config) {
 		Use:     filepath.Base(os.Args[0]),
 		Version: config.Version,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// An unknown output format used to be ignored, which silently
+			// produced JSON while reporting success. Reject it here so the
+			// flag behaves like any other enumerated one, whether the value
+			// came from the flag, the environment, or a config file.
+			format := viper.GetString("output-format")
+			normalized, ok := parseOutputFormat(format)
+			if !ok {
+				return NewUsageError(fmt.Errorf("--output-format: %q is not one of [%s]", format, outputFormatList()))
+			}
+			viper.Set("output-format", normalized)
+
 			if viper.GetBool("json") {
 				viper.Set("output-format", "json")
 			}
@@ -122,7 +133,14 @@ func Init(config *Config) {
 		},
 	}
 
-	Root.SetOutput(Stdout)
+	Root.SetOut(Stdout)
+	Root.SetErr(Stderr)
+
+	// Flag parsing failures are usage errors. Setting this on the root is
+	// enough: cobra walks up to the nearest parent that has one.
+	Root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		return NewUsageError(err)
+	})
 
 	Root.AddCommand(&cobra.Command{
 		Use:   "help-config",
@@ -140,10 +158,17 @@ func Init(config *Config) {
 	initAgentCommands()
 
 	AddGlobalFlag("verbose", "", "Enable verbose log output", false)
-	AddGlobalFlag("output-format", "o", "Output format [json, yaml, toon]", outputFormatOrDefault(config.DefaultOutputFormat))
+	AddGlobalFlag("output-format", "o", fmt.Sprintf("Output format [%s]", outputFormatList()), outputFormatOrDefault(config.DefaultOutputFormat))
 	AddGlobalFlag("json", "", "Alias for --output-format json", false)
-	AddGlobalFlag("query", "q", "Filter / project results using JMESPath", "")
-	AddGlobalFlag("raw", "", "Output result of query as raw rather than an escaped JSON string or list", false)
+	// Named `jmespath` rather than `query` so it cannot collide with the many
+	// endpoints whose request body or query string has a `query` field. The old
+	// `-q` shorthand went with it: it abbreviated a name that no longer exists.
+	//
+	// Note that `-j` is easily mistaken for `--json`, which deliberately has no
+	// shorthand. Because this flag takes a value, a stray `-j` consumes the next
+	// argument, so keep `--json` shorthand-free.
+	AddGlobalFlag("jmespath", "j", "Filter / project results using JMESPath", "")
+	AddGlobalFlag("raw", "", "Output result of --jmespath as raw rather than an escaped JSON string or list", false)
 	AddGlobalFlag("server", "", "Override server URL", "")
 }
 
@@ -236,6 +261,15 @@ func initConfig(appName, envPrefix, apiKeyEnvVar, defaultOutputFormat string) {
 	viper.SetDefault("output-format", outputFormatOrDefault(defaultOutputFormat))
 }
 
+// outputFormats are the values accepted by `--output-format` / `-o` and by the
+// `default-format` command. Help text and error messages are built from this
+// list so they cannot drift apart from what is actually accepted.
+var outputFormats = []string{"json", "yaml", "toon"}
+
+func outputFormatList() string {
+	return strings.Join(outputFormats, ", ")
+}
+
 func outputFormatOrDefault(value string) string {
 	if format, ok := parseOutputFormat(value); ok {
 		return format
@@ -244,21 +278,18 @@ func outputFormatOrDefault(value string) string {
 }
 
 func parseOutputFormat(value string) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "json":
-		return "json", true
-	case "yaml":
-		return "yaml", true
-	case "toon":
-		return "toon", true
-	default:
-		return "", false
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	for _, format := range outputFormats {
+		if normalized == format {
+			return format, true
+		}
 	}
+	return "", false
 }
 
 func newDefaultFormatCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "default-format [json|yaml|toon]",
+		Use:   "default-format [" + strings.Join(outputFormats, "|") + "]",
 		Short: "Show or persist the default output format",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -270,7 +301,7 @@ func newDefaultFormatCommand() *cobra.Command {
 
 			next, ok := parseOutputFormat(args[0])
 			if !ok {
-				return fmt.Errorf("unsupported output format %q", args[0])
+				return NewUsageError(fmt.Errorf("%q is not one of [%s]", args[0], outputFormatList()))
 			}
 			if err := saveJSONConfig(map[string]interface{}{"output-format": next}); err != nil {
 				return err
@@ -414,12 +445,14 @@ Standard input allows you to send in whatever data is required to make a success
 
 Note: Windows PowerShell and other shells that do not support input redirection via ¬<¬ will need to pipe input instead, for example: ¬cat input.json | my-cli command¬. This may load the entire input file into memory.
 
+Standard input is only read when it can actually supply the body. A redirect from a file is always read, and a pipe is read whenever nothing else supplied the body. When the body already came from ¬--from-file¬, ¬--example¬, shorthand or the generated field flags, a pipe that has no data ready is skipped rather than waited on, so a command never hangs on the open idle stdin that CI runners and process spawners hand their children by default. Pass ¬--stdin¬ to require piped input and wait for it unconditionally.
+
 ## Body Helper Flags
 
 Commands that accept a request body also support:
 
 - ¬--from-file path.json¬ to load the base body from disk.
-- ¬--example¬ to start from the first generated example body.
+- ¬--example¬ to print an example request body and exit without sending a request. It takes precedence over every other body input. Round-trip it: ¬my-cli command --example >body.json¬, edit the file, then ¬my-cli command --from-file body.json¬.
 - ¬--stdin¬ to require piped stdin input explicitly.
 - Generated ¬--field-name¬ flags for simple top-level body properties when Bartolo can infer them safely.
 

@@ -47,7 +47,7 @@ type ResponseFormatter interface {
 
 // DefaultFormatter can apply JMESPath queries and can output prettyfied JSON,
 // YAML, or TOON output. If Stdout is a TTY, then colorized output is provided.
-// The default formatter uses the `query` and `output-format` configuration
+// The default formatter uses the `jmespath` and `output-format` configuration
 // values to perform JMESPath queries and set JSON (default), YAML, or TOON
 // output.
 type DefaultFormatter struct {
@@ -68,8 +68,8 @@ func (f *DefaultFormatter) Format(data interface{}) error {
 		data = nil
 	}
 
-	if viper.GetString("query") != "" {
-		result, err := jmespathx.Search(viper.GetString("query"), data)
+	if viper.GetString("jmespath") != "" {
+		result, err := jmespathx.Search(viper.GetString("jmespath"), data)
 
 		if err != nil {
 			return err

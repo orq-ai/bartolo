@@ -4,6 +4,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
@@ -268,6 +270,22 @@ func TestResolveInitConfigRejectsInvalidModulePath(t *testing.T) {
 	}
 }
 
+func TestResolveInitConfigRejectsUnknownDefaultFormat(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("interactive", false, "")
+	cmd.Flags().String("module-path", "", "")
+	cmd.Flags().String("api-key-env-var", "", "")
+	cmd.Flags().String("default-format", "not-a-format", "")
+
+	_, err := resolveInitConfig(cmd, []string{"demo-cli"})
+	if err == nil {
+		t.Fatal("expected unknown default format error")
+	}
+	if !strings.Contains(err.Error(), "is not one of [json, yaml, toon]") {
+		t.Fatalf("expected the error to name the allowed formats, got %q", err)
+	}
+}
+
 func TestGenerateFromJSONFixtureBuildsCLI(t *testing.T) {
 	repoRoot, err := os.Getwd()
 	if err != nil {
@@ -497,6 +515,223 @@ func TestGetBodyFieldsUnionsOneOfBranches(t *testing.T) {
 			t.Errorf("field %q: type = %q, want %q", name, got[name], typ)
 		}
 	}
+
+	for _, f := range fields {
+		if f.Name == "strategy" {
+			if !reflect.DeepEqual(f.Enum, []string{"token", "semantic"}) {
+				t.Errorf("strategy enum = %v, want the union of both branches [token semantic]", f.Enum)
+			}
+		}
+	}
+}
+
+func TestGetBodyFieldsUnionsDiscriminatorEnums(t *testing.T) {
+	doc, err := loadOpenAPIDocument([]byte(`{
+  "openapi": "3.1.0",
+  "info": {"title": "Discriminator union", "version": "1"},
+  "paths": {
+    "/tools": {
+      "post": {
+        "operationId": "CreateTool",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {"type": "object", "required": ["type"], "properties": {"type": {"type": "string", "enum": ["function"]}, "status": {"type": "string", "enum": ["live", "draft"]}}},
+                  {"type": "object", "required": ["type"], "properties": {"type": {"type": "string", "enum": ["http"]}, "status": {"type": "string", "enum": ["live", "draft"]}}},
+                  {"type": "object", "required": ["type"], "properties": {"type": {"type": "string", "enum": ["mcp"]}, "status": {"type": "string", "enum": ["live", "draft"]}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("loadOpenAPIDocument: %v", err)
+	}
+
+	schema := doc.Paths.Value("/tools").Post.RequestBody.Value.Content.Get("application/json").Schema.Value
+	fields := getBodyFields(schema)
+
+	byName := map[string]*BodyField{}
+	for _, f := range fields {
+		byName[f.Name] = f
+	}
+
+	typeField := byName["type"]
+	if typeField == nil {
+		t.Fatal("missing field \"type\"")
+	}
+	if typeField.Type != "enum-string" {
+		t.Errorf("type field: type = %q, want enum-string", typeField.Type)
+	}
+	if !reflect.DeepEqual(typeField.Enum, []string{"function", "http", "mcp"}) {
+		t.Errorf("type enum = %v, want [function http mcp] (union across all branches, in branch order)", typeField.Enum)
+	}
+
+	statusField := byName["status"]
+	if statusField == nil {
+		t.Fatal("missing field \"status\"")
+	}
+	if !reflect.DeepEqual(statusField.Enum, []string{"live", "draft"}) {
+		t.Errorf("status enum = %v, want [live draft] (identical branch enums must not duplicate)", statusField.Enum)
+	}
+
+	// The union must be built on a copy: the source branch schemas are shared
+	// $ref components in real specs and must never be widened in place.
+	firstBranch := schema.OneOf[0].Value.Properties["type"].Value
+	if len(firstBranch.Enum) != 1 {
+		t.Errorf("source branch enum was mutated: %v, want [function]", firstBranch.Enum)
+	}
+}
+
+func TestGetBodyFieldsDropsEnumWhenUnionBranchAllowsAnyString(t *testing.T) {
+	doc, err := loadOpenAPIDocument([]byte(`{
+  "openapi": "3.1.0",
+  "info": {"title": "Enum vs plain string", "version": "1"},
+  "paths": {
+    "/things": {
+      "post": {
+        "operationId": "CreateThing",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {"type": "object", "properties": {"mode": {"type": "string", "enum": ["auto"]}}},
+                  {"type": "object", "properties": {"mode": {"type": "string"}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("loadOpenAPIDocument: %v", err)
+	}
+
+	schema := doc.Paths.Value("/things").Post.RequestBody.Value.Content.Get("application/json").Schema.Value
+	fields := getBodyFields(schema)
+
+	for _, f := range fields {
+		if f.Name != "mode" {
+			continue
+		}
+		if f.Type != "string" {
+			t.Errorf("mode field: type = %q, want plain string (one branch accepts any string, so no enum validation)", f.Type)
+		}
+		if len(f.Enum) != 0 {
+			t.Errorf("mode enum = %v, want empty", f.Enum)
+		}
+		return
+	}
+	t.Fatal("missing field \"mode\"")
+}
+
+func TestGetBodyFieldsKeepsFirstBranchOnTypeConflict(t *testing.T) {
+	doc, err := loadOpenAPIDocument([]byte(`{
+  "openapi": "3.1.0",
+  "info": {"title": "Type conflict", "version": "1"},
+  "paths": {
+    "/things": {
+      "post": {
+        "operationId": "CreateThing",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {"type": "object", "properties": {"config": {"type": "string", "enum": ["default"]}}},
+                  {"type": "object", "properties": {"config": {"type": "object", "properties": {"url": {"type": "string"}}}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("loadOpenAPIDocument: %v", err)
+	}
+
+	schema := doc.Paths.Value("/things").Post.RequestBody.Value.Content.Get("application/json").Schema.Value
+	fields := getBodyFields(schema)
+
+	for _, f := range fields {
+		if f.Name != "config" {
+			continue
+		}
+		if f.Type != "enum-string" || !reflect.DeepEqual(f.Enum, []string{"default"}) {
+			t.Errorf("config field = (%q, %v), want first-wins (enum-string, [default]) when branch types conflict", f.Type, f.Enum)
+		}
+		return
+	}
+	t.Fatal("missing field \"config\"")
+}
+
+func TestBodyFieldTypeStringUnionUsesJSONOrString(t *testing.T) {
+	doc, err := loadOpenAPIDocument([]byte(`{
+  "openapi": "3.1.0",
+  "info": {"title": "String unions", "version": "1"},
+  "paths": {
+    "/agents": {
+      "post": {
+        "operationId": "CreateAgent",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {"anyOf": [{"type": "string"}, {"type": "object", "properties": {"id": {"type": "string"}}}]},
+                  "input": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "object"}}]},
+                  "config": {"oneOf": [{"type": "object", "properties": {"a": {"type": "string"}}}, {"type": "array", "items": {"type": "object"}}]}
+                }
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("loadOpenAPIDocument: %v", err)
+	}
+
+	schema := doc.Paths.Value("/agents").Post.RequestBody.Value.Content.Get("application/json").Schema.Value
+	got := map[string]string{}
+	for _, f := range getBodyFields(schema) {
+		got[f.Name] = f.Type
+	}
+
+	// Unions with a string branch accept a bare string; unions without one stay strict JSON.
+	if got["model"] != "json-or-string" {
+		t.Errorf("model: type = %q, want json-or-string", got["model"])
+	}
+	if got["input"] != "json-or-string" {
+		t.Errorf("input: type = %q, want json-or-string", got["input"])
+	}
+	if got["config"] != "json" {
+		t.Errorf("config (object|array, no string branch): type = %q, want json", got["config"])
+	}
 }
 
 func TestLoadOpenAPIDocumentSupportsNumericExclusiveBounds(t *testing.T) {
@@ -548,5 +783,116 @@ func TestLoadOpenAPIDocumentSupportsNumericExclusiveBounds(t *testing.T) {
 	}
 	if !schema.ExclusiveMin {
 		t.Fatal("expected exclusiveMinimum=true after normalization")
+	}
+}
+
+func TestProcessAPIRenamesFlagsThatShadowGlobals(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Traces API
+  version: "1"
+tags:
+  - name: Traces
+paths:
+  /v2/traces/search:
+    post:
+      operationId: TracesSearch
+      summary: Search traces
+      tags:
+        - Traces
+      parameters:
+        - in: query
+          name: profile
+          schema:
+            type: string
+        - in: query
+          name: page_token
+          schema:
+            type: string
+        - in: query
+          name: query
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query:
+                  type: string
+                raw:
+                  type: boolean
+                limit:
+                  type: integer
+      responses:
+        "200":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+	if len(api.Groups) != 1 || len(api.Groups[0].Operations) != 1 {
+		t.Fatalf("expected a single grouped operation, got %+v", api.Groups)
+	}
+	op := api.Groups[0].Operations[0]
+
+	bodyFlags := map[string]string{}
+	for _, field := range op.BodyFields {
+		bodyFlags[field.Name] = field.CLIName
+	}
+	expectedBody := map[string]string{
+		// `query` is not reserved — the global JMESPath flag is `--jmespath`.
+		"query": "query",
+		"raw":   "body-raw",
+		"limit": "limit",
+	}
+	if !reflect.DeepEqual(bodyFlags, expectedBody) {
+		t.Fatalf("body flag names: got %+v, want %+v", bodyFlags, expectedBody)
+	}
+
+	paramFlags := map[string]string{}
+	for _, param := range op.OptionalParams {
+		paramFlags[param.Name] = param.CLIName
+	}
+	expectedParams := map[string]string{
+		"profile":    "param-profile",
+		"page_token": "page-token",
+		// A param and a body field both named `query`: the body field claims
+		// the name first, so the param has to move — registering both would
+		// make pflag panic.
+		"query": "param-query",
+	}
+	if !reflect.DeepEqual(paramFlags, expectedParams) {
+		t.Fatalf("param flag names: got %+v, want %+v", paramFlags, expectedParams)
+	}
+
+	// The renamed param must still be looked up under its new name and sent
+	// under the original wire name.
+	for _, param := range op.OptionalParams {
+		if param.Name == "profile" && param.GoName != "paramParamProfile" {
+			t.Fatalf("renamed param Go name: got %q", param.GoName)
+		}
+	}
+
+	if !strings.Contains(op.Long, "--body-raw") {
+		t.Fatalf("expected the renamed flags to be documented in help, got:\n%s", op.Long)
+	}
+}
+
+func TestReserveGeneratedFlagNamesResolvesParamBodyCollision(t *testing.T) {
+	bodyFields := []*BodyField{{Name: "limit", CLIName: "limit"}}
+	optionalParams := []*Param{{Name: "limit", CLIName: "limit"}}
+
+	renamed := reserveGeneratedFlagNames(bodyFields, optionalParams)
+
+	if bodyFields[0].CLIName != "limit" {
+		t.Fatalf("body field should keep the name it claimed first, got %q", bodyFields[0].CLIName)
+	}
+	if optionalParams[0].CLIName != "param-limit" {
+		t.Fatalf("colliding param should be renamed, got %q", optionalParams[0].CLIName)
+	}
+	if len(renamed) != 1 || renamed[0].To != "param-limit" {
+		t.Fatalf("unexpected rename record: %+v", renamed)
 	}
 }

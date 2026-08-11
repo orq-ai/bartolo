@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/orq-ai/bartolo/shorthand"
 	"github.com/rs/zerolog/log"
@@ -32,12 +33,25 @@ const nullableFlagSentinel = "null"
 //   - "json": fallback for nested objects, arrays of objects, and
 //     polymorphic unions. Value is parsed as JSON before being merged into
 //     the request body.
+//   - "json-or-string": polymorphic union that includes a string branch (e.g.
+//     `model: string | object`). A value starting with '{', '[' or '"' is
+//     parsed as JSON; any other value is sent through verbatim as a string, so
+//     bare scalars like "openai/gpt-4o" need no double-quoting.
 type BodyField struct {
 	Name        string
 	FlagName    string
 	Type        string
 	Description string
 	Enum        []string
+}
+
+// flagName returns the name this body field is actually registered under. A
+// field whose name collides with a global flag (`raw`, `profile`, ...) is
+// exposed as `--body-<name>` so the global keeps working on the command. The
+// generator already emits the resolved name; this repeats it so CLIs generated
+// before the fix are corrected by a dependency bump alone.
+func (f BodyField) flagName() string {
+	return ResolveGeneratedFlagName("body", f.FlagName)
 }
 
 // DeepAssign recursively merges a source map into the target.
@@ -64,7 +78,23 @@ func DeepAssign(target, source map[string]interface{}) {
 func AddBodyFlags(cmd *cobra.Command) {
 	cmd.Flags().String("from-file", "", "Read the request body from a file path")
 	cmd.Flags().Bool("stdin", false, "Require request body input from stdin")
-	cmd.Flags().Bool("example", false, "Use the first generated body example as the request body")
+}
+
+// AddExampleFlag installs --example on commands that have a generated example
+// request body.
+func AddExampleFlag(cmd *cobra.Command) {
+	cmd.Flags().Bool("example", false, "Print an example request body for this command and exit without sending a request")
+}
+
+// PrintBodyExample prints the generated example request body when --example
+// was passed and reports whether it did, so the caller can return without
+// sending a request. It takes precedence over every other body input.
+func PrintBodyExample(params *viper.Viper, example string) bool {
+	if params == nil || !params.GetBool("example") || example == "" {
+		return false
+	}
+	fmt.Fprintln(Stdout, example)
+	return true
 }
 
 // AddBodyFieldFlags installs generated typed request-body flags for simple
@@ -75,59 +105,105 @@ func AddBodyFieldFlags(cmd *cobra.Command, fields []BodyField) {
 		if strings.TrimSpace(description) == "" {
 			description = field.Name
 		}
+		name := field.flagName()
+		if name != field.FlagName {
+			description += fmt.Sprintf(" (body field %q, renamed to keep the global --%s flag available)", field.Name, field.FlagName)
+		}
 		switch field.Type {
 		case "bool":
-			cmd.Flags().Bool(field.FlagName, false, description)
+			cmd.Flags().Bool(name, false, description)
 		case "int64":
-			cmd.Flags().Int64(field.FlagName, 0, description)
+			cmd.Flags().Int64(name, 0, description)
 		case "float64":
-			cmd.Flags().Float64(field.FlagName, 0, description)
+			cmd.Flags().Float64(name, 0, description)
 		case "string-nullable", "bool-nullable", "int64-nullable", "float64-nullable":
-			cmd.Flags().String(field.FlagName, "", description+` (pass "null" to send JSON null)`)
+			cmd.Flags().String(name, "", description+` (pass "null" to send JSON null)`)
 		case "string-slice":
-			cmd.Flags().StringSlice(field.FlagName, nil, description+" (repeatable)")
+			cmd.Flags().StringSlice(name, nil, description+" (repeatable)")
 		case "int64-slice":
-			cmd.Flags().Int64Slice(field.FlagName, nil, description+" (repeatable)")
+			cmd.Flags().Int64Slice(name, nil, description+" (repeatable)")
 		case "float64-slice":
-			cmd.Flags().Float64Slice(field.FlagName, nil, description+" (repeatable)")
+			cmd.Flags().Float64Slice(name, nil, description+" (repeatable)")
 		case "bool-slice":
-			cmd.Flags().BoolSlice(field.FlagName, nil, description+" (repeatable)")
+			cmd.Flags().BoolSlice(name, nil, description+" (repeatable)")
 		case "string-map":
-			cmd.Flags().StringToString(field.FlagName, nil, description+" (key=value, repeatable)")
+			cmd.Flags().StringToString(name, nil, description+" (key=value, repeatable)")
 		case "json":
-			cmd.Flags().String(field.FlagName, "", description+" (JSON value, e.g. '{\"k\":1}' or '[1,2]')")
+			cmd.Flags().String(name, "", description+" (JSON value, e.g. '{\"k\":1}' or '[1,2]')")
+		case "json-or-string":
+			cmd.Flags().String(name, "", description+" (plain string, or JSON for objects/arrays, e.g. '{\"k\":1}')")
 		case "enum-string":
-			cmd.Flags().String(field.FlagName, "", description)
+			cmd.Flags().String(name, "", description)
 			if len(field.Enum) > 0 {
 				values := append([]string{}, field.Enum...)
-				_ = cmd.RegisterFlagCompletionFunc(field.FlagName, func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+				_ = cmd.RegisterFlagCompletionFunc(name, func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
 					return values, cobra.ShellCompDirectiveNoFileComp
 				})
 			}
 		default:
-			cmd.Flags().String(field.FlagName, "", description)
+			cmd.Flags().String(name, "", description)
 		}
 	}
 }
 
-// GetBody returns the request body if one was passed via stdin, a file, a
-// generated example, or shorthand CLI arguments.
-func GetBody(mediaType string, args []string, params *viper.Viper, examples []string) (string, error) {
-	body, err := loadBaseBody(params, mediaType, examples)
+// GetBody returns the request body if one was passed via stdin, a file, or
+// shorthand CLI arguments.
+func GetBody(mediaType string, args []string, params *viper.Viper) (string, error) {
+	return GetBodyWithFlags(nil, mediaType, args, params, nil)
+}
+
+// GetBodyWithFlags resolves the request body from every supported source and
+// overlays the generated typed body flags, lowest precedence first: stdin,
+// --from-file, then shorthand CLI arguments, then body flags.
+//
+// Passing cmd and fields lets the resolver see whether the body is already
+// satisfied before it decides to read stdin, which is what keeps a command
+// from blocking on an idle pipe. See loadBaseBody for the stdin rules.
+func GetBodyWithFlags(cmd *cobra.Command, mediaType string, args []string, params *viper.Viper, fields []BodyField) (string, error) {
+	body, err := loadBaseBody(params, bodySuppliedElsewhere(cmd, params, args, fields))
 	if err != nil {
 		return "", err
 	}
 
-	if len(args) == 0 {
-		return body, nil
+	if len(args) > 0 {
+		result, err := shorthand.ParseAndBuild("stdin", strings.Join(args, " "))
+		if err != nil {
+			return "", err
+		}
+
+		body, err = mergeStructuredBody(mediaType, body, result)
+		if err != nil {
+			return "", err
+		}
 	}
 
-	result, err := shorthand.ParseAndBuild("stdin", strings.Join(args, " "))
-	if err != nil {
-		return "", err
+	return ApplyBodyFlags(cmd, params, mediaType, body, fields)
+}
+
+// bodySuppliedElsewhere reports whether a source other than stdin has already
+// produced request-body content.
+func bodySuppliedElsewhere(cmd *cobra.Command, params *viper.Viper, args []string, fields []BodyField) bool {
+	if len(args) > 0 {
+		return true
 	}
 
-	return mergeStructuredBody(mediaType, body, result)
+	if params != nil {
+		if strings.TrimSpace(params.GetString("from-file")) != "" {
+			return true
+		}
+	}
+
+	if cmd == nil {
+		return false
+	}
+
+	for _, field := range fields {
+		if flag := cmd.Flags().Lookup(field.FlagName); flag != nil && flag.Changed {
+			return true
+		}
+	}
+
+	return false
 }
 
 // ApplyBodyFlags overlays generated typed body flags on top of the parsed
@@ -139,100 +215,119 @@ func ApplyBodyFlags(cmd *cobra.Command, params *viper.Viper, mediaType string, b
 
 	overrides := map[string]interface{}{}
 	for _, field := range fields {
-		flag := cmd.Flags().Lookup(field.FlagName)
+		name := field.flagName()
+		flag := cmd.Flags().Lookup(name)
 		if flag == nil || !flag.Changed {
 			continue
 		}
 
 		switch field.Type {
 		case "bool":
-			overrides[field.Name] = params.GetBool(field.FlagName)
+			overrides[field.Name] = params.GetBool(name)
 		case "int64":
-			overrides[field.Name] = params.GetInt64(field.FlagName)
+			overrides[field.Name] = params.GetInt64(name)
 		case "float64":
-			overrides[field.Name] = params.GetFloat64(field.FlagName)
+			overrides[field.Name] = params.GetFloat64(name)
 		case "string-nullable":
-			raw := params.GetString(field.FlagName)
+			raw := params.GetString(name)
 			if raw == nullableFlagSentinel {
 				overrides[field.Name] = nil
 			} else {
 				overrides[field.Name] = raw
 			}
 		case "bool-nullable":
-			raw := strings.TrimSpace(params.GetString(field.FlagName))
+			raw := strings.TrimSpace(params.GetString(name))
 			if raw == nullableFlagSentinel {
 				overrides[field.Name] = nil
 				break
 			}
 			value, err := strconv.ParseBool(raw)
 			if err != nil {
-				return "", fmt.Errorf("--%s: %w", field.FlagName, err)
+				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = value
 		case "int64-nullable":
-			raw := strings.TrimSpace(params.GetString(field.FlagName))
+			raw := strings.TrimSpace(params.GetString(name))
 			if raw == nullableFlagSentinel {
 				overrides[field.Name] = nil
 				break
 			}
 			value, err := strconv.ParseInt(raw, 10, 64)
 			if err != nil {
-				return "", fmt.Errorf("--%s: %w", field.FlagName, err)
+				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = value
 		case "float64-nullable":
-			raw := strings.TrimSpace(params.GetString(field.FlagName))
+			raw := strings.TrimSpace(params.GetString(name))
 			if raw == nullableFlagSentinel {
 				overrides[field.Name] = nil
 				break
 			}
 			value, err := strconv.ParseFloat(raw, 64)
 			if err != nil {
-				return "", fmt.Errorf("--%s: %w", field.FlagName, err)
+				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = value
 		case "string-slice":
-			values, err := cmd.Flags().GetStringSlice(field.FlagName)
+			values, err := cmd.Flags().GetStringSlice(name)
 			if err != nil {
-				return "", fmt.Errorf("--%s: %w", field.FlagName, err)
+				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = values
 		case "int64-slice":
-			values, err := cmd.Flags().GetInt64Slice(field.FlagName)
+			values, err := cmd.Flags().GetInt64Slice(name)
 			if err != nil {
-				return "", fmt.Errorf("--%s: %w", field.FlagName, err)
+				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = values
 		case "float64-slice":
-			values, err := cmd.Flags().GetFloat64Slice(field.FlagName)
+			values, err := cmd.Flags().GetFloat64Slice(name)
 			if err != nil {
-				return "", fmt.Errorf("--%s: %w", field.FlagName, err)
+				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = values
 		case "bool-slice":
-			values, err := cmd.Flags().GetBoolSlice(field.FlagName)
+			values, err := cmd.Flags().GetBoolSlice(name)
 			if err != nil {
-				return "", fmt.Errorf("--%s: %w", field.FlagName, err)
+				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = values
 		case "string-map":
-			values, err := cmd.Flags().GetStringToString(field.FlagName)
+			values, err := cmd.Flags().GetStringToString(name)
 			if err != nil {
-				return "", fmt.Errorf("--%s: %w", field.FlagName, err)
+				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = values
 		case "json":
-			raw := strings.TrimSpace(params.GetString(field.FlagName))
+			raw := strings.TrimSpace(params.GetString(name))
 			if raw == "" {
 				continue
 			}
 			var value interface{}
 			if err := json.Unmarshal([]byte(raw), &value); err != nil {
-				return "", fmt.Errorf("--%s: invalid JSON: %w", field.FlagName, err)
+				return "", fmt.Errorf("--%s: invalid JSON: %w", name, err)
 			}
 			overrides[field.Name] = value
+		case "json-or-string":
+			raw := params.GetString(name)
+			trimmed := strings.TrimSpace(raw)
+			// Structured JSON (object/array) and an explicitly-quoted JSON
+			// string are parsed as JSON; any other value is sent through as a
+			// bare string. This lets `--model openai/gpt-4o` work without
+			// double-quoting, while `--model '"openai/gpt-4o"'` (a JSON string
+			// literal) still decodes to the same string for backward
+			// compatibility.
+			if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[' || trimmed[0] == '"') {
+				var value interface{}
+				if err := json.Unmarshal([]byte(trimmed), &value); err != nil {
+					return "", fmt.Errorf("--%s: invalid JSON: %w", name, err)
+				}
+				overrides[field.Name] = value
+			} else {
+				overrides[field.Name] = raw
+			}
 		case "enum-string":
-			value := params.GetString(field.FlagName)
+			value := params.GetString(name)
 			if len(field.Enum) > 0 {
 				allowed := false
 				for _, candidate := range field.Enum {
@@ -242,12 +337,12 @@ func ApplyBodyFlags(cmd *cobra.Command, params *viper.Viper, mediaType string, b
 					}
 				}
 				if !allowed {
-					return "", fmt.Errorf("--%s: %q is not one of [%s]", field.FlagName, value, strings.Join(field.Enum, ", "))
+					return "", fmt.Errorf("--%s: %q is not one of [%s]", name, value, strings.Join(field.Enum, ", "))
 				}
 			}
 			overrides[field.Name] = value
 		default:
-			overrides[field.Name] = params.GetString(field.FlagName)
+			overrides[field.Name] = params.GetString(name)
 		}
 	}
 
@@ -258,7 +353,12 @@ func ApplyBodyFlags(cmd *cobra.Command, params *viper.Viper, mediaType string, b
 	return mergeStructuredBody(mediaType, body, overrides)
 }
 
-func loadBaseBody(params *viper.Viper, mediaType string, examples []string) (string, error) {
+// stdinPipeGrace is how long an implicit stdin read waits for a writer that
+// may still be starting up before it gives up and falls back to the body that
+// was already supplied by flags, --from-file or shorthand.
+const stdinPipeGrace = 250 * time.Millisecond
+
+func loadBaseBody(params *viper.Viper, bodyElsewhere bool) (string, error) {
 	if params != nil {
 		if filename := strings.TrimSpace(params.GetString("from-file")); filename != "" {
 			input, err := ioutil.ReadFile(filename)
@@ -267,36 +367,62 @@ func loadBaseBody(params *viper.Viper, mediaType string, examples []string) (str
 			}
 			return string(input), nil
 		}
-
-		if params.GetBool("example") {
-			if len(examples) == 0 {
-				return "", fmt.Errorf("no generated body example is available for this command")
-			}
-
-			result, err := shorthand.ParseAndBuild("example", examples[0])
-			if err != nil {
-				return "", err
-			}
-			return mergeStructuredBody(mediaType, "", result)
-		}
 	}
 
-	info, err := os.Stdin.Stat()
+	// Resolve stdin once: an abandoned read below outlives this call, and it
+	// must not race with anything that reassigns os.Stdin afterwards.
+	stdin := os.Stdin
+
+	info, err := stdin.Stat()
 	if err != nil {
 		return "", err
 	}
 
+	isTerminal := (info.Mode() & os.ModeCharDevice) != 0
+
+	// --stdin means the caller insists on piped input, so wait for it however
+	// long it takes.
 	if params != nil && params.GetBool("stdin") {
-		if (info.Mode() & os.ModeCharDevice) != 0 {
+		if isTerminal {
 			return "", fmt.Errorf("stdin requested but no piped input was detected")
 		}
+		return readStdin(stdin)
 	}
 
-	if (info.Mode() & os.ModeCharDevice) != 0 {
+	if isTerminal {
 		return "", nil
 	}
 
-	input, err := ioutil.ReadAll(os.Stdin)
+	// A redirect from a regular file (`cmd < body.json`) always reaches EOF, so
+	// it can be read unconditionally. Shorthand is documented to layer on top of
+	// exactly that form.
+	if info.Mode().IsRegular() {
+		return readStdin(stdin)
+	}
+
+	// stdin is a pipe, FIFO or socket. Reading one that nobody ever writes to
+	// blocks forever, and an open idle stdin is precisely what CI runners, task
+	// runners and subprocess.Popen / child_process.spawn hand a child by
+	// default. Only wait on it indefinitely when it is the sole possible source
+	// of the body.
+	if !bodyElsewhere {
+		return readStdin(stdin)
+	}
+
+	body, ok, err := readStdinWithin(stdin, stdinPipeGrace)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		log.Debug().Msg("stdin is a pipe with no data pending; using the body from flags, --from-file or shorthand instead")
+		return "", nil
+	}
+
+	return body, nil
+}
+
+func readStdin(stdin *os.File) (string, error) {
+	input, err := ioutil.ReadAll(stdin)
 	if err != nil {
 		return "", err
 	}
@@ -304,6 +430,32 @@ func loadBaseBody(params *viper.Viper, mediaType string, examples []string) (str
 	body := string(input)
 	log.Debug().Msgf("Body from stdin is: %s", body)
 	return body, nil
+}
+
+// readStdinWithin reads stdin but reports ok=false if nothing has arrived
+// within the grace period. An abandoned read stays parked in its goroutine
+// until the process exits, which is harmless for a short-lived CLI.
+func readStdinWithin(stdin *os.File, grace time.Duration) (string, bool, error) {
+	type result struct {
+		body string
+		err  error
+	}
+
+	done := make(chan result, 1)
+	go func() {
+		body, err := readStdin(stdin)
+		done <- result{body: body, err: err}
+	}()
+
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+
+	select {
+	case r := <-done:
+		return r.body, true, r.err
+	case <-timer.C:
+		return "", false, nil
+	}
 }
 
 func mergeStructuredBody(mediaType string, body string, result map[string]interface{}) (string, error) {

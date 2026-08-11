@@ -1,10 +1,12 @@
 package cli_test
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -87,16 +89,49 @@ func TestDeepAssignOverwrite(t *testing.T) {
 	assert.JSONEq(t, expected, result)
 }
 
-func TestGetBodyUsesGeneratedExample(t *testing.T) {
+func TestPrintBodyExample(t *testing.T) {
+	var buf bytes.Buffer
+	orig := cli.Stdout
+	cli.Stdout = &buf
+	t.Cleanup(func() { cli.Stdout = orig })
+
 	params := viper.New()
 	params.Set("example", true)
 
-	body, err := cli.GetBody("application/json", nil, params, []string{"hello: world"})
-	if err != nil {
-		t.Fatalf("GetBody with example: %v", err)
+	if !cli.PrintBodyExample(params, `{"hello": "world"}`) {
+		t.Fatal("expected PrintBodyExample to print")
 	}
+	assert.Equal(t, "{\"hello\": \"world\"}\n", buf.String())
+}
 
-	assert.JSONEq(t, `{"hello":"world"}`, body)
+func TestPrintBodyExampleSkipsWhenUnsetOrEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	orig := cli.Stdout
+	cli.Stdout = &buf
+	t.Cleanup(func() { cli.Stdout = orig })
+
+	assert.False(t, cli.PrintBodyExample(viper.New(), `{"hello": "world"}`))
+
+	params := viper.New()
+	params.Set("example", true)
+	assert.False(t, cli.PrintBodyExample(params, ""))
+	assert.False(t, cli.PrintBodyExample(nil, `{"hello": "world"}`))
+
+	assert.Empty(t, buf.String())
+}
+
+func TestPrintBodyExampleTakesPrecedenceOverFromFile(t *testing.T) {
+	var buf bytes.Buffer
+	orig := cli.Stdout
+	cli.Stdout = &buf
+	t.Cleanup(func() { cli.Stdout = orig })
+
+	params := viper.New()
+	params.Set("example", true)
+	params.Set("from-file", "does-not-matter.json")
+
+	assert.True(t, cli.PrintBodyExample(params, `{"hello": "world"}`))
+	assert.Equal(t, "{\"hello\": \"world\"}\n", buf.String())
 }
 
 func TestGetBodyMergesFileAndShorthand(t *testing.T) {
@@ -109,7 +144,7 @@ func TestGetBodyMergesFileAndShorthand(t *testing.T) {
 	params := viper.New()
 	params.Set("from-file", filename)
 
-	body, err := cli.GetBody("application/json", []string{"count:", "2"}, params, nil)
+	body, err := cli.GetBody("application/json", []string{"count:", "2"}, params)
 	if err != nil {
 		t.Fatalf("GetBody with file: %v", err)
 	}
@@ -121,9 +156,203 @@ func TestGetBodyRejectsExplicitStdinWithoutPipe(t *testing.T) {
 	params := viper.New()
 	params.Set("stdin", true)
 
-	if _, err := cli.GetBody("application/json", nil, params, nil); err == nil {
+	if _, err := cli.GetBody("application/json", nil, params); err == nil {
 		t.Fatal("expected stdin error")
 	}
+}
+
+// withStdin points os.Stdin at f for the duration of the test.
+func withStdin(t *testing.T, f *os.File) {
+	t.Helper()
+
+	previous := os.Stdin
+	os.Stdin = f
+	t.Cleanup(func() { os.Stdin = previous })
+}
+
+// idleStdinPipe installs an open pipe on stdin that nobody ever writes to,
+// which is what CI runners and process spawners hand a child by default.
+func idleStdinPipe(t *testing.T) {
+	t.Helper()
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("open pipe: %v", err)
+	}
+	t.Cleanup(func() {
+		writer.Close()
+		reader.Close()
+	})
+
+	withStdin(t, reader)
+}
+
+// bodyFlagCommand builds a command carrying the shared and generated body
+// flags, bound to a viper instance the same way the generated CLI binds them.
+func bodyFlagCommand(t *testing.T, fields []cli.BodyField, sets map[string]string) (*cobra.Command, *viper.Viper) {
+	t.Helper()
+
+	cmd := &cobra.Command{Use: "test"}
+	cli.AddBodyFlags(cmd)
+	cli.AddBodyFieldFlags(cmd, fields)
+
+	for name, value := range sets {
+		if err := cmd.Flags().Set(name, value); err != nil {
+			t.Fatalf("set --%s=%s: %v", name, value, err)
+		}
+	}
+
+	params := viper.New()
+	if err := params.BindPFlags(cmd.Flags()); err != nil {
+		t.Fatalf("bind flags: %v", err)
+	}
+
+	return cmd, params
+}
+
+// resolveBody runs GetBodyWithFlags under a deadline so a regression that
+// reintroduces the blocking stdin read fails instead of hanging the suite.
+func resolveBody(t *testing.T, cmd *cobra.Command, args []string, params *viper.Viper, fields []cli.BodyField) (string, error) {
+	t.Helper()
+
+	type outcome struct {
+		body string
+		err  error
+	}
+
+	done := make(chan outcome, 1)
+	go func() {
+		body, err := cli.GetBodyWithFlags(cmd, "application/json", args, params, fields)
+		done <- outcome{body: body, err: err}
+	}()
+
+	select {
+	case result := <-done:
+		return result.body, result.err
+	case <-time.After(10 * time.Second):
+		t.Fatal("GetBodyWithFlags blocked on stdin")
+		return "", nil
+	}
+}
+
+func TestGetBodyIgnoresIdleStdinPipeWhenFlagsSupplyBody(t *testing.T) {
+	idleStdinPipe(t)
+
+	fields := []cli.BodyField{{Name: "key", FlagName: "key", Type: "string"}}
+	cmd, params := bodyFlagCommand(t, fields, map[string]string{"key": "k"})
+
+	body, err := resolveBody(t, cmd, nil, params, fields)
+	if err != nil {
+		t.Fatalf("GetBodyWithFlags: %v", err)
+	}
+
+	assert.JSONEq(t, `{"key":"k"}`, body)
+}
+
+func TestGetBodyIgnoresIdleStdinPipeWhenShorthandSuppliesBody(t *testing.T) {
+	idleStdinPipe(t)
+
+	body, err := resolveBody(t, nil, []string{"key:", "k"}, viper.New(), nil)
+	if err != nil {
+		t.Fatalf("GetBodyWithFlags: %v", err)
+	}
+
+	assert.JSONEq(t, `{"key":"k"}`, body)
+}
+
+func TestGetBodyIgnoresIdleStdinPipeWhenFileSuppliesBody(t *testing.T) {
+	idleStdinPipe(t)
+
+	filename := filepath.Join(t.TempDir(), "body.json")
+	if err := os.WriteFile(filename, []byte(`{"hello":"world"}`), 0600); err != nil {
+		t.Fatalf("write body file: %v", err)
+	}
+
+	params := viper.New()
+	params.Set("from-file", filename)
+
+	body, err := resolveBody(t, nil, nil, params, nil)
+	if err != nil {
+		t.Fatalf("GetBodyWithFlags: %v", err)
+	}
+
+	assert.JSONEq(t, `{"hello":"world"}`, body)
+}
+
+// A pipe that actually carries data is still read even when flags also supply
+// fields, so `cat body.json | cli create --key k` keeps working.
+func TestGetBodyReadsPipedBodyUnderneathFlags(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("open pipe: %v", err)
+	}
+	t.Cleanup(func() { reader.Close() })
+
+	if _, err := writer.WriteString(`{"hello":"world","key":"from-stdin"}`); err != nil {
+		t.Fatalf("write pipe: %v", err)
+	}
+	writer.Close()
+
+	withStdin(t, reader)
+
+	fields := []cli.BodyField{{Name: "key", FlagName: "key", Type: "string"}}
+	cmd, params := bodyFlagCommand(t, fields, map[string]string{"key": "from-flag"})
+
+	body, err := resolveBody(t, cmd, nil, params, fields)
+	if err != nil {
+		t.Fatalf("GetBodyWithFlags: %v", err)
+	}
+
+	assert.JSONEq(t, `{"hello":"world","key":"from-flag"}`, body)
+}
+
+// A redirect from a regular file never blocks, so it is read regardless of what
+// else supplied the body -- `cli command <input.json field: value` is a
+// documented combination.
+func TestGetBodyReadsRedirectedFileUnderneathShorthand(t *testing.T) {
+	filename := filepath.Join(t.TempDir(), "body.json")
+	if err := os.WriteFile(filename, []byte(`{"hello":"world"}`), 0600); err != nil {
+		t.Fatalf("write body file: %v", err)
+	}
+
+	file, err := os.Open(filename)
+	if err != nil {
+		t.Fatalf("open body file: %v", err)
+	}
+	t.Cleanup(func() { file.Close() })
+
+	withStdin(t, file)
+
+	body, err := resolveBody(t, nil, []string{"count:", "2"}, viper.New(), nil)
+	if err != nil {
+		t.Fatalf("GetBodyWithFlags: %v", err)
+	}
+
+	assert.JSONEq(t, `{"hello":"world","count":2}`, body)
+}
+
+// Without any other source stdin is the only thing that can supply the body, so
+// it is still read to completion.
+func TestGetBodyReadsPipedBodyWhenNothingElseSuppliesIt(t *testing.T) {
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("open pipe: %v", err)
+	}
+	t.Cleanup(func() { reader.Close() })
+
+	go func() {
+		writer.WriteString(`{"hello":"world"}`)
+		writer.Close()
+	}()
+
+	withStdin(t, reader)
+
+	body, err := resolveBody(t, nil, nil, viper.New(), nil)
+	if err != nil {
+		t.Fatalf("GetBodyWithFlags: %v", err)
+	}
+
+	assert.JSONEq(t, `{"hello":"world"}`, body)
 }
 
 func applyBody(t *testing.T, fields []cli.BodyField, sets map[string][]string, base string) string {
@@ -206,6 +435,55 @@ func TestApplyBodyFlagsJSONFallback(t *testing.T) {
 	assert.JSONEq(t, `{"documents":[{"id":"a"},{"id":"b"}],"invoke_options":{"timeout":30}}`, body)
 }
 
+func TestApplyBodyFlagsJSONOrString(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "model", FlagName: "model", Type: "json-or-string"},
+	}
+
+	// Bare string passes through verbatim — no double-quoting required.
+	bare := applyBody(t, fields, map[string][]string{"model": {"openai/gpt-4o"}}, ``)
+	assert.JSONEq(t, `{"model":"openai/gpt-4o"}`, bare)
+
+	// Structured values (object/array) are parsed as JSON.
+	obj := applyBody(t, fields, map[string][]string{"model": {`{"id":"openai/gpt-4o","retry":{"count":2}}`}}, ``)
+	assert.JSONEq(t, `{"model":{"id":"openai/gpt-4o","retry":{"count":2}}}`, obj)
+
+	arr := applyBody(t, []cli.BodyField{{Name: "input", FlagName: "input", Type: "json-or-string"}},
+		map[string][]string{"input": {`[{"role":"user"}]`}}, ``)
+	assert.JSONEq(t, `{"input":[{"role":"user"}]}`, arr)
+
+	// A plain string containing spaces stays a string.
+	text := applyBody(t, []cli.BodyField{{Name: "input", FlagName: "input", Type: "json-or-string"}},
+		map[string][]string{"input": {"plain text"}}, ``)
+	assert.JSONEq(t, `{"input":"plain text"}`, text)
+
+	// Backward compat: the old double-quoting workaround (a JSON string literal)
+	// still decodes to the same bare string, not a doubly-quoted one.
+	quoted := applyBody(t, fields, map[string][]string{"model": {`"openai/gpt-4o"`}}, ``)
+	assert.JSONEq(t, `{"model":"openai/gpt-4o"}`, quoted)
+}
+
+func TestApplyBodyFlagsJSONOrStringRejectsInvalidJSON(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "model", FlagName: "model", Type: "json-or-string"},
+	}
+
+	cmd := &cobra.Command{Use: "test"}
+	cli.AddBodyFieldFlags(cmd, fields)
+	// A value that opens like structured JSON but is malformed still errors.
+	if err := cmd.Flags().Set("model", `{"id":`); err != nil {
+		t.Fatalf("set model: %v", err)
+	}
+	params := viper.New()
+	if err := params.BindPFlags(cmd.Flags()); err != nil {
+		t.Fatalf("bind flags: %v", err)
+	}
+
+	if _, err := cli.ApplyBodyFlags(cmd, params, "application/json", ``, fields); err == nil {
+		t.Fatal("expected JSON parse error for malformed object")
+	}
+}
+
 func TestApplyBodyFlagsJSONRejectsInvalid(t *testing.T) {
 	fields := []cli.BodyField{
 		{Name: "documents", FlagName: "documents", Type: "json"},
@@ -279,4 +557,112 @@ func TestApplyBodyFlagsOverridesStructuredBody(t *testing.T) {
 	}
 
 	assert.JSONEq(t, `{"instructions":"updated"}`, body)
+}
+
+// A body field whose name matches a global flag used to take that flag's long
+// name, which made cobra drop the global from the command entirely — including
+// its shorthand, so `-o` stopped resolving on a command with an `output-format`
+// body field.
+func TestBodyFieldFlagsDoNotShadowGlobalFlags(t *testing.T) {
+	root := &cobra.Command{Use: "orq"}
+	root.PersistentFlags().StringP("output-format", "o", "toon", "Output format")
+	root.PersistentFlags().Bool("raw", false, "Output result of --jmespath as raw")
+
+	cmd := &cobra.Command{Use: "generate", Run: func(*cobra.Command, []string) {}}
+	root.AddCommand(cmd)
+
+	fields := []cli.BodyField{
+		{Name: "output_format", FlagName: "output-format", Type: "string"},
+		{Name: "raw", FlagName: "raw", Type: "bool"},
+		{Name: "prompt", FlagName: "prompt", Type: "string"},
+	}
+	cli.AddBodyFieldFlags(cmd, fields)
+
+	// The body fields moved out of the way...
+	assert.NotNil(t, cmd.Flags().Lookup("body-output-format"))
+	assert.NotNil(t, cmd.Flags().Lookup("body-raw"))
+	assert.Nil(t, cmd.Flags().Lookup("output-format"), "body field must not claim a global flag name")
+
+	// ...so the globals and their shorthands still resolve on this command.
+	root.SetArgs([]string{"generate", "-o", "json", "--body-output-format", "png", "--prompt", "a cat"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	outputFormat, err := root.PersistentFlags().GetString("output-format")
+	if err != nil {
+		t.Fatalf("get global output-format: %v", err)
+	}
+	assert.Equal(t, "json", outputFormat)
+
+	params := viper.New()
+	if err := params.BindPFlags(cmd.Flags()); err != nil {
+		t.Fatalf("bind flags: %v", err)
+	}
+
+	body, err := cli.ApplyBodyFlags(cmd, params, "application/json", ``, fields)
+	if err != nil {
+		t.Fatalf("ApplyBodyFlags: %v", err)
+	}
+
+	// The renamed flag still writes the original body key.
+	assert.JSONEq(t, `{"output_format":"png","prompt":"a cat"}`, body)
+}
+
+// The JMESPath filter is named `jmespath` so that `query` — by far the most
+// common colliding field name — stays available to endpoints.
+func TestBodyFieldNamedQueryKeepsItsFlag(t *testing.T) {
+	root := &cobra.Command{Use: "orq"}
+	root.PersistentFlags().StringP("jmespath", "j", "", "Filter / project results using JMESPath")
+
+	cmd := &cobra.Command{Use: "search", Run: func(*cobra.Command, []string) {}}
+	root.AddCommand(cmd)
+
+	fields := []cli.BodyField{{Name: "query", FlagName: "query", Type: "string"}}
+	cli.AddBodyFieldFlags(cmd, fields)
+
+	assert.NotNil(t, cmd.Flags().Lookup("query"), "endpoints keep the obvious --query name")
+
+	root.SetArgs([]string{"search", "--query", "checkout", "-j", "data[0].trace_id"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+
+	jmespath, err := root.PersistentFlags().GetString("jmespath")
+	if err != nil {
+		t.Fatalf("get global jmespath: %v", err)
+	}
+	assert.Equal(t, "data[0].trace_id", jmespath)
+
+	params := viper.New()
+	if err := params.BindPFlags(cmd.Flags()); err != nil {
+		t.Fatalf("bind flags: %v", err)
+	}
+
+	body, err := cli.ApplyBodyFlags(cmd, params, "application/json", ``, fields)
+	if err != nil {
+		t.Fatalf("ApplyBodyFlags: %v", err)
+	}
+	assert.JSONEq(t, `{"query":"checkout"}`, body)
+}
+
+// pflag panics when a flag is registered twice, so a body field colliding with
+// one of the shared request-body flags has to be renamed as well.
+func TestBodyFieldFlagsDoNotCollideWithRequestBodyFlags(t *testing.T) {
+	cmd := &cobra.Command{Use: "test"}
+	cli.AddBodyFlags(cmd)
+	cli.AddExampleFlag(cmd)
+
+	fields := []cli.BodyField{
+		{Name: "example", FlagName: "example", Type: "string"},
+		{Name: "stdin", FlagName: "stdin", Type: "bool"},
+	}
+
+	assert.NotPanics(t, func() { cli.AddBodyFieldFlags(cmd, fields) })
+	assert.NotNil(t, cmd.Flags().Lookup("body-example"))
+	assert.NotNil(t, cmd.Flags().Lookup("body-stdin"))
+
+	// The real request-body flags kept their types.
+	assert.Equal(t, "string", cmd.Flags().Lookup("from-file").Value.Type())
+	assert.Equal(t, "bool", cmd.Flags().Lookup("example").Value.Type())
 }

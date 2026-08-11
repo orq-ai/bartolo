@@ -14,7 +14,7 @@ func TestDefaultFormatterHandlesNilQueryResult(t *testing.T) {
 		AppName: "test",
 	})
 
-	viper.Set("query", "missing")
+	viper.Set("jmespath", "missing")
 	defer viper.Set("query", "")
 
 	out := new(bytes.Buffer)

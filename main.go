@@ -22,6 +22,7 @@ import (
 	surveycore "github.com/AlecAivazis/survey/v2/core"
 	surveyterminal "github.com/AlecAivazis/survey/v2/terminal"
 	"github.com/getkin/kin-openapi/openapi3"
+	bartolocli "github.com/orq-ai/bartolo/cli"
 	"github.com/orq-ai/bartolo/shorthand"
 	"github.com/spf13/cobra"
 	yamlv3 "gopkg.in/yaml.v3"
@@ -31,7 +32,7 @@ import (
 var templateFS embed.FS
 
 const projectConfigFilename = ".bartolo.json"
-const bartoloVersion = "0.4.3"
+const bartoloVersion = "0.4.5"
 
 // OpenAPI Extensions
 const (
@@ -75,6 +76,7 @@ type Operation struct {
 	OptionalParams []*Param
 	MediaType      string
 	Examples       []string
+	BodyExample    string
 	BodyFields     []*BodyField
 	Hidden         bool
 	NeedsResponse  bool
@@ -316,7 +318,17 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				description = extStr(operation.Extensions[ExtDescription])
 			}
 
-			reqMt, reqSchema, reqExamples, bodyFields := getRequestInfo(operation)
+			reqInfo := getRequestInfo(operation)
+			reqMt, reqSchema, reqExamples, bodyFields := reqInfo.mediaType, reqInfo.summary, reqInfo.examples, reqInfo.bodyFields
+
+			renamedFlags := reserveGeneratedFlagNames(bodyFields, optionalParams)
+			for _, r := range renamedFlags {
+				kind, _ := bartolocli.ReservedFlagName(r.From)
+				if kind == "" {
+					kind = "another flag on this command"
+				}
+				log.Printf("warning: %s %s: --%s collides with %s, exposing it as --%s", method, path, r.From, kind, r.To)
+			}
 
 			var examples []string
 			if len(reqExamples) > 0 {
@@ -359,6 +371,12 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 					"Scalar, nullable scalar (pass `null` for JSON null), enum, repeatable list (`--field a --field b`), " +
 					"and string map (`--field key=value`) fields use typed flags. " +
 					"Nested objects, arrays of objects, and polymorphic unions accept a JSON string (e.g. `--field '{\"k\":1}'`)."
+			}
+			if len(renamedFlags) > 0 {
+				description += "\n\nRenamed flags (the original names belong to global flags):\n"
+				for _, r := range renamedFlags {
+					description += fmt.Sprintf("- `%s` is `--%s` (not `--%s`)\n", r.Field, r.To, r.From)
+				}
 			}
 
 			method := strings.Title(strings.ToLower(method))
@@ -437,6 +455,7 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				OptionalParams: optionalParams,
 				MediaType:      reqMt,
 				Examples:       examples,
+				BodyExample:    reqInfo.exampleBody,
 				BodyFields:     bodyFields,
 				Hidden:         hidden,
 				Group:          group,
@@ -1085,13 +1104,16 @@ func getOptionalParams(allParams []*Param) []*Param {
 	return optional
 }
 
-func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}, []*BodyField) {
-	type requestInfo struct {
-		summary    string
-		examples   []interface{}
-		bodyFields []*BodyField
-	}
+// requestInfo describes the request body of an operation for one media type.
+type requestInfo struct {
+	mediaType   string
+	summary     string
+	examples    []interface{}
+	exampleBody string
+	bodyFields  []*BodyField
+}
 
+func getRequestInfo(op *openapi3.Operation) requestInfo {
 	mts := make(map[string]requestInfo)
 
 	if op.RequestBody != nil && op.RequestBody.Value != nil {
@@ -1109,9 +1131,19 @@ func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}, []*B
 
 			if item.Example != nil {
 				examples = append(examples, item.Example)
-			} else {
-				for _, ex := range item.Examples {
-					if ex.Value != nil {
+			} else if len(item.Examples) > 0 {
+				// Examples is a map, so pick by sorted name rather than
+				// whichever key Go's randomized iteration happens to yield —
+				// otherwise regenerating from an unchanged spec produces a
+				// different example every time.
+				names := make([]string, 0, len(item.Examples))
+				for name := range item.Examples {
+					names = append(names, name)
+				}
+				sort.Strings(names)
+
+				for _, name := range names {
+					if ex := item.Examples[name]; ex != nil && ex.Value != nil && ex.Value.Value != nil {
 						examples = append(examples, ex.Value.Value)
 						break
 					}
@@ -1119,33 +1151,119 @@ func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}, []*B
 			}
 
 			mts[mt] = requestInfo{
-				summary:    summary,
-				examples:   examples,
-				bodyFields: bodyFields,
+				mediaType:   mt,
+				summary:     summary,
+				examples:    examples,
+				exampleBody: buildExampleBody(mt, item),
+				bodyFields:  bodyFields,
 			}
 		}
 	}
 
+	// Walk media types in a stable order for the same reason.
+	mediaTypes := make([]string, 0, len(mts))
+	for mt := range mts {
+		mediaTypes = append(mediaTypes, mt)
+	}
+	sort.Strings(mediaTypes)
+
 	// Prefer JSON.
-	for mt, item := range mts {
+	for _, mt := range mediaTypes {
 		if strings.Contains(mt, "json") {
-			return mt, item.summary, item.examples, item.bodyFields
+			return mts[mt]
 		}
 	}
 
 	// Fall back to YAML next.
-	for mt, item := range mts {
+	for _, mt := range mediaTypes {
 		if strings.Contains(mt, "yaml") {
-			return mt, item.summary, item.examples, item.bodyFields
+			return mts[mt]
 		}
 	}
 
 	// Last resort: return the first we find!
-	for mt, item := range mts {
-		return mt, item.summary, item.examples, item.bodyFields
+	for _, mt := range mediaTypes {
+		return mts[mt]
 	}
 
-	return "", "", nil, nil
+	return requestInfo{}
+}
+
+// renamedFlag records a generated flag that had to be renamed to avoid a
+// collision, so the change can be surfaced in help text and generator output.
+type renamedFlag struct {
+	Field string
+	From  string
+	To    string
+}
+
+// reserveGeneratedFlagNames renames generated flags whose names would collide
+// with a global flag, a cobra built-in, or another flag on the same command.
+//
+// pflag's AddFlagSet skips any flag whose name a command already uses, and
+// cobra merges the root's persistent flags through it. A body field named
+// `profile` therefore does not merely win the long name — it drops the global
+// `--profile` from that command entirely, and a global's shorthand goes with
+// it, so `-o` stops resolving on a command with an `output-format` field.
+// Duplicating a request-body flag such as `--stdin` is worse still: pflag
+// panics when the flag is registered twice.
+//
+// Only optional params and body fields become flags. Required params are
+// positional arguments and keep their names. Body fields are reserved first
+// because the generated command registers them first.
+func reserveGeneratedFlagNames(bodyFields []*BodyField, optionalParams []*Param) []renamedFlag {
+	taken := map[string]bool{}
+	var renamed []renamedFlag
+
+	claim := func(prefix, name string) string {
+		resolved := bartolocli.ResolveGeneratedFlagName(prefix, name)
+		if taken[resolved] {
+			// Two sources want the same flag. Prefix (or further qualify) until
+			// the name is free, since registering it twice would panic.
+			resolved = prefix + "-" + name
+			for i := 2; taken[resolved]; i++ {
+				resolved = fmt.Sprintf("%s-%s-%d", prefix, name, i)
+			}
+		}
+		taken[resolved] = true
+		return resolved
+	}
+
+	// Say why a flag moved, right where the user reads the flag list. The
+	// runtime adds the same note for CLIs generated before this fix; it only
+	// does so when it has to rename, so the note is never duplicated here.
+	note := func(kind, name, from string) string {
+		if _, reserved := bartolocli.ReservedFlagName(from); reserved {
+			return fmt.Sprintf(" (%s %q, renamed to keep the global --%s flag available)", kind, name, from)
+		}
+		return fmt.Sprintf(" (%s %q, renamed to avoid a duplicate --%s flag)", kind, name, from)
+	}
+
+	for _, field := range bodyFields {
+		resolved := claim("body", field.CLIName)
+		if resolved != field.CLIName {
+			renamed = append(renamed, renamedFlag{Field: field.Name, From: field.CLIName, To: resolved})
+			description := strings.TrimSpace(field.Description)
+			if description == "" {
+				description = field.Name
+			}
+			field.Description = description + note("body field", field.Name, field.CLIName)
+			field.CLIName = resolved
+			field.GoName = toGoName("body "+resolved, false)
+		}
+	}
+
+	for _, param := range optionalParams {
+		resolved := claim("param", param.CLIName)
+		if resolved != param.CLIName {
+			renamed = append(renamed, renamedFlag{Field: param.Name, From: param.CLIName, To: resolved})
+			param.Description = strings.TrimSpace(param.Description) + note("parameter", param.Name, param.CLIName)
+			param.CLIName = resolved
+			param.GoName = toGoName("param "+resolved, false)
+		}
+	}
+
+	return renamed
 }
 
 func getBodyFields(schema *openapi3.Schema) []*BodyField {
@@ -1209,7 +1327,13 @@ func bodyFieldType(schema *openapi3.Schema) string {
 	effective, nullable := effectiveBodySchema(schema)
 	if effective == nil {
 		// Polymorphic shapes (multi-branch oneOf/anyOf) fall back to a JSON
-		// string flag so users can still drive them from the CLI.
+		// string flag so users can still drive them from the CLI. When one of
+		// the branches is a plain string (e.g. `model: string | object`), use a
+		// flag that accepts a bare string OR JSON, so users don't have to
+		// double-quote scalar values like model IDs.
+		if unionHasStringBranch(schema) {
+			return "json-or-string"
+		}
 		return "json"
 	}
 	if effective.Type == nil {
@@ -1267,12 +1391,39 @@ func bodyFieldType(schema *openapi3.Schema) string {
 	return base
 }
 
+// unionHasStringBranch reports whether a multi-branch `oneOf`/`anyOf` schema has
+// at least one branch that resolves to a plain string scalar. Used to decide
+// whether a polymorphic body field should accept a bare string in addition to
+// JSON.
+func unionHasStringBranch(schema *openapi3.Schema) bool {
+	if schema == nil {
+		return false
+	}
+	branches := make([]*openapi3.SchemaRef, 0, len(schema.AnyOf)+len(schema.OneOf))
+	branches = append(branches, schema.AnyOf...)
+	branches = append(branches, schema.OneOf...)
+	for _, br := range branches {
+		if br == nil || br.Value == nil {
+			continue
+		}
+		inner, _ := effectiveBodySchema(br.Value)
+		if scalarType(inner) == "string" {
+			return true
+		}
+	}
+	return false
+}
+
 // mergeAllOf flattens an `allOf`, `oneOf`, or `anyOf` request-body composition
 // into a synthetic object schema whose Properties are the union of every
 // branch (host's own properties win on conflict). For `allOf` the Required
 // list is the union of all branches; for `oneOf`/`anyOf` it is the
 // intersection (a field is only universally required if every branch
-// requires it). Returns the schema unchanged when there is nothing to merge.
+// requires it). When the same string-enum property appears in several
+// `oneOf`/`anyOf` branches with different values — the discriminated-union
+// `type`/`strategy` pattern — the merged property carries the union of all
+// branch enums instead of just the first branch's values. Returns the schema
+// unchanged when there is nothing to merge.
 func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 	if schema == nil {
 		return schema
@@ -1286,6 +1437,10 @@ func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 		Properties: openapi3.Schemas{},
 	}
 
+	// Properties collected from the host schema or an `allOf` branch are
+	// authoritative constraints and are never widened by union branches.
+	protected := map[string]struct{}{}
+
 	collectProps := func(src *openapi3.Schema) {
 		if src == nil {
 			return
@@ -1293,6 +1448,35 @@ func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 		for name, ref := range src.Properties {
 			if _, exists := merged.Properties[name]; !exists {
 				merged.Properties[name] = ref
+				protected[name] = struct{}{}
+			}
+		}
+		if src.AdditionalProperties.Schema != nil && merged.AdditionalProperties.Schema == nil {
+			merged.AdditionalProperties.Schema = src.AdditionalProperties.Schema
+		}
+		if src.AdditionalProperties.Has != nil && merged.AdditionalProperties.Has == nil {
+			merged.AdditionalProperties.Has = src.AdditionalProperties.Has
+		}
+	}
+
+	// collectUnionProps is collectProps for `oneOf`/`anyOf` branches: a value
+	// only has to satisfy one branch, so when the same property collides
+	// across branches its string enums are unioned rather than first-wins.
+	collectUnionProps := func(src *openapi3.Schema) {
+		if src == nil {
+			return
+		}
+		for name, ref := range src.Properties {
+			existing, exists := merged.Properties[name]
+			if !exists {
+				merged.Properties[name] = ref
+				continue
+			}
+			if _, ok := protected[name]; ok {
+				continue
+			}
+			if widened := unionEnumSchema(existing, ref); widened != nil {
+				merged.Properties[name] = widened
 			}
 		}
 		if src.AdditionalProperties.Schema != nil && merged.AdditionalProperties.Schema == nil {
@@ -1340,7 +1524,7 @@ func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 		if flat != nil && flat.Type != nil && flat.Type.Is("null") {
 			continue
 		}
-		collectProps(flat)
+		collectUnionProps(flat)
 
 		branchRequired := map[string]struct{}{}
 		if flat != nil {
@@ -1380,6 +1564,70 @@ func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 	}
 
 	return merged
+}
+
+// unionEnumSchema resolves a property collision between two `oneOf`/`anyOf`
+// branches. When both sides are string schemas and the existing one carries
+// an enum, it returns a replacement ref: the union of both enums when the
+// incoming side is also enumerated, or a plain string (enum dropped) when the
+// incoming branch accepts any string — enforcing a partial enum would reject
+// values some branch allows. Returns nil when the existing ref should be kept
+// as-is. The replacement wraps a copy; the source schemas are shared `$ref`
+// components and are never mutated.
+func unionEnumSchema(existing, incoming *openapi3.SchemaRef) *openapi3.SchemaRef {
+	if existing == nil || incoming == nil {
+		return nil
+	}
+	exEff, exNullable := effectiveBodySchema(existing.Value)
+	inEff, inNullable := effectiveBodySchema(incoming.Value)
+	if exEff == nil || inEff == nil {
+		return nil
+	}
+	if exEff.Type == nil || !exEff.Type.Is("string") || inEff.Type == nil || !inEff.Type.Is("string") {
+		return nil
+	}
+	if len(exEff.Enum) == 0 {
+		// Already accepts any string; nothing to widen.
+		return nil
+	}
+
+	clone := *exEff
+	if exNullable || inNullable {
+		clone.Nullable = true
+	}
+	if clone.Description == "" {
+		clone.Description = inEff.Description
+	}
+
+	if len(inEff.Enum) == 0 {
+		clone.Enum = nil
+		return &openapi3.SchemaRef{Value: &clone}
+	}
+
+	seen := map[string]struct{}{}
+	union := make([]interface{}, 0, len(exEff.Enum)+len(inEff.Enum))
+	for _, raw := range exEff.Enum {
+		key := fmt.Sprintf("%T:%v", raw, raw)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		union = append(union, raw)
+	}
+	for _, raw := range inEff.Enum {
+		key := fmt.Sprintf("%T:%v", raw, raw)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		union = append(union, raw)
+	}
+	if len(union) == len(exEff.Enum) {
+		// No new values; keep the existing ref untouched.
+		return nil
+	}
+	clone.Enum = union
+	return &openapi3.SchemaRef{Value: &clone}
 }
 
 func bodyFieldEnum(schema *openapi3.Schema, fieldType string) []string {
@@ -1974,24 +2222,18 @@ func promptInterrupted(err error) bool {
 	return err == surveyterminal.InterruptErr
 }
 
-func normalizeOutputFormat(value string) string {
-	if format, ok := parseOutputFormat(value); ok {
-		return format
-	}
-	return "json"
-}
+// outputFormats are the values accepted by `--default-format`, mirroring the
+// formats the generated CLIs support.
+var outputFormats = []string{"json", "yaml", "toon"}
 
 func parseOutputFormat(value string) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "json":
-		return "json", true
-	case "yaml":
-		return "yaml", true
-	case "toon":
-		return "toon", true
-	default:
-		return "", false
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	for _, format := range outputFormats {
+		if normalized == format {
+			return format, true
+		}
 	}
+	return "", false
 }
 
 func isValidEnvVarName(value string) bool {
@@ -2155,7 +2397,12 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 	apiKeyEnvVar = strings.TrimSpace(apiKeyEnvVar)
 
 	defaultFormat, _ := cmd.Flags().GetString("default-format")
-	defaultFormat = normalizeOutputFormat(defaultFormat)
+	// Reject an unknown format instead of quietly generating a JSON CLI.
+	defaultFormat, ok := parseOutputFormat(defaultFormat)
+	if !ok {
+		rejected, _ := cmd.Flags().GetString("default-format")
+		return nil, fmt.Errorf("--default-format: %q is not one of [%s]", rejected, strings.Join(outputFormats, ", "))
+	}
 
 	interactive, _ := cmd.Flags().GetBool("interactive")
 	if len(args) == 0 {
@@ -2751,7 +2998,7 @@ func main() {
 	initCommand.Flags().String("module-path", "", "Go module path for the generated CLI project")
 	initCommand.Flags().String("bartolo-path", "", "Local path to the bartolo repo to use via go.mod replace during development")
 	initCommand.Flags().String("api-key-env-var", "", "Custom API key environment variable for generated CLIs")
-	initCommand.Flags().String("default-format", "json", "Default output format for generated CLIs [json, yaml, toon]")
+	initCommand.Flags().String("default-format", "json", fmt.Sprintf("Default output format for generated CLIs [%s]", strings.Join(outputFormats, ", ")))
 	root.AddCommand(initCommand)
 
 	root.AddCommand(&cobra.Command{

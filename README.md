@@ -68,7 +68,8 @@ Every generated CLI starts with a useful operator surface:
 - `doctor` shows config, auth source, and selected server.
 - `request` provides a raw escape hatch for unmodeled endpoints.
 - `default-format` shows or persists the preferred default output format.
-- `--json`, `--output-format`, and `--query` make automation and projection straightforward.
+- `--json`, `--output-format`, and `-j`/`--jmespath` make automation and projection straightforward.
+- Generated flags never shadow a global: a body field or parameter named after one (`raw`, `profile`, `output-format`, ...) is exposed as `--body-<name>` or `--param-<name>`.
 - Grouped nouns like `prompts`, `files`, or `human-evals` feel closer to a product CLI than a path translator.
 
 ## Schema Shaping
@@ -100,7 +101,11 @@ Generated CLIs keep a normal `main.go`, so you can still add middleware, flags, 
 ```go
 package main
 
-import "github.com/orq-ai/bartolo/cli"
+import (
+	"os"
+
+	"github.com/orq-ai/bartolo/cli"
+)
 
 func main() {
 	cli.Init(&cli.Config{
@@ -112,9 +117,15 @@ func main() {
 
 	registerGeneratedCommands()
 	registerCustomCommands()
-	cli.Root.Execute()
+	os.Exit(cli.Execute())
 }
 ```
+
+`cli.Execute` runs the root command and returns the process exit code: `0` on
+success, `2` for usage errors (unknown command, bad flag, wrong argument count),
+and `1` for anything that failed while running. Passing it to `os.Exit` is what
+makes failures visible to `set -e` scripts and CI. Calling `cli.Root.Execute()`
+directly discards the error and always exits `0`.
 
 ## Local Development
 
