@@ -2,6 +2,8 @@ module github.com/orq-ai/bartolo
 
 go 1.25.0
 
+toolchain go1.26.5
+
 require (
 	github.com/AlecAivazis/survey/v2 v2.3.7
 	github.com/alecthomas/chroma v0.10.0
@@ -58,8 +60,8 @@ require (
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/woodsbury/decimal128 v1.3.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
-	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/term v0.43.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/net v0.57.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/term v0.45.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
 )
