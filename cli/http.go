@@ -62,6 +62,21 @@ func UserAgentMiddleware() {
 	})
 }
 
+// redactHeaderValue masks the value of a sensitive header so `--verbose` never
+// prints an API key, bearer token, or cookie. Matches on the lowercased name, so
+// `Authorization`/`AUTHORIZATION` and any header hinting at a secret are covered.
+func redactHeaderValue(key, val string) string {
+	k := strings.ToLower(key)
+	switch {
+	case k == "authorization", k == "proxy-authorization", k == "cookie", k == "set-cookie":
+		return "[REDACTED]"
+	case strings.Contains(k, "token"), strings.Contains(k, "secret"),
+		strings.Contains(k, "api-key"), strings.Contains(k, "apikey"):
+		return "[REDACTED]"
+	}
+	return val
+}
+
 // LogMiddleware adds verbose log info to HTTP requests.
 func LogMiddleware(useColor bool) {
 	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -91,7 +106,7 @@ func LogMiddleware(useColor bool) {
 		if viper.GetBool("verbose") {
 			headers := ""
 			for key, val := range ctx.Request.Header {
-				headers += key + ": " + val[0] + "\n"
+				headers += key + ": " + redactHeaderValue(key, val[0]) + "\n"
 			}
 
 			if body != "" {
@@ -120,7 +135,7 @@ func LogMiddleware(useColor bool) {
 		if viper.GetBool("verbose") {
 			headers := ""
 			for key, val := range ctx.Response.Header {
-				headers += key + ": " + val[0] + "\n"
+				headers += key + ": " + redactHeaderValue(key, val[0]) + "\n"
 			}
 
 			body, newReader, err := getBody(ctx.Response.Body)

@@ -17,6 +17,17 @@ import (
 	"gopkg.in/h2non/gentleman.v2/context"
 )
 
+// writeCredentials persists the credentials file and restricts it to 0600, so the
+// long-lived API keys it holds are not world-readable (viper.WriteConfigAs would
+// otherwise leave it at the default 0644).
+func writeCredentials(filename string) error {
+	err := Creds.WriteConfigAs(filename)
+	if err != nil {
+		return err
+	}
+	return os.Chmod(filename, 0o600)
+}
+
 // AuthHandler describes a handler that can be called on a request to inject
 // auth information and is agnostic to the type of auth.
 type AuthHandler interface {
@@ -232,7 +243,7 @@ func UseAuth(typeName string, handler AuthHandler) {
 		}
 
 		filename := path.Join(viper.GetString("config-directory"), "credentials.json")
-		if err := Creds.WriteConfigAs(filename); err != nil {
+		if err := writeCredentials(filename); err != nil {
 			panic(err)
 		}
 	}
@@ -398,7 +409,7 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 	}
 
 	filename := path.Join(viper.GetString("config-directory"), "credentials.json")
-	return Creds.WriteConfigAs(filename)
+	return writeCredentials(filename)
 }
 
 func hasInteractiveInput() bool {
@@ -500,7 +511,7 @@ func InitCredentials(options ...func(*CredentialsFile) error) {
 			}
 
 			filename := path.Join(viper.GetString("config-directory"), "credentials.json")
-			if err := Creds.WriteConfigAs(filename); err != nil {
+			if err := writeCredentials(filename); err != nil {
 				panic(err)
 			}
 		},
