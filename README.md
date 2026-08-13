@@ -127,6 +127,16 @@ and `1` for anything that failed while running. Passing it to `os.Exit` is what
 makes failures visible to `set -e` scripts and CI. Calling `cli.Root.Execute()`
 directly discards the error and always exits `0`.
 
+A CLI that cancels in-flight requests on SIGINT/SIGTERM needs a context, and
+calling `cli.Root.ExecuteContext(ctx)` for it loses the same contract — the
+unknown-subcommand check and the usage exit code live in `cli.Execute`, not on
+the root command. Use `cli.ExecuteContext(ctx)` instead, which is `cli.Execute`
+with a caller-supplied context:
+
+```go
+os.Exit(cli.ExecuteContext(ctx))
+```
+
 ## Local Development
 
 Use the repo-level verification flow before publishing changes:
