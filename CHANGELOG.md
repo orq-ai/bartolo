@@ -4,6 +4,15 @@ All notable changes to Bartolo will be documented in this file.
 
 The project was restarted on 2026-04-09 as a new public release stream under the Bartolo name.
 
+## Unreleased
+
+### Security (RES-1134)
+
+- **`--verbose` no longer prints secrets.** The HTTP header logger redacted nothing, so `Authorization: Bearer <key>` and cookies were written to the debug log. Sensitive headers now render as `[REDACTED]`, matched case-insensitively.
+- **The credentials file is written `0600`.** `viper.WriteConfigAs` left the long-lived API-key file world-readable at `0644`; every write now chmods it to `0600`.
+- **API keys are no longer required as positional args.** `auth add-profile` prompts for each secret without echo instead of taking it on the command line (where it lands in shell history and `ps`). Positional values still work for backward compatibility but are discouraged.
+- **Destructive `delete` commands now confirm.** Generated delete commands prompt before running and gain a `-f, --force` flag; a non-interactive shell without `--force` refuses rather than deleting silently.
+
 ## 2026-08-13 (v0.4.6)
 
 - Bumped Bartolo to v0.4.6.
