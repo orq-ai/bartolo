@@ -227,9 +227,11 @@ func UseAuth(typeName string, handler AuthHandler) {
 	// Set up the add-profile command.
 	keys := handler.ProfileKeys()
 
+	// Key values are OPTIONAL positional args: passing a secret on the command line
+	// leaks it into shell history and `ps`, so the secure default is to prompt for it.
 	use := " [flags] <name>"
 	for _, name := range keys {
-		use += " <" + strings.Replace(name, "_", "-", -1) + ">"
+		use += " [<" + strings.Replace(name, "_", "-", -1) + ">]"
 	}
 
 	run := func(cmd *cobra.Command, args []string) {
@@ -237,9 +239,18 @@ func UseAuth(typeName string, handler AuthHandler) {
 		Creds.Set("profiles."+name+".type", typeName)
 
 		for i, key := range keys {
+			value := ""
+			if i+1 < len(args) {
+				// Backward-compat: value supplied positionally (discouraged for secrets).
+				value = args[i+1]
+			} else if err := survey.AskOne(
+				&survey.Password{Message: strings.Replace(key, "_", "-", -1) + ":"}, &value,
+			); err != nil {
+				panic(err)
+			}
 			// Replace periods in the name since Viper will create nested structures
 			// in the config and this isn't what we want!
-			Creds.Set("profiles."+name+"."+strings.Replace(key, "-", "_", -1), args[i+1])
+			Creds.Set("profiles."+name+"."+strings.Replace(key, "-", "_", -1), value)
 		}
 
 		filename := path.Join(viper.GetString("config-directory"), "credentials.json")
@@ -259,14 +270,14 @@ func UseAuth(typeName string, handler AuthHandler) {
 
 		authAddCommand.Use = "add-profile" + use
 		authAddCommand.Short = "Add a new named authentication profile"
-		authAddCommand.Args = cobra.ExactArgs(1 + len(keys))
+		authAddCommand.Args = cobra.RangeArgs(1, 1+len(keys))
 		authAddCommand.Run = run
 	} else {
 		// Add a new type-specific `add-profile` subcommand.
 		authAddCommand.AddCommand(&cobra.Command{
 			Use:   typeName + use,
 			Short: "Add a new named " + typeName + " authentication profile",
-			Args:  cobra.ExactArgs(1 + len(keys)),
+			Args:  cobra.RangeArgs(1, 1+len(keys)),
 			Run:   run,
 		})
 	}
@@ -494,20 +505,28 @@ func InitCredentials(options ...func(*CredentialsFile) error) {
 
 	use := "add-profile [flags] <name>"
 	for _, name := range Creds.keys {
-		use += " <" + strings.Replace(name, "_", "-", -1) + ">"
+		use += " [<" + strings.Replace(name, "_", "-", -1) + ">]"
 	}
 
 	cmd.AddCommand(&cobra.Command{
 		Use:     use,
 		Aliases: []string{"add"},
 		Short:   "Add a new named authentication profile",
-		Args:    cobra.ExactArgs(1 + len(Creds.keys)),
+		Args:    cobra.RangeArgs(1, 1+len(Creds.keys)),
 		Run: func(cmd *cobra.Command, args []string) {
 			for i, key := range Creds.keys {
 				// Replace periods in the name since Viper will create nested structures
 				// in the config and this isn't what we want!
 				name := strings.Replace(args[0], ".", "-", -1)
-				Creds.Set("profiles."+name+"."+strings.Replace(key, "-", "_", -1), args[i+1])
+				value := ""
+				if i+1 < len(args) {
+					value = args[i+1]
+				} else if err := survey.AskOne(
+					&survey.Password{Message: strings.Replace(key, "_", "-", -1) + ":"}, &value,
+				); err != nil {
+					panic(err)
+				}
+				Creds.Set("profiles."+name+"."+strings.Replace(key, "-", "_", -1), value)
 			}
 
 			filename := path.Join(viper.GetString("config-directory"), "credentials.json")
