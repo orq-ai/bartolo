@@ -125,6 +125,11 @@ func registerRootCommands(root *cobra.Command) {
 				Example: examples,
 				Args:    cobra.MinimumNArgs({{ len .RequiredParams }}),
 				Run: func(cmd *cobra.Command, args []string) {
+					{{- if eq .Method "Delete" }}
+					if !bartolocli.ConfirmDestructive(cmd, "{{ .Use | escapeStr }}") {
+						return
+					}
+					{{- end }}
 					{{- if .CanHaveBody }}
 					{{- if .BodyExample }}
 					if bartolocli.PrintBodyExample(params, "{{ .BodyExample | escapeStr }}") {
@@ -186,6 +191,10 @@ func registerRootCommands(root *cobra.Command) {
 				},
 			}
 			root.AddCommand(cmd)
+
+			{{- if eq .Method "Delete" }}
+			cmd.Flags().BoolP("force", "f", false, "Skip the confirmation prompt for this destructive command")
+			{{- end }}
 
 			{{- if .CanHaveBody }}
 			bartolocli.AddBodyFlags(cmd)

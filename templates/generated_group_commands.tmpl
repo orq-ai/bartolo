@@ -109,6 +109,11 @@ func register{{ $group.GoName }}Commands(root *cobra.Command) {
 				Example: examples,
 				Args:    cobra.MinimumNArgs({{ len .RequiredParams }}),
 				Run: func(cmd *cobra.Command, args []string) {
+					{{- if eq .Method "Delete" }}
+					if !bartolocli.ConfirmDestructive(cmd, "{{ .Use | escapeStr }}") {
+						return
+					}
+					{{- end }}
 					{{- if .CanHaveBody }}
 					{{- if .BodyExample }}
 					if bartolocli.PrintBodyExample(params, "{{ .BodyExample | escapeStr }}") {
@@ -170,6 +175,10 @@ func register{{ $group.GoName }}Commands(root *cobra.Command) {
 				},
 			}
 			{{ $group.GoName }}Cmd.AddCommand(cmd)
+
+			{{- if eq .Method "Delete" }}
+			cmd.Flags().BoolP("force", "f", false, "Skip the confirmation prompt for this destructive command")
+			{{- end }}
 
 			{{- if .CanHaveBody }}
 			bartolocli.AddBodyFlags(cmd)

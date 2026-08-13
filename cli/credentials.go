@@ -432,6 +432,28 @@ func hasInteractiveInput() bool {
 	return (info.Mode() & os.ModeCharDevice) != 0
 }
 
+// ConfirmDestructive gates a destructive command (such as a delete) behind a
+// confirmation. It proceeds when the command's --force flag is set; in a
+// non-interactive shell without --force it refuses (so a piped script cannot
+// delete by accident); otherwise it prompts and defaults to No.
+func ConfirmDestructive(cmd *cobra.Command, action string) bool {
+	if force, err := cmd.Flags().GetBool("force"); err == nil && force {
+		return true
+	}
+	if !hasInteractiveInput() {
+		fmt.Fprintf(os.Stderr, "Refusing to run %q without --force in a non-interactive shell.\n", action)
+		return false
+	}
+	proceed := false
+	if err := survey.AskOne(&survey.Confirm{
+		Message: fmt.Sprintf("This will run %q and cannot be undone. Continue?", action),
+		Default: false,
+	}, &proceed); err != nil {
+		return false
+	}
+	return proceed
+}
+
 // CredentialsFile holds credential-related information.
 type CredentialsFile struct {
 	*viper.Viper
