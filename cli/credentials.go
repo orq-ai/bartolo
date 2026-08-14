@@ -240,13 +240,15 @@ func UseAuth(typeName string, handler AuthHandler) {
 
 		for i, key := range keys {
 			value := ""
+			label := strings.Replace(key, "_", "-", -1)
 			if i+1 < len(args) {
 				// Backward-compat: value supplied positionally (discouraged for secrets).
 				value = args[i+1]
-			} else if err := survey.AskOne(
-				&survey.Password{Message: strings.Replace(key, "_", "-", -1) + ":"}, &value,
-			); err != nil {
-				panic(err)
+			} else if err := promptSecret(label, &value); err != nil {
+				// No positional value and no usable TTY (pipe, /dev/null, CI): exit
+				// cleanly instead of panicking on the prompt's EOF.
+				fmt.Fprintf(os.Stderr, "no %s provided; pass it as an argument or run in an interactive terminal\n", label)
+				os.Exit(1)
 			}
 			// Replace periods in the name since Viper will create nested structures
 			// in the config and this isn't what we want!
@@ -432,6 +434,13 @@ func hasInteractiveInput() bool {
 	return (info.Mode() & os.ModeCharDevice) != 0
 }
 
+// promptSecret reads a secret value without echo, returning any error (no TTY,
+// EOF under a pipe or /dev/null) instead of panicking, so add-profile can exit
+// with a clear message when it cannot prompt.
+func promptSecret(label string, out *string) error {
+	return survey.AskOne(&survey.Password{Message: label + ":"}, out)
+}
+
 // ConfirmDestructive gates a destructive command (such as a delete) behind a
 // confirmation. It proceeds when the command's --force flag is set; in a
 // non-interactive shell without --force it refuses (so a piped script cannot
@@ -541,12 +550,12 @@ func InitCredentials(options ...func(*CredentialsFile) error) {
 				// in the config and this isn't what we want!
 				name := strings.Replace(args[0], ".", "-", -1)
 				value := ""
+				label := strings.Replace(key, "_", "-", -1)
 				if i+1 < len(args) {
 					value = args[i+1]
-				} else if err := survey.AskOne(
-					&survey.Password{Message: strings.Replace(key, "_", "-", -1) + ":"}, &value,
-				); err != nil {
-					panic(err)
+				} else if err := promptSecret(label, &value); err != nil {
+					fmt.Fprintf(os.Stderr, "no %s provided; pass it as an argument or run in an interactive terminal\n", label)
+					os.Exit(1)
 				}
 				Creds.Set("profiles."+name+"."+strings.Replace(key, "-", "_", -1), value)
 			}
