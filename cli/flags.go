@@ -38,6 +38,11 @@ var reservedFlagNames = map[string]string{
 	"example":   "request-body flag",
 	"from-file": "request-body flag",
 	"stdin":     "request-body flag",
+
+	// Registered directly on destructive (Delete) commands by the generated
+	// command templates. A spec parameter or body field named `force` would
+	// otherwise register `--force` twice and make pflag panic at startup.
+	"force": "destructive-command flag",
 }
 
 // ReservedFlagName reports whether name is reserved for a global or built-in

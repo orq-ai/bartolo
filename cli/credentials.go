@@ -244,11 +244,15 @@ func UseAuth(typeName string, handler AuthHandler) {
 			if i+1 < len(args) {
 				// Backward-compat: value supplied positionally (discouraged for secrets).
 				value = args[i+1]
-			} else if err := promptSecret(label, &value); err != nil {
-				// No positional value and no usable TTY (pipe, /dev/null, CI): exit
-				// cleanly instead of panicking on the prompt's EOF.
+			} else if v, err := promptProfileValue(key); err != nil {
+				// No positional value and no usable TTY (pipe, /dev/null, CI): a
+				// missing argument is a usage error, and we exit cleanly rather
+				// than panicking on the prompt's EOF. promptProfileValue only
+				// hides genuinely sensitive keys, so a client-id still echoes.
 				fmt.Fprintf(os.Stderr, "no %s provided; pass it as an argument or run in an interactive terminal\n", label)
-				os.Exit(1)
+				os.Exit(ExitUsage)
+			} else {
+				value = v
 			}
 			// Replace periods in the name since Viper will create nested structures
 			// in the config and this isn't what we want!
@@ -434,11 +438,18 @@ func hasInteractiveInput() bool {
 	return (info.Mode() & os.ModeCharDevice) != 0
 }
 
-// promptSecret reads a secret value without echo, returning any error (no TTY,
-// EOF under a pipe or /dev/null) instead of panicking, so add-profile can exit
-// with a clear message when it cannot prompt.
-func promptSecret(label string, out *string) error {
-	return survey.AskOne(&survey.Password{Message: label + ":"}, out)
+// isInteractive and askConfirm are seams so ConfirmDestructive's three paths
+// (--force, non-interactive refusal, prompt answered No) can be tested without a
+// real terminal.
+var isInteractive = hasInteractiveInput
+
+var askConfirm = func(action string) (bool, error) {
+	proceed := false
+	err := survey.AskOne(&survey.Confirm{
+		Message: fmt.Sprintf("This will run %q and cannot be undone. Continue?", action),
+		Default: false,
+	}, &proceed)
+	return proceed, err
 }
 
 // ConfirmDestructive gates a destructive command (such as a delete) behind a
@@ -449,15 +460,12 @@ func ConfirmDestructive(cmd *cobra.Command, action string) bool {
 	if force, err := cmd.Flags().GetBool("force"); err == nil && force {
 		return true
 	}
-	if !hasInteractiveInput() {
+	if !isInteractive() {
 		fmt.Fprintf(os.Stderr, "Refusing to run %q without --force in a non-interactive shell.\n", action)
 		return false
 	}
-	proceed := false
-	if err := survey.AskOne(&survey.Confirm{
-		Message: fmt.Sprintf("This will run %q and cannot be undone. Continue?", action),
-		Default: false,
-	}, &proceed); err != nil {
+	proceed, err := askConfirm(action)
+	if err != nil {
 		return false
 	}
 	return proceed
@@ -553,9 +561,12 @@ func InitCredentials(options ...func(*CredentialsFile) error) {
 				label := strings.Replace(key, "_", "-", -1)
 				if i+1 < len(args) {
 					value = args[i+1]
-				} else if err := promptSecret(label, &value); err != nil {
+				} else if v, err := promptProfileValue(key); err != nil {
+					// A missing argument is a usage error; only sensitive keys are hidden.
 					fmt.Fprintf(os.Stderr, "no %s provided; pass it as an argument or run in an interactive terminal\n", label)
-					os.Exit(1)
+					os.Exit(ExitUsage)
+				} else {
+					value = v
 				}
 				Creds.Set("profiles."+name+"."+strings.Replace(key, "-", "_", -1), value)
 			}
