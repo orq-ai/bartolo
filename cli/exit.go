@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -41,6 +42,14 @@ func (e *UsageError) Unwrap() error {
 // CLIs pass the result straight to os.Exit so that no error path reports
 // success.
 func Execute() int {
+	return ExecuteContext(context.Background())
+}
+
+// ExecuteContext is Execute with a caller-supplied context, for CLIs that
+// cancel in-flight requests on SIGINT/SIGTERM. It exists so those CLIs do not
+// have to call Root.ExecuteContext themselves: doing that skips the exit-code
+// contract below and lets cobra-level failures report success.
+func ExecuteContext(ctx context.Context) int {
 	rejectUnknownSubcommands(Root)
 
 	// Cobra prints the usage block on failure with Println, which goes to
@@ -49,7 +58,7 @@ func Execute() int {
 	// failed does not need its own usage repeated back.
 	Root.SilenceUsage = true
 
-	cmd, err := Root.ExecuteC()
+	cmd, err := Root.ExecuteContextC(ctx)
 
 	var usage *UsageError
 	if errors.As(err, &usage) && cmd != nil {

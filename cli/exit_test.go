@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -23,6 +24,20 @@ func executeForExit(cmd string) (string, string, int) {
 	Stdout = stdout
 	Stderr = stderr
 	code := Execute()
+	return stdout.String(), stderr.String(), code
+}
+
+// executeContextForExit is executeForExit through the context-taking entrypoint
+// used by CLIs that cancel on SIGINT/SIGTERM.
+func executeContextForExit(ctx context.Context, cmd string) (string, string, int) {
+	stdout := new(bytes.Buffer)
+	stderr := new(bytes.Buffer)
+	Root.SetArgs(strings.Split(cmd, " "))
+	Root.SetOut(stdout)
+	Root.SetErr(stderr)
+	Stdout = stdout
+	Stderr = stderr
+	code := ExecuteContext(ctx)
 	return stdout.String(), stderr.String(), code
 }
 
@@ -75,6 +90,29 @@ func TestExitCodes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ExecuteContext shares its classification with Execute, which TestExitCodes
+// covers. What is its own is the context: it has to reach the handler, which is
+// the only reason to call it over Execute.
+func TestExecuteContextPassesTheContextToTheHandler(t *testing.T) {
+	initExitTestCLI(t)
+
+	type ctxKey struct{}
+	var seen context.Context
+	Root.AddCommand(&cobra.Command{
+		Use:  "ctx",
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			seen = cmd.Context()
+		},
+	})
+
+	ctx := context.WithValue(context.Background(), ctxKey{}, "value")
+	_, _, code := executeContextForExit(ctx, "ctx")
+
+	assert.Equal(t, ExitOK, code)
+	assert.Equal(t, "value", seen.Value(ctxKey{}))
 }
 
 func TestUnknownSubcommandReportsTheOffendingArg(t *testing.T) {
