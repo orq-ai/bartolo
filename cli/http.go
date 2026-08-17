@@ -67,11 +67,16 @@ func UserAgentMiddleware() {
 // `Authorization`/`AUTHORIZATION` and any header hinting at a secret are covered.
 func redactHeaderValue(key, val string) string {
 	k := strings.ToLower(key)
-	switch {
-	case k == "authorization", k == "proxy-authorization", k == "cookie", k == "set-cookie":
+	switch k {
+	case "authorization", "proxy-authorization", "cookie", "set-cookie":
 		return "[REDACTED]"
-	case strings.Contains(k, "token"), strings.Contains(k, "secret"),
-		strings.Contains(k, "api-key"), strings.Contains(k, "apikey"):
+	}
+	// Reuse looksSensitiveKey (key/token/secret/password) rather than a narrower list
+	// here: the auth handler is consumer-supplied, so bartolo cannot enumerate header
+	// names, and a header the credentials layer treats as secret must not be the one
+	// `--verbose` prints (e.g. X-Orq-Key, X-Session-Key). One definition of sensitive
+	// for the whole package (RES-1134 review).
+	if looksSensitiveKey(k) {
 		return "[REDACTED]"
 	}
 	return val

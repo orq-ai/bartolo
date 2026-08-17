@@ -14,17 +14,30 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"golang.org/x/term"
 	"gopkg.in/h2non/gentleman.v2/context"
 )
 
-// writeCredentials persists the credentials file and restricts it to 0600, so the
-// long-lived API keys it holds are not world-readable (viper.WriteConfigAs would
-// otherwise leave it at the default 0644).
+// writeCredentials persists the credentials file and keeps it at 0600, so the
+// long-lived API keys it holds are never world-readable (viper.WriteConfigAs
+// would otherwise create it at the default 0644).
 func writeCredentials(filename string) error {
-	err := Creds.WriteConfigAs(filename)
-	if err != nil {
+	// Create the file 0600 BEFORE viper writes the key into it. os.WriteFile only
+	// applies its permission on creation, so viper's write keeps the mode; this closes
+	// the window where WriteConfigAs would create the file 0644 and the key would sit
+	// world-readable until the chmod below — and, if the process died in between, would
+	// stay 0644 (RES-1134 review). Only pre-create when absent, so a WriteConfigAs
+	// failure can never truncate an existing credentials file.
+	if _, statErr := os.Stat(filename); os.IsNotExist(statErr) {
+		if err := os.WriteFile(filename, nil, 0o600); err != nil {
+			return err
+		}
+	}
+	if err := Creds.WriteConfigAs(filename); err != nil {
 		return err
 	}
+	// Belt and suspenders: narrows a pre-existing file that was created 0644 by an
+	// older build before this fix landed.
 	return os.Chmod(filename, 0o600)
 }
 
@@ -430,12 +443,13 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 }
 
 func hasInteractiveInput() bool {
-	info, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-
-	return (info.Mode() & os.ModeCharDevice) != 0
+	// term.IsTerminal, not os.ModeCharDevice: /dev/null is itself a character device,
+	// so the ModeCharDevice test returned true for exactly the non-interactive shapes
+	// this guard exists to catch — docker without -i, systemd units and cron all hand
+	// the process /dev/null on stdin — and let the confirmation prompt render to
+	// something that cannot answer. IsTerminal is true only for a real terminal
+	// (RES-1134 review).
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 // isInteractive and askConfirm are seams so ConfirmDestructive's three paths
@@ -452,17 +466,26 @@ var askConfirm = func(action string) (bool, error) {
 	return proceed, err
 }
 
+// exitFunc is a seam so the non-interactive-refusal exit can be tested without
+// ending the test process.
+var exitFunc = os.Exit
+
 // ConfirmDestructive gates a destructive command (such as a delete) behind a
 // confirmation. It proceeds when the command's --force flag is set; in a
-// non-interactive shell without --force it refuses (so a piped script cannot
-// delete by accident); otherwise it prompts and defaults to No.
+// non-interactive shell without --force it refuses and exits ExitUsage (so a
+// scripted caller sees a non-zero status and can tell a skipped delete from a
+// successful one, rather than reading a delete that never happened as a success);
+// otherwise it prompts and defaults to No. An interactive No returns false and
+// leaves the exit code to the caller, since a human deliberately cancelling is not
+// an error (RES-1134 review).
 func ConfirmDestructive(cmd *cobra.Command, action string) bool {
 	if force, err := cmd.Flags().GetBool("force"); err == nil && force {
 		return true
 	}
 	if !isInteractive() {
 		fmt.Fprintf(os.Stderr, "Refusing to run %q without --force in a non-interactive shell.\n", action)
-		return false
+		exitFunc(ExitUsage)
+		return false // unreachable in production (exitFunc does not return); keeps the seam usable
 	}
 	proceed, err := askConfirm(action)
 	if err != nil {

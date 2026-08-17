@@ -19,24 +19,33 @@ func TestConfirmDestructive(t *testing.T) {
 		c.Flags().Bool("force", force, "")
 		return c
 	}
-	origInteractive, origAsk := isInteractive, askConfirm
-	t.Cleanup(func() { isInteractive, askConfirm = origInteractive, origAsk })
+	origInteractive, origAsk, origExit := isInteractive, askConfirm, exitFunc
+	t.Cleanup(func() { isInteractive, askConfirm, exitFunc = origInteractive, origAsk, origExit })
 
 	// --force set: proceeds, and the prompt is never consulted.
 	isInteractive = func() bool { return true }
 	askConfirm = func(string) (bool, error) { t.Fatal("prompt ran despite --force"); return false, nil }
+	exitFunc = func(code int) { t.Fatalf("exitFunc(%d) called on the --force path", code) }
 	if !ConfirmDestructive(cmdWithForce(true), "delete widget") {
 		t.Error("--force should proceed")
 	}
 
-	// Non-interactive without --force: refuses without prompting.
+	// Non-interactive without --force: refuses without prompting, and exits non-zero
+	// so a scripted caller can tell the skipped delete from a successful one.
 	isInteractive = func() bool { return false }
 	askConfirm = func(string) (bool, error) { t.Fatal("prompt ran in a non-interactive shell"); return false, nil }
+	exitCode := -1
+	exitFunc = func(code int) { exitCode = code }
 	if ConfirmDestructive(cmdWithForce(false), "delete widget") {
 		t.Error("non-interactive without --force should refuse")
 	}
+	if exitCode != ExitUsage {
+		t.Errorf("non-interactive refusal exit code = %d, want %d (ExitUsage)", exitCode, ExitUsage)
+	}
 
-	// Interactive, answered No: refuses. Also refuses if the prompt errors.
+	// Interactive, answered No: refuses. Also refuses if the prompt errors. Neither
+	// path touches the exit code — a human cancelling is not an error.
+	exitFunc = func(code int) { t.Fatalf("exitFunc(%d) called on an interactive path", code) }
 	isInteractive = func() bool { return true }
 	askConfirm = func(string) (bool, error) { return false, nil }
 	if ConfirmDestructive(cmdWithForce(false), "delete widget") {
@@ -45,6 +54,25 @@ func TestConfirmDestructive(t *testing.T) {
 	askConfirm = func(string) (bool, error) { return false, errors.New("prompt failed") }
 	if ConfirmDestructive(cmdWithForce(false), "delete widget") {
 		t.Error("a prompt error should refuse")
+	}
+}
+
+// hasInteractiveInput must reject /dev/null on stdin: it is a character device, so
+// the old os.ModeCharDevice test passed for exactly the non-interactive shapes CI,
+// docker (without -i), systemd and cron actually use (RES-1134).
+func TestHasInteractiveInputRejectsDevNull(t *testing.T) {
+	devnull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Skipf("cannot open %s: %v", os.DevNull, err)
+	}
+	t.Cleanup(func() { devnull.Close() })
+
+	orig := os.Stdin
+	os.Stdin = devnull
+	t.Cleanup(func() { os.Stdin = orig })
+
+	if hasInteractiveInput() {
+		t.Error("/dev/null on stdin must not read as interactive")
 	}
 }
 
@@ -60,6 +88,14 @@ func TestRedactHeaderValue(t *testing.T) {
 		"X-Api-Key":           "sk-123",
 		"X-My-Token":          "t-123",
 		"X-Client-Secret":     "s-123",
+		// Headers the credentials layer (looksSensitiveKey) already treats as secret
+		// but the narrower list used to print. A generated CLI against our own API
+		// sends X-Orq-Key (RES-1134 review).
+		"X-Orq-Key":       "sk-123",
+		"Private-Key":     "----",
+		"X-Password":      "hunter2",
+		"X-Session-Key":   "sess-123",
+		"X-Access-Key-Id": "AKIA123",
 	}
 	for key, val := range redacted {
 		if got := redactHeaderValue(key, val); got != "[REDACTED]" {
