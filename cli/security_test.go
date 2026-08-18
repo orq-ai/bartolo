@@ -57,23 +57,50 @@ func TestConfirmDestructive(t *testing.T) {
 	}
 }
 
-// hasInteractiveInput must reject /dev/null on stdin: it is a character device, so
-// the old os.ModeCharDevice test passed for exactly the non-interactive shapes CI,
-// docker (without -i), systemd and cron actually use (RES-1134).
-func TestHasInteractiveInputRejectsDevNull(t *testing.T) {
-	devnull, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Skipf("cannot open %s: %v", os.DevNull, err)
-	}
-	t.Cleanup(func() { devnull.Close() })
-
+// hasInteractiveInput must reject all three non-terminal shapes, not just the pipe:
+// /dev/null (docker without -i, systemd, cron), a pipe (CI), and a closed stdin. The
+// old os.ModeCharDevice test passed for /dev/null because it is a character device,
+// which is exactly the shape most non-interactive runs use (RES-1134).
+func TestHasInteractiveInputRejectsNonTerminals(t *testing.T) {
 	orig := os.Stdin
-	os.Stdin = devnull
 	t.Cleanup(func() { os.Stdin = orig })
 
-	if hasInteractiveInput() {
-		t.Error("/dev/null on stdin must not read as interactive")
-	}
+	t.Run("dev_null", func(t *testing.T) {
+		f, err := os.Open(os.DevNull)
+		if err != nil {
+			t.Skipf("cannot open %s: %v", os.DevNull, err)
+		}
+		t.Cleanup(func() { f.Close() })
+		os.Stdin = f
+		if hasInteractiveInput() {
+			t.Error("/dev/null on stdin must not read as interactive")
+		}
+	})
+
+	t.Run("pipe", func(t *testing.T) {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("os.Pipe: %v", err)
+		}
+		t.Cleanup(func() { r.Close(); w.Close() })
+		os.Stdin = r
+		if hasInteractiveInput() {
+			t.Error("a pipe on stdin must not read as interactive")
+		}
+	})
+
+	t.Run("closed_stdin", func(t *testing.T) {
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("os.Pipe: %v", err)
+		}
+		w.Close()
+		r.Close() // stdin is now a closed descriptor
+		os.Stdin = r
+		if hasInteractiveInput() {
+			t.Error("a closed stdin must not read as interactive")
+		}
+	})
 }
 
 // A verbose HTTP log must never print an API key, bearer token, or cookie (RES-1134).
@@ -127,20 +154,64 @@ func TestForceFlagNameIsReserved(t *testing.T) {
 	}
 }
 
-// The credentials file holds long-lived API keys and must be written 0600 (RES-1134).
+// The credentials file holds long-lived API keys and must be 0600 (RES-1134). Two paths:
+// a new file must be 0600 from creation (no 0644 window), and a pre-existing 0644 file
+// must be narrowed. Because writeCredentials no longer chmods after WriteConfigAs, removing
+// the pre-create makes the new-file case fail here rather than pass silently.
 func TestWriteCredentialsIsNotWorldReadable(t *testing.T) {
-	filename := filepath.Join(t.TempDir(), "credentials.json")
-	Creds = &CredentialsFile{viper.New(), []string{}, []string{}}
-	Creds.SetConfigName("credentials")
-	Creds.Set("profiles.test.type", "apikey")
-	if err := writeCredentials(filename); err != nil {
-		t.Fatalf("writeCredentials: %v", err)
+	write := func(t *testing.T, filename string) {
+		Creds = &CredentialsFile{viper.New(), []string{}, []string{}}
+		Creds.SetConfigName("credentials")
+		Creds.Set("profiles.test.type", "apikey")
+		if err := writeCredentials(filename); err != nil {
+			t.Fatalf("writeCredentials: %v", err)
+		}
+		info, err := os.Stat(filename)
+		if err != nil {
+			t.Fatalf("stat: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("credentials file mode = %o, want 600 (group/other must not read a key file)", perm)
+		}
 	}
-	info, err := os.Stat(filename)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
+
+	t.Run("new_file", func(t *testing.T) {
+		write(t, filepath.Join(t.TempDir(), "credentials.json"))
+	})
+
+	t.Run("existing_0644_narrowed", func(t *testing.T) {
+		filename := filepath.Join(t.TempDir(), "credentials.json")
+		if err := os.WriteFile(filename, []byte("{}"), 0o644); err != nil {
+			t.Fatalf("seed 0644: %v", err)
+		}
+		write(t, filename)
+	})
+}
+
+// resolveProfileValue is what both add-profile paths use to get each key's value. The
+// promptProfileValue seam lets us test all three branches without a terminal (RES-1134).
+func TestResolveProfileValue(t *testing.T) {
+	orig := promptProfileValue
+	t.Cleanup(func() { promptProfileValue = orig })
+
+	// Positional value present: used verbatim, and the prompt never runs.
+	promptProfileValue = func(string) (string, error) {
+		t.Fatal("prompt ran when a positional value was given")
+		return "", nil
 	}
-	if perm := info.Mode().Perm(); perm != 0o600 {
-		t.Errorf("credentials file mode = %o, want 600 (group/other must not read a key file)", perm)
+	if v, ok := resolveProfileValue("api_key", "api-key", []string{"prod", "sk-123"}, 0); !ok || v != "sk-123" {
+		t.Errorf("positional: got (%q, %v), want (sk-123, true)", v, ok)
+	}
+
+	// No positional value, prompt succeeds: the prompted value is used.
+	promptProfileValue = func(string) (string, error) { return "typed-secret", nil }
+	if v, ok := resolveProfileValue("api_key", "api-key", []string{"prod"}, 0); !ok || v != "typed-secret" {
+		t.Errorf("prompted: got (%q, %v), want (typed-secret, true)", v, ok)
+	}
+
+	// No positional value, prompt fails (no TTY): ok is false, so the caller exits usage.
+	promptProfileValue = func(string) (string, error) { return "", errors.New("no terminal") }
+	if v, ok := resolveProfileValue("api_key", "api-key", []string{"prod"}, 0); ok || v != "" {
+		t.Errorf("prompt failure: got (%q, %v), want (empty, false)", v, ok)
 	}
 }

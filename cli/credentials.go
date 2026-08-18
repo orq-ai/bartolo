@@ -22,23 +22,25 @@ import (
 // long-lived API keys it holds are never world-readable (viper.WriteConfigAs
 // would otherwise create it at the default 0644).
 func writeCredentials(filename string) error {
-	// Create the file 0600 BEFORE viper writes the key into it. os.WriteFile only
-	// applies its permission on creation, so viper's write keeps the mode; this closes
-	// the window where WriteConfigAs would create the file 0644 and the key would sit
-	// world-readable until the chmod below — and, if the process died in between, would
-	// stay 0644 (RES-1134 review). Only pre-create when absent, so a WriteConfigAs
-	// failure can never truncate an existing credentials file.
-	if _, statErr := os.Stat(filename); os.IsNotExist(statErr) {
-		if err := os.WriteFile(filename, nil, 0o600); err != nil {
-			return err
-		}
-	}
-	if err := Creds.WriteConfigAs(filename); err != nil {
+	// Make the file 0600 BEFORE viper writes the key, so the secret is never on disk
+	// world-readable, even for a moment. O_CREATE (without O_TRUNC) applies the mode only
+	// on creation and does not touch an existing file's contents, so there is no os.Stat
+	// gate a stat error (EACCES, a network FS) could fall through to WriteConfigAs
+	// creating the file 0644, and no check-then-act race between two runs. The chmod that
+	// follows narrows a file an older build already left 0644; viper.WriteConfigAs then
+	// keeps the existing 0600 mode, so there is no trailing chmod to make the pre-create
+	// look optional in a test (RES-1134 review).
+	f, err := os.OpenFile(filename, os.O_CREATE, 0o600)
+	if err != nil {
 		return err
 	}
-	// Belt and suspenders: narrows a pre-existing file that was created 0644 by an
-	// older build before this fix landed.
-	return os.Chmod(filename, 0o600)
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(filename, 0o600); err != nil {
+		return err
+	}
+	return Creds.WriteConfigAs(filename)
 }
 
 // AuthHandler describes a handler that can be called on a request to inject
@@ -252,20 +254,11 @@ func UseAuth(typeName string, handler AuthHandler) {
 		Creds.Set("profiles."+name+".type", typeName)
 
 		for i, key := range keys {
-			value := ""
 			label := strings.Replace(key, "_", "-", -1)
-			if i+1 < len(args) {
-				// Backward-compat: value supplied positionally (discouraged for secrets).
-				value = args[i+1]
-			} else if v, err := promptProfileValue(key); err != nil {
-				// No positional value and no usable TTY (pipe, /dev/null, CI): a
-				// missing argument is a usage error, and we exit cleanly rather
-				// than panicking on the prompt's EOF. promptProfileValue only
-				// hides genuinely sensitive keys, so a client-id still echoes.
-				fmt.Fprintf(os.Stderr, "no %s provided; pass it as an argument or run in an interactive terminal\n", label)
-				os.Exit(ExitUsage)
-			} else {
-				value = v
+			value, ok := resolveProfileValue(key, label, args, i)
+			if !ok {
+				exitFunc(ExitUsage)
+				return
 			}
 			// Replace periods in the name since Viper will create nested structures
 			// in the config and this isn't what we want!
@@ -396,7 +389,32 @@ func pickAuthHandler(preferredType string) (string, AuthHandler, error) {
 	return resolved, AuthHandlers[resolved], nil
 }
 
-func promptProfileValue(key string) (string, error) {
+// resolveProfileValue returns the value for one profile key on add-profile: the
+// positional argument when supplied, otherwise a prompt via the promptProfileValue
+// seam. ok is false only when there is no positional argument and the prompt failed
+// (no usable terminal), in which case the caller exits with a usage error. Extracted so
+// both add-profile paths share one definition and are testable without a real terminal
+// (RES-1134 review).
+func resolveProfileValue(key, label string, args []string, i int) (value string, ok bool) {
+	if i+1 < len(args) {
+		// Backward-compat: value supplied positionally (discouraged for secrets).
+		return args[i+1], true
+	}
+	v, err := promptProfileValue(key)
+	if err != nil {
+		// No positional value and no usable TTY (pipe, /dev/null, CI): a missing
+		// argument is a usage error. promptProfileValue only hides genuinely sensitive
+		// keys, so a client-id still echoes.
+		fmt.Fprintf(os.Stderr, "no %s provided; pass it as an argument or run in an interactive terminal\n", label)
+		return "", false
+	}
+	return v, true
+}
+
+// promptProfileValue is a seam (a var, not a plain func) so the add-profile paths that
+// call it can be tested without a real terminal, the same pattern as isInteractive /
+// askConfirm above (RES-1134 review).
+var promptProfileValue = func(key string) (string, error) {
 	message := strings.ReplaceAll(key, "_", " ")
 	message = strings.Title(message)
 	if strings.Contains(message, "Api ") {
@@ -580,16 +598,11 @@ func InitCredentials(options ...func(*CredentialsFile) error) {
 				// Replace periods in the name since Viper will create nested structures
 				// in the config and this isn't what we want!
 				name := strings.Replace(args[0], ".", "-", -1)
-				value := ""
 				label := strings.Replace(key, "_", "-", -1)
-				if i+1 < len(args) {
-					value = args[i+1]
-				} else if v, err := promptProfileValue(key); err != nil {
-					// A missing argument is a usage error; only sensitive keys are hidden.
-					fmt.Fprintf(os.Stderr, "no %s provided; pass it as an argument or run in an interactive terminal\n", label)
-					os.Exit(ExitUsage)
-				} else {
-					value = v
+				value, ok := resolveProfileValue(key, label, args, i)
+				if !ok {
+					exitFunc(ExitUsage)
+					return
 				}
 				Creds.Set("profiles."+name+"."+strings.Replace(key, "-", "_", -1), value)
 			}
