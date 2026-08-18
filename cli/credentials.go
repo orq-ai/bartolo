@@ -30,7 +30,7 @@ func writeCredentials(filename string) error {
 	// follows narrows a file an older build already left 0644; viper.WriteConfigAs then
 	// keeps the existing 0600 mode, so there is no trailing chmod to make the pre-create
 	// look optional in a test (RES-1134 review).
-	f, err := os.OpenFile(filename, os.O_CREATE, 0o600)
+	f, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
