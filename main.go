@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -1993,11 +1992,9 @@ func writeProjectConfig(config *ProjectConfig) {
 func loadOpenAPIDocument(data []byte) (*openapi3.T, error) {
 	loader := openapi3.NewLoader()
 
-	// kin-openapi parses OpenAPI 3.1 numeric exclusiveMinimum/exclusiveMaximum into
-	// Schema.ExclusiveMin/Max and leaves Schema.Min/Max nil, so rewrite them to the
-	// 3.0 boolean form first and fall back to the original data if that fails.
-	normalized, changed, normalizeErr := normalizeOpenAPI31Data(data)
-	if normalizeErr == nil && changed && !bytes.Equal(normalized, data) {
+	// kin-openapi keeps OpenAPI 3.1 numeric exclusive bounds out of Schema.Min/Max,
+	// so rewrite them to the 3.0 boolean form before loading.
+	if normalized, changed, err := normalizeOpenAPI31Data(data); err == nil && changed {
 		if swagger, err := loader.LoadFromData(normalized); err == nil {
 			return swagger, nil
 		}
