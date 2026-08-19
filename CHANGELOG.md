@@ -4,6 +4,11 @@ All notable changes to Bartolo will be documented in this file.
 
 The project was restarted on 2026-04-09 as a new public release stream under the Bartolo name.
 
+## 2026-08-13 (v0.4.6)
+
+- Bumped Bartolo to v0.4.6.
+- Added `cli.ExecuteContext`, which is `cli.Execute` with a caller-supplied context. A CLI that cancels in-flight requests on SIGINT/SIGTERM needs a context, and the only way to get one was `cli.Root.ExecuteContext(ctx)` — which skips the exit-code contract, since the unknown-subcommand check, the silenced-then-reprinted usage block and the usage exit code all live in `cli.Execute` rather than on the root command. Such a CLI printed the group's help and exited `0` on `<cli> <group> <unknown>`, and exited `1` instead of `2` on every usage error.
+
 ## 2026-08-07 (v0.4.5)
 
 - Bumped Bartolo to v0.4.5.
