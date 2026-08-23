@@ -155,6 +155,7 @@ type Imports struct {
 	Fmt     bool
 	Strings bool
 	Time    bool
+	Url     bool
 }
 
 // ProjectConfig describes local generator metadata written by `init`.
@@ -473,6 +474,7 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 			for _, p := range params {
 				if p.In == "path" {
 					result.Imports.Strings = true
+					result.Imports.Url = true
 				}
 			}
 
