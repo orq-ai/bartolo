@@ -169,7 +169,7 @@ func Init(config *Config) {
 	// argument, so keep `--json` shorthand-free.
 	AddGlobalFlag("jmespath", "j", "Filter / project results using JMESPath", "")
 	AddGlobalFlag("raw", "", "Output result of --jmespath as raw rather than an escaped JSON string or list", false)
-	AddGlobalFlag("server", "", "Override server URL", "")
+	AddGlobalFlag("server", "", "API base URL, e.g. https://orq.acme.internal", "")
 }
 
 func userHomeDir() string {

@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 
@@ -41,23 +42,63 @@ func GetServers() []map[string]string {
 	return servers
 }
 
-// ResolveServer returns the active server URL from either the override flag or
-// the registered OpenAPI server list.
+// ResolveServer returns the active server URL from the override flag, the
+// active credentials profile, or the registered OpenAPI server list.
 func ResolveServer() string {
-	if override := viper.GetString("server"); override != "" {
-		return override
+	fallback := ""
+	if len(registeredServers) > 0 {
+		index := viper.GetInt("server-index")
+		if index < 0 || index >= len(registeredServers) {
+			index = 0
+		}
+		fallback = registeredServers[index]["url"]
 	}
 
-	if len(registeredServers) == 0 {
+	return ResolveServerFor(fallback)
+}
+
+// ResolveServerFor returns the active server URL. Most specific source wins:
+// an explicit `--server` flag or `<PREFIX>_SERVER` env var, then the active
+// profile's bound server, then a `server set` override from config.json, then
+// the passed-in default. Generated clients call this with their own OpenAPI
+// server default.
+func ResolveServerFor(defaultURL string) string {
+	// viper merges flag, env and config.json into one key, so the explicit
+	// sources have to be told apart from the persisted one by hand.
+	merged := strings.TrimSpace(viper.GetString("server"))
+	if merged != "" && serverSetExplicitly() {
+		return merged
+	}
+
+	if server := ProfileServer(); server != "" {
+		return server
+	}
+
+	if merged != "" {
+		return merged
+	}
+
+	return defaultURL
+}
+
+func serverSetExplicitly() bool {
+	if Root != nil {
+		if flag := Root.PersistentFlags().Lookup("server"); flag != nil && flag.Changed {
+			return true
+		}
+	}
+
+	return os.Getenv(viper.GetString("env-prefix")+"_SERVER") != ""
+}
+
+// ProfileServer returns the API base URL bound to the active credentials
+// profile. Profiles saved before this field existed return an empty string.
+func ProfileServer() string {
+	if Creds == nil {
 		return ""
 	}
 
-	index := viper.GetInt("server-index")
-	if index < 0 || index >= len(registeredServers) {
-		index = 0
-	}
-
-	return registeredServers[index]["url"]
+	return strings.TrimSpace(GetProfile()["server"])
 }
 
 func initAgentCommands() {
@@ -105,6 +146,7 @@ func doctorStatus() map[string]interface{} {
 			"profile":         viper.GetString("profile"),
 			"server_index":    viper.GetInt("server-index"),
 			"server_override": viper.GetString("server"),
+			"profile_server":  ProfileServer(),
 			"selected_server": ResolveServer(),
 		},
 		"servers": GetServers(),

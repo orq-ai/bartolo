@@ -88,7 +88,9 @@ func initAuth() {
 						continue
 					}
 
-					listKeys := handler.ProfileKeys()
+					// `server` is optional and not part of ProfileKeys, so it is
+					// appended explicitly to surface each profile's base URL.
+					listKeys := append(handler.ProfileKeys(), "server")
 
 					table := tablewriter.NewTable(os.Stdout, tablewriter.WithHeaderAutoFormat(tw.Off))
 					table.Header(append([]string{fmt.Sprintf("%s Profile Name", typeName)}, listKeys...))
@@ -101,7 +103,8 @@ func initAuth() {
 
 						row := []string{name}
 						for _, key := range listKeys {
-							row = append(row, profile[strings.Replace(key, "-", "_", -1)].(string))
+							value, _ := profile[strings.Replace(key, "-", "_", -1)].(string)
+							row = append(row, value)
 						}
 						table.Append(row)
 					}
@@ -229,6 +232,12 @@ func UseAuth(typeName string, handler AuthHandler) {
 			// Replace periods in the name since Viper will create nested structures
 			// in the config and this isn't what we want!
 			Creds.Set("profiles."+name+"."+strings.Replace(key, "-", "_", -1), args[i+1])
+		}
+
+		// Only an explicit `--server` on this invocation binds a server to the
+		// profile. Env and config.json values are defaults, not bindings.
+		if flag := cmd.Flag("server"); flag != nil && flag.Changed {
+			Creds.Set("profiles."+name+".server", strings.TrimSpace(flag.Value.String()))
 		}
 
 		filename := path.Join(viper.GetString("config-directory"), "credentials.json")
