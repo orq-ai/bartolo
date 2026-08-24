@@ -169,7 +169,7 @@ func Init(config *Config) {
 	// argument, so keep `--json` shorthand-free.
 	AddGlobalFlag("jmespath", "j", "Filter / project results using JMESPath", "")
 	AddGlobalFlag("raw", "", "Output result of --jmespath as raw rather than an escaped JSON string or list", false)
-	AddGlobalFlag("server", "", "API base URL, e.g. https://orq.acme.internal", "")
+	AddGlobalFlag("server", "", "API base URL, e.g. https://api.example.com", "")
 }
 
 func userHomeDir() string {
@@ -257,6 +257,8 @@ func initConfig(appName, envPrefix, apiKeyEnvVar, defaultOutputFormat string) {
 	viper.Set("env-prefix", envPrefix)
 	viper.Set("config-directory", configDir)
 	viper.SetDefault("server-index", 0)
+
+	migrateLegacyServerConfig(configDir)
 	viper.SetDefault("api-key-env-var", apiKeyEnvVar)
 	viper.SetDefault("output-format", outputFormatOrDefault(defaultOutputFormat))
 }
@@ -338,6 +340,51 @@ func newCompletionCommand() *cobra.Command {
 	}
 }
 
+// migrateLegacyServerConfig moves a `server set` override written by an older
+// version out of the `server` key and into `server-default`.
+//
+// The file has to be rewritten rather than read and remapped: `server` is also
+// the flag's key, so as long as the value sits there viper serves it from the
+// config file at the same precedence as an explicit `--server`, which is the
+// bug the separate key exists to fix. Any failure leaves the file alone and
+// keeps the old resolution.
+func migrateLegacyServerConfig(configDir string) {
+	filename := path.Join(configDir, "config.json")
+
+	data, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return
+	}
+
+	config := map[string]interface{}{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return
+	}
+
+	legacy, _ := config["server"].(string)
+	if strings.TrimSpace(legacy) == "" {
+		if _, present := config["server"]; !present {
+			return
+		}
+	}
+
+	delete(config, "server")
+	if existing, _ := config["server-default"].(string); strings.TrimSpace(existing) == "" && strings.TrimSpace(legacy) != "" {
+		config["server-default"] = legacy
+	}
+
+	migrated, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return
+	}
+
+	if err := ioutil.WriteFile(filename, migrated, 0600); err != nil {
+		return
+	}
+
+	viper.ReadInConfig()
+}
+
 func saveJSONConfig(values map[string]interface{}) error {
 	filename := path.Join(viper.GetString("config-directory"), "config.json")
 	merged := map[string]interface{}{}
@@ -347,6 +394,12 @@ func saveJSONConfig(values map[string]interface{}) error {
 	}
 
 	for key, value := range values {
+		if value == nil {
+			delete(merged, key)
+			viper.Set(key, "")
+			continue
+		}
+
 		merged[key] = value
 		viper.Set(key, value)
 	}

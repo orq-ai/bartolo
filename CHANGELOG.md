@@ -6,9 +6,17 @@ The project was restarted on 2026-04-09 as a new public release stream under the
 
 ## Unreleased
 
-- Added per-profile servers. `auth add-profile --server <url>` binds an API base URL to the profile, and generated commands resolve it automatically, so staging, self-hosted and localhost profiles no longer need the flag on every call. Only an explicit `--server` on that invocation binds one — an environment variable or `server set` default is never silently baked into a new profile. Profiles saved without a server keep using the generated default.
-- Reordered server resolution so a more specific source always wins: an explicit `--server` flag or `<PREFIX>_SERVER` environment variable, then the active profile's bound server, then a persisted `server set` override, then `server-index` and the generated default. Previously a `server set` from months earlier silently outranked every profile, because the flag, the environment variable and the config file all share one viper key.
-- Surfaced the resolved server per profile in `auth list-profiles` and in `doctor` (`config.profile_server`). `list-profiles` no longer panics on a profile that is missing a column.
+- Added per-profile servers. `auth add-profile --server <url>` and `auth setup --server <url>` bind an API base URL to the profile, and generated commands resolve it automatically, so staging, self-hosted and localhost profiles no longer need the flag on every call. Only an explicit `--server` on that invocation binds one — an environment variable or a persisted default is never silently baked into a new profile. Profiles saved without a server keep using the generated default.
+- Reordered server resolution so a more specific source always wins: an explicit `--server` flag, `<PREFIX>_SERVER` environment variable or programmatic override, then the active profile's bound server, then the `server set` default, then `server-index` and the generated default. Previously a `server set` from months earlier silently outranked every profile.
+
+  **The `server set` default moved from the `server` key in `config.json` to `server-default`**, because sharing `server` with the flag is what made the persisted value outrank everything: viper cannot tell the two apart once merged. A config file written by an older version still resolves, and is rewritten the next time `server set` or `server clear` runs.
+
+- **Breaking (runtime library)**: removed the deprecated `cli.InitCredentials`, `cli.ProfileKeys` and `cli.ProfileListKeys`. They were superseded by `cli.UseAuth`, which is what the generator has emitted for some time, and they carried a second copy of `add-profile` and `list-profiles` that never gained per-profile servers and still panicked on a profile missing a field. `cli.UseAuth` is the replacement.
+- **Breaking (runtime library)**: `cli.RunAuthSetup` and `cli.saveAuthProfile` take a server argument. `cli.ResolveServer()` now applies the full precedence above; the short-lived `ResolveServerFor` is gone, since `RegisterServers` already gives the runtime the OpenAPI defaults. Generated clients call `ResolveServer()`, which also bounds-checks `server-index` — the inlined lookup they used before panicked on an out-of-range index.
+- Added `cli.SelectedServer()`, the registered OpenAPI server at the configured index with no overrides applied.
+- Surfaced servers in `auth list-profiles` (a column per profile) and in `doctor` (`config.profile_server`, `config.server_default`). `list-profiles` no longer panics on a profile that is missing a column.
+
+  **Regenerate to pick up per-profile servers in API commands.** Generated client code is written into the consuming repo, so bumping the dependency alone updates the built-in `doctor`, `request` and `server` commands but leaves generated commands on the old inlined resolution — `doctor` would report the profile's server while requests still went to the default.
 
 ## 2026-08-13 (v0.4.6)
 

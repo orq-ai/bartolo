@@ -66,7 +66,7 @@ Set a default output format for the generated CLI:
 Every generated CLI starts with a useful operator surface:
 
 - `doctor` shows config, auth source, and selected server.
-- `auth add-profile --server` binds a profile to its own API base URL, so staging, self-hosted, and local profiles resolve without repeating the flag.
+- `auth add-profile --server` and `auth setup --server` bind a profile to its own API base URL, so staging, self-hosted, and local profiles resolve without repeating the flag.
 - `request` provides a raw escape hatch for unmodeled endpoints.
 - `default-format` shows or persists the preferred default output format.
 - `--json`, `--output-format`, and `-j`/`--jmespath` make automation and projection straightforward.

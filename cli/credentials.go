@@ -89,8 +89,12 @@ func initAuth() {
 					}
 
 					// `server` is optional and not part of ProfileKeys, so it is
-					// appended explicitly to surface each profile's base URL.
-					listKeys := append(handler.ProfileKeys(), "server")
+					// added explicitly. Copy first: appending into the slice a
+					// handler returned would write through to its backing array.
+					listKeys := append([]string{}, handler.ProfileKeys()...)
+					if !containsString(listKeys, "server") {
+						listKeys = append(listKeys, "server")
+					}
 
 					table := tablewriter.NewTable(os.Stdout, tablewriter.WithHeaderAutoFormat(tw.Off))
 					table.Header(append([]string{fmt.Sprintf("%s Profile Name", typeName)}, listKeys...))
@@ -234,10 +238,8 @@ func UseAuth(typeName string, handler AuthHandler) {
 			Creds.Set("profiles."+name+"."+strings.Replace(key, "-", "_", -1), args[i+1])
 		}
 
-		// Only an explicit `--server` on this invocation binds a server to the
-		// profile. Env and config.json values are defaults, not bindings.
-		if flag := cmd.Flag("server"); flag != nil && flag.Changed {
-			Creds.Set("profiles."+name+".server", strings.TrimSpace(flag.Value.String()))
+		if server := explicitServer(cmd); server != "" {
+			Creds.Set("profiles."+name+".server", server)
 		}
 
 		filename := path.Join(viper.GetString("config-directory"), "credentials.json")
@@ -270,6 +272,28 @@ func UseAuth(typeName string, handler AuthHandler) {
 	}
 }
 
+// explicitServer returns `--server` only when it was passed on this
+// invocation. An environment variable or a persisted default is a default, not
+// a binding, so neither is baked into a profile.
+func explicitServer(cmd *cobra.Command) string {
+	flag := cmd.Flag("server")
+	if flag == nil || !flag.Changed {
+		return ""
+	}
+
+	return strings.TrimSpace(flag.Value.String())
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+
+	return false
+}
+
 func newAuthSetupCommand() *cobra.Command {
 	var profileName string
 	var typeName string
@@ -280,7 +304,7 @@ func newAuthSetupCommand() *cobra.Command {
 		Short:   "Interactively configure authentication",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return RunAuthSetup(profileName, typeName)
+			return RunAuthSetup(profileName, typeName, explicitServer(cmd))
 		},
 	}
 
@@ -291,7 +315,7 @@ func newAuthSetupCommand() *cobra.Command {
 
 // RunAuthSetup interactively prompts for authentication details and persists
 // them to the credentials profile store.
-func RunAuthSetup(profileName string, preferredType string) error {
+func RunAuthSetup(profileName string, preferredType string, server string) error {
 	if !hasInteractiveInput() {
 		return fmt.Errorf("auth setup requires an interactive terminal")
 	}
@@ -315,7 +339,7 @@ func RunAuthSetup(profileName string, preferredType string) error {
 		answers = append(answers, value)
 	}
 
-	return saveAuthProfile(typeName, profileName, handler.ProfileKeys(), answers)
+	return saveAuthProfile(typeName, profileName, handler.ProfileKeys(), answers, server)
 }
 
 func pickAuthHandler(preferredType string) (string, AuthHandler, error) {
@@ -396,7 +420,7 @@ func sanitizeProfileName(value string) string {
 	return strings.Replace(strings.TrimSpace(value), ".", "-", -1)
 }
 
-func saveAuthProfile(typeName string, profileName string, keys []string, values []string) error {
+func saveAuthProfile(typeName string, profileName string, keys []string, values []string, server string) error {
 	if len(keys) != len(values) {
 		return fmt.Errorf("profile values do not match keys")
 	}
@@ -404,6 +428,10 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 	Creds.Set("profiles."+profileName+".type", typeName)
 	for i, key := range keys {
 		Creds.Set("profiles."+profileName+"."+strings.Replace(key, "-", "_", -1), values[i])
+	}
+
+	if server = strings.TrimSpace(server); server != "" {
+		Creds.Set("profiles."+profileName+".server", server)
 	}
 
 	filename := path.Join(viper.GetString("config-directory"), "credentials.json")
@@ -422,12 +450,10 @@ func hasInteractiveInput() bool {
 // CredentialsFile holds credential-related information.
 type CredentialsFile struct {
 	*viper.Viper
-	keys     []string
-	listKeys []string
 }
 
-// Creds represents a configuration file storing credential-related information.
-// Use this only after `InitCredentials` has been called.
+// Creds represents a configuration file storing credential-related
+// information. Use this only after `InitCredentialsFile` has been called.
 var Creds *CredentialsFile
 
 // GetProfile returns the current profile's configuration.
@@ -435,31 +461,11 @@ func GetProfile() map[string]string {
 	return Creds.GetStringMapString("profiles." + strings.Replace(viper.GetString("profile"), ".", "-", -1))
 }
 
-// ProfileKeys lets you specify authentication profile keys to be used in
-// the credentials file.
-// This is deprecated and you should use `cli.UseAuth` instead.
-func ProfileKeys(keys ...string) func(*CredentialsFile) error {
-	return func(cf *CredentialsFile) error {
-		cf.keys = keys
-		return nil
-	}
-}
-
-// ProfileListKeys sets which keys will be shown in the table when calling
-// the `auth list-profiles` command.
-// This is deprecated and you should use `cli.UseAuth` instead.
-func ProfileListKeys(keys ...string) func(*CredentialsFile) error {
-	return func(cf *CredentialsFile) error {
-		cf.listKeys = keys
-		return nil
-	}
-}
-
 // InitCredentialsFile sets up the creds file and `profile` global parameter.
 func InitCredentialsFile() {
 	// Setup a credentials file, kept separate from configuration which might
 	// get checked into source control.
-	Creds = &CredentialsFile{viper.New(), []string{}, []string{}}
+	Creds = &CredentialsFile{viper.New()}
 
 	Creds.SetConfigName("credentials")
 	Creds.AddConfigPath("$HOME/." + viper.GetString("app-name") + "/")
@@ -467,76 +473,4 @@ func InitCredentialsFile() {
 
 	// Register a new `--profile` flag.
 	AddGlobalFlag("profile", "", "Credentials profile to use for authentication", "default")
-}
-
-// InitCredentials sets up the profile/auth commands. Must be called *after* you
-// have called `cli.Init()`.
-//
-//	// Initialize an API key
-//	cli.InitCredentials(cli.ProfileKeys("api-key"))
-//
-// This is deprecated and you should use `cli.UseAuth` instead.
-func InitCredentials(options ...func(*CredentialsFile) error) {
-	InitCredentialsFile()
-
-	for _, option := range options {
-		option(Creds)
-	}
-
-	// Register auth management commands to create and list profiles.
-	cmd := &cobra.Command{
-		Use:   "auth",
-		Short: "Authentication settings",
-	}
-	Root.AddCommand(cmd)
-
-	use := "add-profile [flags] <name>"
-	for _, name := range Creds.keys {
-		use += " <" + strings.Replace(name, "_", "-", -1) + ">"
-	}
-
-	cmd.AddCommand(&cobra.Command{
-		Use:     use,
-		Aliases: []string{"add"},
-		Short:   "Add a new named authentication profile",
-		Args:    cobra.ExactArgs(1 + len(Creds.keys)),
-		Run: func(cmd *cobra.Command, args []string) {
-			for i, key := range Creds.keys {
-				// Replace periods in the name since Viper will create nested structures
-				// in the config and this isn't what we want!
-				name := strings.Replace(args[0], ".", "-", -1)
-				Creds.Set("profiles."+name+"."+strings.Replace(key, "-", "_", -1), args[i+1])
-			}
-
-			filename := path.Join(viper.GetString("config-directory"), "credentials.json")
-			if err := Creds.WriteConfigAs(filename); err != nil {
-				panic(err)
-			}
-		},
-	})
-
-	cmd.AddCommand(&cobra.Command{
-		Use:     "list-profiles",
-		Aliases: []string{"ls"},
-		Short:   "List available configured authentication profiles",
-		Args:    cobra.NoArgs,
-		Run: func(cmd *cobra.Command, args []string) {
-			profiles := Creds.GetStringMap("profiles")
-			if profiles != nil {
-				table := tablewriter.NewTable(os.Stdout, tablewriter.WithHeaderAutoFormat(tw.Off))
-				table.Header(append([]string{"Profile Name"}, Creds.listKeys...))
-
-				for name, profile := range profiles {
-					row := []string{name}
-					for _, key := range Creds.listKeys {
-						row = append(row, profile.(map[string]interface{})[strings.Replace(key, "-", "_", -1)].(string))
-					}
-					table.Append(row)
-				}
-				table.Render()
-			} else {
-				fmt.Printf("No profiles configured. Use `%s auth setup` to add one.\n", Root.CommandPath())
-			}
-		},
-	})
 }

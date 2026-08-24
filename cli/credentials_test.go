@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -37,7 +39,7 @@ func TestSaveAuthProfile(t *testing.T) {
 	})
 	UseAuth("", stubAuthHandler{})
 
-	if err := saveAuthProfile("", "default", []string{"api-key"}, []string{"secret"}); err != nil {
+	if err := saveAuthProfile("", "default", []string{"api-key"}, []string{"secret"}, ""); err != nil {
 		t.Fatalf("saveAuthProfile: %v", err)
 	}
 
@@ -92,24 +94,20 @@ func serverFixtureNoReset(t *testing.T, profileServer string) {
 	RegisterServers([]map[string]string{{"description": "Prod", "url": "https://prod.example.com"}})
 
 	keys, values := []string{"api-key"}, []string{"secret"}
-	if profileServer != "" {
-		keys, values = append(keys, "server"), append(values, profileServer)
-	}
-	if err := saveAuthProfile("", "acme", keys, values); err != nil {
+	if err := saveAuthProfile("", "acme", keys, values, profileServer); err != nil {
 		t.Fatalf("saveAuthProfile: %v", err)
 	}
 	viper.Set("profile", "acme")
 }
 
-// writeConfigServer persists a `server set` style override into config.json
-// before Init reads it.
-func writeConfigServer(t *testing.T, home, url string) {
+// writeConfig seeds config.json before Init reads it.
+func writeConfig(t *testing.T, home, body string) {
 	t.Helper()
 	dir := filepath.Join(home, ".test-auth")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"server":"`+url+`"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -133,7 +131,7 @@ func TestAddProfileStoresServerFromGlobalFlag(t *testing.T) {
 
 func TestAddProfileIgnoresEnvAndConfigServer(t *testing.T) {
 	home := resetAuthState(t)
-	writeConfigServer(t, home, "https://config.example.com")
+	writeConfig(t, home, `{"server-default":"https://config.example.com"}`)
 	t.Setenv("TEST_AUTH_SERVER", "https://env.example.com")
 	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
 	UseAuth("", stubAuthHandler{})
@@ -176,7 +174,7 @@ func TestResolveServerPrefersEnvOverProfile(t *testing.T) {
 
 func TestResolveServerPrefersProfileOverConfigServer(t *testing.T) {
 	home := resetAuthState(t)
-	writeConfigServer(t, home, "https://config.example.com")
+	writeConfig(t, home, `{"server-default":"https://config.example.com"}`)
 	serverFixtureNoReset(t, "https://orq.acme.internal")
 
 	if got := ResolveServer(); got != "https://orq.acme.internal" {
@@ -184,9 +182,102 @@ func TestResolveServerPrefersProfileOverConfigServer(t *testing.T) {
 	}
 }
 
+// The OAuth session bridge in a custom layer sets the server programmatically.
+// viper treats Set as its highest-precedence source and so must this.
+func TestResolveServerPrefersViperSetOverProfile(t *testing.T) {
+	serverFixture(t, "https://orq.acme.internal")
+
+	viper.Set("server", "https://session.example.com")
+
+	if got := ResolveServer(); got != "https://session.example.com" {
+		t.Fatalf("expected programmatic override, got %q", got)
+	}
+}
+
+// A CLI built with no env prefix reads a bare SERVER, per viper's own
+// mergeWithEnvPrefix.
+func TestResolveServerPrefersEnvOverProfileWithoutEnvPrefix(t *testing.T) {
+	t.Setenv("SERVER", "https://bare-env.example.com")
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth"})
+	UseAuth("", stubAuthHandler{})
+	RegisterServers([]map[string]string{{"description": "Prod", "url": "https://prod.example.com"}})
+	if err := saveAuthProfile("", "acme", []string{"api-key", "server"}, []string{"secret", "https://orq.acme.internal"}, ""); err != nil {
+		t.Fatalf("saveAuthProfile: %v", err)
+	}
+	viper.Set("profile", "acme")
+
+	if got := ResolveServer(); got != "https://bare-env.example.com" {
+		t.Fatalf("expected bare SERVER env override, got %q", got)
+	}
+}
+
+// A config.json written before the persisted default moved to its own key
+// keeps working.
+func TestResolveServerReadsLegacyConfigServerKey(t *testing.T) {
+	home := resetAuthState(t)
+	writeConfig(t, home, `{"server":"https://legacy.example.com"}`)
+	serverFixtureNoReset(t, "")
+
+	if got := ResolveServer(); got != "https://legacy.example.com" {
+		t.Fatalf("expected legacy config server, got %q", got)
+	}
+}
+
+// The legacy key shares `server` with the flag, so migrating it out is what
+// stops a months-old `server set` from outranking the profile.
+func TestResolveServerPrefersProfileOverLegacyConfigServerKey(t *testing.T) {
+	home := resetAuthState(t)
+	writeConfig(t, home, `{"server":"https://legacy.example.com"}`)
+	serverFixtureNoReset(t, "https://orq.acme.internal")
+
+	if got := ResolveServer(); got != "https://orq.acme.internal" {
+		t.Fatalf("expected profile server over legacy config key, got %q", got)
+	}
+
+	migrated, err := os.ReadFile(filepath.Join(home, ".test-auth", "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(migrated), `"server"`) {
+		t.Fatalf("expected legacy key removed, got %s", migrated)
+	}
+	if !strings.Contains(string(migrated), "server-default") {
+		t.Fatalf("expected value moved to server-default, got %s", migrated)
+	}
+}
+
+func TestAuthSetupBindsServer(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, "https://wizard.example.com"); err != nil {
+		t.Fatalf("saveAuthProfile: %v", err)
+	}
+	viper.Set("profile", "acme")
+
+	if got := GetProfile()["server"]; got != "https://wizard.example.com" {
+		t.Fatalf("expected wizard-bound server, got %q", got)
+	}
+}
+
+func TestListProfilesRendersServerColumn(t *testing.T) {
+	serverFixture(t, "https://orq.acme.internal")
+
+	out := captureStdout(t, func() { execute("auth list-profiles") })
+
+	if !strings.Contains(out, "https://orq.acme.internal") {
+		t.Fatalf("expected profile server in table, got %q", out)
+	}
+	if !strings.Contains(strings.ToUpper(out), "SERVER") {
+		t.Fatalf("expected SERVER column header, got %q", out)
+	}
+}
+
 func TestResolveServerPrefersConfigServerOverServerIndex(t *testing.T) {
 	home := resetAuthState(t)
-	writeConfigServer(t, home, "https://config.example.com")
+	writeConfig(t, home, `{"server-default":"https://config.example.com"}`)
 	serverFixtureNoReset(t, "")
 
 	if got := ResolveServer(); got != "https://config.example.com" {
@@ -205,7 +296,32 @@ func TestResolveServerFallsBackWhenProfileHasNoServer(t *testing.T) {
 func TestListProfilesToleratesMissingServer(t *testing.T) {
 	serverFixture(t, "")
 
-	// The table goes to os.Stdout; the assertion is that a profile without a
-	// `server` field renders instead of panicking on a nil type assertion.
-	execute("auth list-profiles")
+	out := captureStdout(t, func() { execute("auth list-profiles") })
+
+	if !strings.Contains(out, "acme") {
+		t.Fatalf("expected profile row, got %q", out)
+	}
+}
+
+// captureStdout collects os.Stdout, which is where tablewriter renders.
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	original := os.Stdout
+	os.Stdout = write
+	defer func() { os.Stdout = original }()
+
+	fn()
+	write.Close()
+
+	var buf bytes.Buffer
+	if _, err := buf.ReadFrom(read); err != nil {
+		t.Fatal(err)
+	}
+	return buf.String()
 }

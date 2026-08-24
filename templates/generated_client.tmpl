@@ -41,7 +41,7 @@ func initGeneratedRuntime() {
 	// {{ $apiPublic }}{{ .GoName }} {{ .Short }}
 	func {{ $apiPublic }}{{ .GoName }}({{ range .RequiredParams }}{{ .GoName }} string, {{ end }}params *viper.Viper{{ if .CanHaveBody }}, body string{{ end }}) (*gentleman.Response, {{ .ReturnType }}, error) {
 		handlerPath := "{{ .HandlerName | escapeStr }}"
-		server := bartolocli.ResolveServerFor(servers()[viper.GetInt("server-index")]["url"])
+		server := bartolocli.ResolveServer()
 
 		url := server+"{{ .Path | escapeStr }}"
 
@@ -117,7 +117,7 @@ func initGeneratedRuntime() {
 		// {{ $apiPublic }}{{ .GoName }} {{ .Short }}
 		func {{ $apiPublic }}{{ .GoName }}({{ range .RequiredParams }}{{ .GoName }} string, {{ end }}params *viper.Viper{{ if .CanHaveBody }}, body string{{ end }}) (*gentleman.Response, {{ .ReturnType }}, error) {
 			handlerPath := "{{ .HandlerName | escapeStr }}"
-			server := bartolocli.ResolveServerFor(servers()[viper.GetInt("server-index")]["url"])
+			server := bartolocli.ResolveServer()
 
 			url := server+"{{ .Path | escapeStr }}"
 

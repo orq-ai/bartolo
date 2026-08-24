@@ -3,7 +3,6 @@ package cli
 import (
 	"fmt"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
 
@@ -42,53 +41,45 @@ func GetServers() []map[string]string {
 	return servers
 }
 
-// ResolveServer returns the active server URL from the override flag, the
-// active credentials profile, or the registered OpenAPI server list.
+// ResolveServer returns the active server URL. The most specific source wins:
+// an explicit `--server` flag, `<PREFIX>_SERVER` environment variable or
+// programmatic override, then the active profile's bound server, then the
+// `server set` default persisted in config.json, then the selected entry from
+// the OpenAPI server list.
+//
+// Explicit sources are exactly the ones viper ranks above a config file, which
+// is why the persisted default lives under its own key rather than sharing
+// `server` with the flag.
 func ResolveServer() string {
-	fallback := ""
-	if len(registeredServers) > 0 {
-		index := viper.GetInt("server-index")
-		if index < 0 || index >= len(registeredServers) {
-			index = 0
-		}
-		fallback = registeredServers[index]["url"]
-	}
-
-	return ResolveServerFor(fallback)
-}
-
-// ResolveServerFor returns the active server URL. Most specific source wins:
-// an explicit `--server` flag or `<PREFIX>_SERVER` env var, then the active
-// profile's bound server, then a `server set` override from config.json, then
-// the passed-in default. Generated clients call this with their own OpenAPI
-// server default.
-func ResolveServerFor(defaultURL string) string {
-	// viper merges flag, env and config.json into one key, so the explicit
-	// sources have to be told apart from the persisted one by hand.
-	merged := strings.TrimSpace(viper.GetString("server"))
-	if merged != "" && serverSetExplicitly() {
-		return merged
+	if override := strings.TrimSpace(viper.GetString("server")); override != "" {
+		return override
 	}
 
 	if server := ProfileServer(); server != "" {
 		return server
 	}
 
-	if merged != "" {
-		return merged
+	if persisted := strings.TrimSpace(viper.GetString("server-default")); persisted != "" {
+		return persisted
 	}
 
-	return defaultURL
+	return SelectedServer()
 }
 
-func serverSetExplicitly() bool {
-	if Root != nil {
-		if flag := Root.PersistentFlags().Lookup("server"); flag != nil && flag.Changed {
-			return true
-		}
+// SelectedServer returns the registered OpenAPI server at the configured
+// index, ignoring every override. An out-of-range index falls back to the
+// first entry.
+func SelectedServer() string {
+	if len(registeredServers) == 0 {
+		return ""
 	}
 
-	return os.Getenv(viper.GetString("env-prefix")+"_SERVER") != ""
+	index := viper.GetInt("server-index")
+	if index < 0 || index >= len(registeredServers) {
+		index = 0
+	}
+
+	return registeredServers[index]["url"]
 }
 
 // ProfileServer returns the API base URL bound to the active credentials
@@ -147,6 +138,7 @@ func doctorStatus() map[string]interface{} {
 			"server_index":    viper.GetInt("server-index"),
 			"server_override": viper.GetString("server"),
 			"profile_server":  ProfileServer(),
+			"server_default":  viper.GetString("server-default"),
 			"selected_server": ResolveServer(),
 		},
 		"servers": GetServers(),
@@ -163,7 +155,7 @@ func doctorStatus() map[string]interface{} {
 func runDoctorFixes(status map[string]interface{}) (bool, error) {
 	auth, _ := status["auth"].(map[string]interface{})
 	if configured, _ := auth["configured"].(bool); !configured {
-		if err := RunAuthSetup(viper.GetString("profile"), ""); err != nil {
+		if err := RunAuthSetup(viper.GetString("profile"), "", ""); err != nil {
 			return false, err
 		}
 		return true, nil
