@@ -8,6 +8,10 @@ The project was restarted on 2026-04-09 as a new public release stream under the
 
 - `auth list-profiles` no longer prints stored credentials. Any profile field whose name looks like a credential is now shown with its first and last four characters around a fixed-width `********` middle (`sk-o********mnop`), so keys no longer leak into terminal scrollback, CI logs, screen recordings and support transcripts. Which fields count is decided by the same predicate that decides whether `auth setup` prompts for a field without echo.
 - `auth list-profiles` now goes through the response formatter instead of writing a table straight to stdout, so `--json` and `-o yaml` return the profile list in the requested format like every other command.
+- Added interactive tables for generated collection commands. Use the
+  operation-level `x-cli-list-fields` extension to choose and order the
+  default columns; `--json`, explicit output formats, and piped output remain
+  machine-readable.
 
 ## 2026-08-26 (v0.4.7)
 

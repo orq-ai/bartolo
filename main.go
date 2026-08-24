@@ -40,6 +40,7 @@ const (
 	ExtGroup       = "x-cli-group"
 	ExtIgnore      = "x-cli-ignore"
 	ExtHidden      = "x-cli-hidden"
+	ExtListFields  = "x-cli-list-fields"
 	ExtName        = "x-cli-name"
 	ExtWaiters     = "x-cli-waiters"
 )
@@ -79,6 +80,8 @@ type Operation struct {
 	BodyFields     []*BodyField
 	Hidden         bool
 	NeedsResponse  bool
+	IsList         bool
+	ListFields     []string
 	Waiters        []*WaiterParams
 	Group          *CommandGroup
 	CommandPath    string
@@ -307,6 +310,11 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				mustDecodeExt(operation.Extensions[ExtAliases], &aliases)
 			}
 
+			var listFields []string
+			if operation.Extensions[ExtListFields] != nil {
+				mustDecodeExt(operation.Extensions[ExtListFields], &listFields)
+			}
+
 			params := getParams(item, method)
 			requiredParams := getRequiredParams(params)
 			optionalParams := getOptionalParams(params)
@@ -458,6 +466,8 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				BodyExample:    reqInfo.exampleBody,
 				BodyFields:     bodyFields,
 				Hidden:         hidden,
+				IsList:         strings.EqualFold(method, "get") && isCollectionPath(path),
+				ListFields:     listFields,
 				Group:          group,
 				CommandPath:    commandPath,
 				LeafName:       leafName,
@@ -1003,6 +1013,15 @@ func isActionSegment(segment string) bool {
 	default:
 		return false
 	}
+}
+
+func isCollectionPath(rawPath string) bool {
+	for _, segment := range strings.Split(strings.Trim(rawPath, "/"), "/") {
+		if strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") {
+			return false
+		}
+	}
+	return true
 }
 
 func isVersionToken(segment string) bool {

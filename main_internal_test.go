@@ -154,6 +154,53 @@ paths:
 	if op.Use != "list" {
 		t.Fatalf("expected grouped operation use %q, got %q", "list", op.Use)
 	}
+	if !op.IsList {
+		t.Fatal("collection GET operation should use list formatting")
+	}
+}
+
+func TestProcessAPIReadsListFieldsExtension(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: List fields API
+  version: "1"
+paths:
+  /files:
+    get:
+      operationId: listFiles
+      x-cli-list-fields:
+        - name
+        - id
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    name:
+                      type: string
+`)
+
+	api := ProcessAPI("example", doc)
+	var op *Operation
+	if len(api.Operations) > 0 {
+		op = api.Operations[0]
+	} else if len(api.Groups) > 0 && len(api.Groups[0].Operations) > 0 {
+		op = api.Groups[0].Operations[0]
+	}
+	if op == nil {
+		t.Fatal("expected generated list operation")
+	}
+	if got := strings.Join(op.ListFields, ","); got != "name,id" {
+		t.Fatalf("unexpected list fields %q", got)
+	}
 }
 
 func TestInferGroupedLeafNameNormalizesCommonPatterns(t *testing.T) {

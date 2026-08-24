@@ -43,7 +43,7 @@ func newServerListCommand() *cobra.Command {
 				})
 			}
 
-			return Formatter.Format(map[string]interface{}{
+			return FormatList(map[string]interface{}{
 				"selected_server": currentURL,
 				"overridden":      overridden,
 				"servers":         items,

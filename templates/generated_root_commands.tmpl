@@ -142,7 +142,7 @@ func registerRootCommands(root *cobra.Command) {
 						log.Fatal().Err(err).Msg("error calling operation")
 					}
 
-					if err := bartolocli.Formatter.Format(decoded); err != nil {
+					if err := bartolocli.{{ if .IsList }}FormatList{{ else }}Formatter.Format{{ end }}(decoded{{ if .IsList }}{{ range .ListFields }}, "{{ . | escapeStr }}"{{ end }}{{ end }}); err != nil {
 						log.Fatal().Err(err).Msg("formatting failed")
 					}
 
