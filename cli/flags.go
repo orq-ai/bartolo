@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -140,4 +141,61 @@ func SetCustomFlags(cmd *cobra.Command) {
 			}
 		}
 	}
+}
+
+// HelpSectionOther is the heading every command without its own section ends
+// up under, once at least one command has one. Cobra's own fallback bucket is
+// titled "Additional Commands", which reads as leftovers next to named
+// sections — and it is what an unsectioned new command would silently land in.
+const HelpSectionOther = "Other"
+
+// HelpSection places cmd under a titled section in parent's help output,
+// creating the section on first use. Cobra panics in AddCommand when a command
+// carries a GroupID the parent does not know, so both happen here.
+func HelpSection(parent *cobra.Command, cmd *cobra.Command, title string) {
+	if parent == nil || cmd == nil || title == "" {
+		return
+	}
+
+	ensureHelpSection(parent, title)
+	cmd.GroupID = title
+}
+
+// sweepIntoOtherHelpSection puts every remaining ungrouped command under
+// HelpSectionOther, so a CLI that uses sections at all does not also show
+// cobra's "Additional Commands" block. It runs at execute time because that is
+// the first point where every command is registered, including the ones a
+// consuming CLI adds after Register.
+func sweepIntoOtherHelpSection(root *cobra.Command) {
+	if root == nil || len(root.Groups()) == 0 {
+		return
+	}
+
+	ensureHelpSection(root, HelpSectionOther)
+
+	for _, cmd := range root.Commands() {
+		if cmd.GroupID == "" {
+			cmd.GroupID = HelpSectionOther
+		}
+	}
+
+	// Cobra creates these two lazily during Execute, after the loop above has
+	// already run, so they need their group set rather than assigned.
+	root.SetHelpCommandGroupID(HelpSectionOther)
+	root.SetCompletionCommandGroupID(HelpSectionOther)
+}
+
+func ensureHelpSection(parent *cobra.Command, title string) {
+	for _, group := range parent.Groups() {
+		if group.ID == title {
+			return
+		}
+	}
+
+	heading := title
+	if !strings.HasSuffix(heading, ":") {
+		heading += ":"
+	}
+
+	parent.AddGroup(&cobra.Group{ID: title, Title: heading})
 }

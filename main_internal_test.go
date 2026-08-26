@@ -1140,3 +1140,60 @@ paths:
 		t.Fatalf("expected 2 operations, got %d", count)
 	}
 }
+
+func TestProcessAPIReadsCLIHelpSectionFromTagAndOperation(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Sectioned API
+  version: "1"
+tags:
+  - name: Files
+    x-cli-help-section: Storage
+paths:
+  /files:
+    get:
+      operationId: ListFiles
+      summary: List files
+      tags:
+        - Files
+      responses:
+        "200":
+          description: ok
+  /agents:
+    get:
+      operationId: ListAgents
+      summary: List agents
+      tags:
+        - Agents
+      x-cli-help-section: Managed agents
+      responses:
+        "200":
+          description: ok
+  /ping:
+    get:
+      operationId: Ping
+      summary: Ping
+      x-cli-group: ""
+      x-cli-help-section: Utilities
+      responses:
+        "200":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+
+	sections := map[string]string{}
+	for _, group := range api.Groups {
+		sections[group.CLIName] = group.HelpSection
+	}
+	if sections["files"] != "Storage" {
+		t.Fatalf("expected tag section Storage, got %q", sections["files"])
+	}
+	if sections["agents"] != "Managed agents" {
+		t.Fatalf("expected operation override section, got %q", sections["agents"])
+	}
+	if sections["ping"] != "Utilities" {
+		t.Fatalf("expected path-inferred group to carry section, got %q", sections["ping"])
+	}
+}

@@ -86,6 +86,7 @@ Bartolo will synthesize a decent CLI from a plain schema, but it gets significan
 | `x-cli-ignore` | Exclude a path, operation, or parameter entirely. |
 | `x-cli-list-fields` | Set the default columns for an interactive collection response. |
 | `x-cli-name` | Override a generated CLI name for an API, operation, or parameter. |
+| `x-cli-help-section` | Put a top-level command under a titled section in `--help`. |
 | `x-cli-waiters` | Add polling-based waiter commands and follow-up flags. |
 
 For example, a collection operation can define the default interactive
@@ -113,6 +114,24 @@ Bartolo also groups operations automatically from:
 - the first stable path noun when tags are missing
 
 That fallback matters for large real-world schemas where tagging is inconsistent.
+
+### Help sections
+
+`x-cli-help-section` on a tag (or on a single operation, which wins) sets the heading a
+top-level command appears under in `--help`:
+
+```yaml
+tags:
+  - name: Files
+    x-cli-help-section: Storage
+```
+
+Sections are created in the order they are first seen. As soon as one command has a
+section, every command without one — including `doctor`, `help`, and anything the
+consuming CLI registers itself — is collected under a final `Other` section, so
+Cobra's `Additional Commands` block never shows up next to named sections. Because the heading travels with the spec,
+a newly tagged API lands in the right section on regeneration instead of needing an
+entry in a hand-maintained table downstream.
 
 ## Customization
 
