@@ -190,33 +190,39 @@ make verify
 
 ## Releasing
 
-Releases are automatic. Merging to `main` derives the next version from the
-conventional-commit subjects since the last tag, pushes that tag, and publishes
-a GitHub Release. Merges are squashed, so the PR title is what counts, and CI
-rejects a title that is not a conventional commit:
+Releases are automatic. When CI passes on `main`, the next version is derived
+from the conventional-commit subjects since the last tag, that tag is pushed,
+and a GitHub Release is published. Merges are squashed, so the PR title is what
+counts, and CI rejects a title that is not a conventional commit:
 
 | Title prefix | Result |
 | --- | --- |
 | `feat:` | minor release |
 | `fix:`, `perf:`, `revert:` | patch release |
-| `!` after the type, or a `BREAKING CHANGE:` footer | major release, refused unless forced |
+| `!` after the type, or a `BREAKING CHANGE:` footer | minor release while Bartolo is 0.x (see below) |
 | `docs:`, `chore:`, `ci:`, `refactor:`, `test:`, `style:`, `build:` | ships in the next release, triggers none |
 
 There is no version constant to bump. `bartolo version` reports the module
 version recorded in the binary's build info, so a binary installed with
 `go install github.com/orq-ai/bartolo@v0.4.7` reports `0.4.7` and one built from
-a checkout reports `devel`. The tag is the only source of truth.
+a checkout reports `devel+<commit>`. The tag is the only source of truth.
+
+The arithmetic is [svu](https://github.com/caarlos0/svu)'s. `.svu.yml` sets
+`v0: true`, which means a breaking change bumps the minor rather than cutting
+v1.0.0 — correct for a pre-1.0 project, and it also caps svu's one rough edge:
+it matches `BREAKING CHANGE` anywhere in a commit body, so a body that merely
+quotes the phrase would otherwise release a major. Revisit both before tagging
+v1.0.0.
 
 A run of `docs:`/`chore:`/`ci:`-only merges accumulates on `main` without ever
 being tagged, which is correct but invisible: GitHub Releases looks the same
 whether everything is shipped or a month of maintenance is waiting. To ship
-those, or to confirm a major, run the `release` workflow manually with a
-`force_level`.
+those, or to cut a major, run the `release` workflow manually with a
+`force_level` — `svu major` overrides `v0: true`.
 
-Preview what a merge would produce with `go run ./cmd/next-version`, which
-prints the next tag or `none`. The same program decides the release in CI and
-validates PR titles (`-check-title`), so a title CI accepts always produces the
-release it implies.
+Preview what a merge would produce with `svu next`
+(`go install github.com/caarlos0/svu/v3@latest`), which prints the next tag, or
+the current one when nothing warrants a release.
 
 ## Positioning
 

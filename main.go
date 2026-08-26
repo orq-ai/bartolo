@@ -49,7 +49,14 @@ func resolveVersion() string {
 	if !ok {
 		return devel
 	}
-	return normalizeVersion(info.Main.Version)
+	version := normalizeVersion(info.Main.Version)
+	if version != devel {
+		return version
+	}
+	// A dev build has no version, but it does have a commit, and this string is
+	// written into every generated .bartolo.json. "devel" alone cannot tell you
+	// which checkout produced a project; "devel+1a2b3c4" can.
+	return devel + buildRevision(info.Settings)
 }
 
 // normalizeVersion turns a module version recorded in the build info into the
@@ -60,6 +67,22 @@ func normalizeVersion(raw string) string {
 		return devel
 	}
 	return strings.TrimPrefix(raw, "v")
+}
+
+// buildRevision returns "+<short sha>", or "" when the build carried no VCS
+// stamp — `go build` outside a repository, or with -buildvcs=false.
+func buildRevision(settings []debug.BuildSetting) string {
+	for _, setting := range settings {
+		if setting.Key != "vcs.revision" || setting.Value == "" {
+			continue
+		}
+		revision := setting.Value
+		if len(revision) > 7 {
+			revision = revision[:7]
+		}
+		return "+" + revision
+	}
+	return ""
 }
 
 // OpenAPI Extensions

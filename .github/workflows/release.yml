@@ -1,6 +1,6 @@
 name: release
 
-# Tag-driven release. On push to main, derive the next version from the
+# Tag-driven release. When CI passes on main, derive the next version from the
 # conventional-commit subjects since the last tag, push that tag, and publish a
 # GitHub Release. There is nothing to build or upload: bartolo ships through
 # `go install`, and the proxy serves whatever the tag points at.
@@ -9,26 +9,28 @@ name: release
 # the module version from its build info — so nothing here can drift out of sync
 # with the code the way the hand-cut tags did (v0.4.4 shipped reporting 0.4.3).
 #
-# Every version decision is made by ./cmd/next-version, which is unit-tested;
-# this file only reacts to what it reports. The steps are idempotent, so a run
-# that dies between pushing the tag and publishing the release is repaired by
-# the next one instead of leaving a tag the module proxy serves with no release
-# to explain it.
+# The version arithmetic is svu's, not ours; see .svu.yml for the one setting
+# that matters. The steps are idempotent, so a run that dies between pushing the
+# tag and publishing the release is repaired by the next one instead of leaving
+# a tag the module proxy serves with no release to explain it.
 #
 # Only a tag is pushed, never a commit to main, so the plain GITHUB_TOKEN is
 # enough and main's protection stays untouched.
 on:
-  push:
-    branches:
-      - main
+  # Not `push: main` — a release must not overtake the CI run that would have
+  # stopped it. This fires only after ci concludes, and only publishes the
+  # commit ci actually verified.
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
   workflow_dispatch:
     inputs:
       force_level:
-        description: "Force bump (major/minor/patch); blank = derive from commits. Required to release a major."
+        description: "auto = derive from commits. Anything else forces that bump; a major must be forced."
         required: false
-        default: ""
+        default: auto
         type: choice
-        options: ["", "major", "minor", "patch"]
+        options: [auto, major, minor, patch]
 
 concurrency:
   group: release
@@ -37,14 +39,34 @@ concurrency:
 permissions:
   contents: write # push the tag + create the GitHub Release
 
+env:
+  # Pinned: this decides every version bartolo ever ships.
+  SVU_VERSION: v3.4.1
+
 jobs:
   release:
     name: tag + release
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
     steps:
+      # workflow_dispatch can be aimed at any branch. Fail rather than skip: a
+      # release fired at a feature branch must not report success having done
+      # nothing.
+      - name: Refuse to release anything but main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Releases are cut from main only; this run targets ${{ github.ref }}."
+          exit 1
+
       - uses: actions/checkout@v4
         with:
+          # The commit ci verified, not whatever main has drifted to since.
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
           fetch-depth: 0 # full history + tags for version derivation
           persist-credentials: true # the tag push below reuses this credential
 
@@ -53,22 +75,47 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install svu
+        run: go install github.com/caarlos0/svu/v3@${{ env.SVU_VERSION }}
+
       - name: Decide the release
         id: version
         env:
           FORCE_LEVEL: ${{ inputs.force_level }}
         run: |
           set -euo pipefail
-          if [ -n "$FORCE_LEVEL" ]; then
-            go run ./cmd/next-version -github-output -force "$FORCE_LEVEL" | tee -a "$GITHUB_OUTPUT"
+          current="$(svu current)"
+          if [ -n "$FORCE_LEVEL" ] && [ "$FORCE_LEVEL" != auto ]; then
+            next="$(svu "$FORCE_LEVEL")"
           else
-            go run ./cmd/next-version -github-output | tee -a "$GITHUB_OUTPUT"
+            # svu prints the current version when nothing warrants a release.
+            next="$(svu next)"
           fi
+
+          released=false
+          if [ "$next" != "$current" ]; then released=true; fi
+
+          # tag is the ref a release must exist for: the one about to be cut, or
+          # the last one, so a release that failed after its tag was pushed is
+          # created on the next run instead of staying missing forever.
+          tag="$current"
+          if [ "$released" = true ]; then tag="$next"; fi
+
+          major_bump=false
+          if [ "${next%%.*}" != "${current%%.*}" ]; then major_bump=true; fi
+
+          {
+            echo "released=$released"
+            echo "current=$current"
+            echo "next=$next"
+            echo "tag=$tag"
+            echo "major_bump=$major_bump"
+          } | tee -a "$GITHUB_OUTPUT"
 
       - name: Refuse an unconfirmed major
         # A major bump needs a human. Fail rather than skip: a blocked release
         # must not look like a docs-only push.
-        if: steps.version.outputs.major_bump == 'true' && inputs.force_level == ''
+        if: steps.version.outputs.major_bump == 'true' && inputs.force_level != 'major'
         run: |
           echo "::error::Refusing an automatic major bump ${{ steps.version.outputs.current }} -> ${{ steps.version.outputs.next }}. Re-run this workflow via workflow_dispatch with force_level=major to confirm, or force_level=minor/patch to ship the breaking changes at a lower level."
           exit 1
@@ -79,13 +126,20 @@ jobs:
           TAG: ${{ steps.version.outputs.next }}
         run: |
           set -euo pipefail
-          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            echo "$TAG already exists locally."
-            exit 0
+          head="$(git rev-parse HEAD)"
+          if existing="$(git rev-parse -q --verify "refs/tags/$TAG^{commit}")"; then
+            # Re-running over a tag we already cut is fine. Finding it on other
+            # code is not: publishing it would ship a commit nobody chose.
+            if [ "$existing" = "$head" ]; then
+              echo "$TAG already points at $head."
+              exit 0
+            fi
+            echo "::error::$TAG already exists and points at $existing, not $head. Refusing to publish. Delete the stray tag or cut a different version."
+            exit 1
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag "$TAG"
+          git tag "$TAG" "$head"
           git push origin "$TAG"
 
       - name: Ensure the release exists

@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
 	"strings"
 	"testing"
 
@@ -1195,6 +1196,31 @@ paths:
 	}
 	if sections["ping"] != "Utilities" {
 		t.Fatalf("expected path-inferred group to carry section, got %q", sections["ping"])
+	}
+}
+
+// TestBuildRevision covers the suffix a dev build carries. Go omits the VCS
+// stamp entirely in a git worktree and under -buildvcs=false, so the empty case
+// is the one that actually shows up, not a theoretical one.
+func TestBuildRevision(t *testing.T) {
+	cases := []struct {
+		name     string
+		settings []debug.BuildSetting
+		want     string
+	}{
+		{"full sha is shortened", []debug.BuildSetting{{Key: "vcs.revision", Value: "1a2b3c4d5e6f7890"}}, "+1a2b3c4"},
+		{"short sha is left alone", []debug.BuildSetting{{Key: "vcs.revision", Value: "1a2b3c"}}, "+1a2b3c"},
+		{"other settings are skipped", []debug.BuildSetting{{Key: "vcs", Value: "git"}, {Key: "vcs.revision", Value: "abcdefgh"}}, "+abcdefg"},
+		{"no stamp", []debug.BuildSetting{{Key: "vcs.modified", Value: "false"}}, ""},
+		{"empty revision", []debug.BuildSetting{{Key: "vcs.revision", Value: ""}}, ""},
+		{"no settings", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := buildRevision(tc.settings); got != tc.want {
+				t.Errorf("buildRevision() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
