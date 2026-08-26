@@ -74,9 +74,9 @@ func redactHeaderValue(key, val string) string {
 }
 
 // looksSensitiveHeader reports whether a header or query-parameter name carries a
-// credential. It extends looksSensitiveKey — the package's one definition of a secret
-// profile field — with names that only appear on the wire: the auth handler is
-// consumer-supplied, so `X-Auth`, `X-Signature` and friends cannot be enumerated here.
+// credential. It extends looksSensitiveKey with names that only appear on the wire, and
+// would over-redact as profile fields: the auth handler is consumer-supplied, so the
+// names it sends (`X-Auth`, `X-Session`) cannot be enumerated here.
 func looksSensitiveHeader(name string) bool {
 	n := strings.ToLower(name)
 	switch n {
@@ -86,7 +86,7 @@ func looksSensitiveHeader(name string) bool {
 	if looksSensitiveKey(n) {
 		return true
 	}
-	for _, hint := range []string{"auth", "credential", "signature", "session"} {
+	for _, hint := range []string{"auth", "session"} {
 		if strings.Contains(n, hint) {
 			return true
 		}

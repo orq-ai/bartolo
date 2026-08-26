@@ -332,7 +332,7 @@ func TestResolveProfileValue(t *testing.T) {
 // looksSensitiveKey decides whether add-profile echoes the typed value: secrets must
 // not, a non-secret such as OAuth's client-id must.
 func TestLooksSensitiveKey(t *testing.T) {
-	for _, key := range []string{"api_key", "api-key", "client_secret", "access_token", "password", "X-Orq-Key"} {
+	for _, key := range []string{"api_key", "api-key", "client_secret", "access_token", "password", "X-Orq-Key", "passphrase", "client_credential", "signature"} {
 		if !looksSensitiveKey(key) {
 			t.Errorf("looksSensitiveKey(%q) = false, want true (must not echo)", key)
 		}

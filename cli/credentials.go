@@ -469,9 +469,20 @@ var promptProfileValue = func(key string) (string, error) {
 	return value, nil
 }
 
+// looksSensitiveKey reports whether a field name holds a credential. It is the one
+// definition of "secret" in the package: it decides whether add-profile prompts without
+// echo, whether `auth list-profiles` masks the stored value, and (through
+// looksSensitiveHeader) whether `--verbose` redacts a header or query parameter.
+// Substring matching over-redacts by design — a benign field is worth masking to keep a
+// key out of a log.
 func looksSensitiveKey(key string) bool {
 	lower := strings.ToLower(key)
-	return strings.Contains(lower, "key") || strings.Contains(lower, "token") || strings.Contains(lower, "secret") || strings.Contains(lower, "password")
+	for _, hint := range []string{"key", "token", "secret", "password", "passphrase", "credential", "signature"} {
+		if strings.Contains(lower, hint) {
+			return true
+		}
+	}
+	return false
 }
 
 func sanitizeProfileName(value string) string {

@@ -1235,7 +1235,7 @@ func reserveGeneratedFlagNames(bodyFields []*BodyField, optionalParams []*Param)
 	// does so when it has to rename, so the note is never duplicated here.
 	note := func(kind, name, from string) string {
 		if _, reserved := bartolocli.ReservedFlagName(from); reserved {
-			return fmt.Sprintf(" (%s %q, renamed to keep the global --%s flag available)", kind, name, from)
+			return fmt.Sprintf(" (%s %q, renamed to keep the reserved --%s flag available)", kind, name, from)
 		}
 		return fmt.Sprintf(" (%s %q, renamed to avoid a duplicate --%s flag)", kind, name, from)
 	}
