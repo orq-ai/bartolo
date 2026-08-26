@@ -12,7 +12,9 @@ on:
     types: [opened, edited, synchronize, reopened]
 
 permissions:
-  pull-requests: read
+  # write, not read: the action explains a rejected title in a PR comment, and a
+  # red check with no reason is how a contributor learns nothing.
+  pull-requests: write
 
 jobs:
   pr-title:

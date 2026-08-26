@@ -1225,16 +1225,59 @@ func TestBuildRevision(t *testing.T) {
 }
 
 func TestNormalizeVersion(t *testing.T) {
-	cases := map[string]string{
-		"v0.4.7":      "0.4.7",
-		"v1.2.3-rc.1": "1.2.3-rc.1",
-		"0.4.7":       "0.4.7",
-		"(devel)":     devel,
-		"":            devel,
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"tagged version loses its v", "v0.4.7", "0.4.7"},
+		{"prerelease is kept whole", "v1.2.3-rc.1", "1.2.3-rc.1"},
+		{"version without a v is left alone", "0.4.7", "0.4.7"},
+		{"go build reports devel", "(devel)", devel},
+		{"no module version at all", "", devel},
 	}
-	for raw, want := range cases {
-		if got := normalizeVersion(raw); got != want {
-			t.Errorf("normalizeVersion(%q) = %q, want %q", raw, got, want)
-		}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeVersion(tc.raw); got != tc.want {
+				t.Errorf("normalizeVersion(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveVersionFrom(t *testing.T) {
+	revision := []debug.BuildSetting{{Key: "vcs.revision", Value: "1a2b3c4d5e6f"}}
+	cases := []struct {
+		name string
+		info *debug.BuildInfo
+		ok   bool
+		want string
+	}{
+		{"no build info", nil, false, devel},
+		{
+			"installed version wins over the revision",
+			&debug.BuildInfo{Main: debug.Module{Version: "v0.5.0"}, Settings: revision},
+			true,
+			"0.5.0",
+		},
+		{
+			"dev build carries the revision",
+			&debug.BuildInfo{Main: debug.Module{Version: "(devel)"}, Settings: revision},
+			true,
+			"devel+1a2b3c4",
+		},
+		{
+			"dev build without a stamp is bare devel",
+			&debug.BuildInfo{Main: debug.Module{Version: "(devel)"}},
+			true,
+			devel,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveVersionFrom(tc.info, tc.ok); got != tc.want {
+				t.Errorf("resolveVersionFrom() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

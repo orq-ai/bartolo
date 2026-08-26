@@ -45,7 +45,13 @@ var bartoloVersion = resolveVersion()
 const devel = "devel"
 
 func resolveVersion() string {
-	info, ok := debug.ReadBuildInfo()
+	return resolveVersionFrom(debug.ReadBuildInfo())
+}
+
+// resolveVersionFrom is resolveVersion with the one untestable call lifted out,
+// so the branching below is covered by tests rather than by the build method
+// that happens to produce the binary running them.
+func resolveVersionFrom(info *debug.BuildInfo, ok bool) string {
 	if !ok {
 		return devel
 	}

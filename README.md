@@ -198,9 +198,13 @@ counts, and CI rejects a title that is not a conventional commit:
 | Title prefix | Result |
 | --- | --- |
 | `feat:` | minor release |
-| `fix:`, `perf:`, `revert:` | patch release |
+| `fix:`, `perf:` | patch release |
 | `!` after the type, or a `BREAKING CHANGE:` footer | minor release while Bartolo is 0.x (see below) |
-| `docs:`, `chore:`, `ci:`, `refactor:`, `test:`, `style:`, `build:` | ships in the next release, triggers none |
+| `docs:`, `chore:`, `ci:`, `refactor:`, `test:`, `style:`, `build:`, `revert:` | ships in the next release, triggers none |
+
+`revert:` is release-neutral to svu, so reverting a released fix does not by
+itself cut the release that undoes it — force one, or land the revert with a
+`fix:` title.
 
 There is no version constant to bump. `bartolo version` reports the module
 version recorded in the binary's build info, so a binary installed with
@@ -219,6 +223,15 @@ being tagged, which is correct but invisible: GitHub Releases looks the same
 whether everything is shipped or a month of maintenance is waiting. To ship
 those, or to cut a major, run the `release` workflow manually with a
 `force_level` — `svu major` overrides `v0: true`.
+
+What is *not* allowed to be invisible is a subject svu cannot parse. The release
+run fails when it releases nothing and finds a non-conventional subject since the
+last tag, because that commit is release-neutral by accident rather than by
+choice — the failure mode that left a security fix sitting untagged on `main`.
+
+Release notes are generated on the GitHub Release from the merged PRs.
+`CHANGELOG.md` is frozen at the last hand-written entry and covers only the
+versions that predate automation.
 
 Preview what a merge would produce with `svu next`
 (`go install github.com/caarlos0/svu/v3@latest`), which prints the next tag, or

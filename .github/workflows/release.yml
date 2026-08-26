@@ -63,14 +63,30 @@ jobs:
           echo "::error::Releases are cut from main only; this run targets ${{ github.ref }}."
           exit 1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           # The commit ci verified, not whatever main has drifted to since.
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
           fetch-depth: 0 # full history + tags for version derivation
           persist-credentials: true # the tag push below reuses this credential
 
-      - uses: actions/setup-go@v5
+      - name: Refuse a commit main has moved past
+        # workflow_run events arrive in ci-completion order, not merge order, so
+        # a slow ci run for an older commit can reach this job after a newer one
+        # already released. Tagging then would point a new version at superseded
+        # code. Nothing is lost by stopping: the run for the newer commit
+        # releases everything up to it.
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+          head="$(git rev-parse HEAD)"
+          tip="$(git rev-parse origin/main)"
+          if [ "$head" != "$tip" ]; then
+            echo "::error::HEAD is $head but origin/main is now $tip. Refusing to release a commit main has moved past; the run for $tip cuts this release."
+            exit 1
+          fi
+
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
@@ -157,3 +173,25 @@ jobs:
             exit 0
           fi
           gh release create "$TAG" --title "$TAG" --generate-notes --verify-tag
+
+      - name: Refuse an unreleasable backlog
+        # "Nothing to release" is only trustworthy when every commit since the
+        # last tag is a conventional commit that deliberately triggers nothing.
+        # A subject svu cannot parse is release-neutral by accident, which is
+        # how the BACK-2115 fix sat on main untagged for days. Fail so the merge
+        # that could not release looks different from the one that chose not to.
+        if: steps.version.outputs.released != 'true'
+        env:
+          CURRENT: ${{ steps.version.outputs.current }}
+        run: |
+          set -euo pipefail
+          range="$CURRENT..HEAD"
+          git rev-parse -q --verify "refs/tags/$CURRENT" >/dev/null || range=HEAD
+          unparsed="$(git log --no-merges --format=%s "$range" | grep -vE '^[a-z]+(\([^)]*\))?!?: ' || true)"
+          if [ -n "$unparsed" ]; then
+            echo "::error::Nothing was released, but these subjects since $CURRENT are not conventional commits, so none of them could have triggered a release:"
+            printf '%s\n' "$unparsed"
+            echo "Re-run this workflow with a force_level to ship them."
+            exit 1
+          fi
+          echo "Nothing to release: every commit since $CURRENT is deliberately release-neutral."
