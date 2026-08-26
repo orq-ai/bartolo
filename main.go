@@ -466,7 +466,7 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				BodyExample:    reqInfo.exampleBody,
 				BodyFields:     bodyFields,
 				Hidden:         hidden,
-				IsList:         strings.EqualFold(method, "get") && isCollectionPath(path),
+				IsList:         strings.EqualFold(method, "get") && (isCollectionPath(path) || isCollectionResponse(operation) || len(listFields) > 0),
 				ListFields:     listFields,
 				Group:          group,
 				CommandPath:    commandPath,
@@ -1022,6 +1022,39 @@ func isCollectionPath(rawPath string) bool {
 		}
 	}
 	return true
+}
+
+func isCollectionResponse(operation *openapi3.Operation) bool {
+	for code, response := range operation.Responses.Map() {
+		status, err := strconv.Atoi(code)
+		if err != nil || status < 200 || status >= 300 || response == nil || response.Value == nil {
+			continue
+		}
+
+		for _, content := range response.Value.Content {
+			if content == nil {
+				continue
+			}
+			if _, ok := content.Example.([]interface{}); ok {
+				return true
+			}
+			if content.Schema == nil || content.Schema.Value == nil {
+				continue
+			}
+
+			schema := content.Schema.Value
+			if schema.Items != nil {
+				return true
+			}
+			for _, key := range []string{"items", "data", "results", "records", "entries", "servers"} {
+				property := schema.Properties[key]
+				if property != nil && property.Value != nil && property.Value.Items != nil {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func isVersionToken(segment string) bool {

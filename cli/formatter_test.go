@@ -90,11 +90,30 @@ func TestDefaultFormatterRendersListEnvelopeMetadata(t *testing.T) {
 
 	err := NewDefaultFormatter(true).FormatList(map[string]interface{}{
 		"selected_server": "https://example.test",
-		"servers": []interface{}{
-			map[string]interface{}{"url": "https://example.test", "selected": true},
+		"servers": []map[string]interface{}{
+			{"url": "https://example.test", "selected": true},
 		},
 	})
 	assert.NoError(t, err)
 	assert.Contains(t, out.String(), "selected_server: https://example.test")
 	assert.Contains(t, out.String(), "| SELECTED |         URL          |")
+}
+
+func TestDefaultFormatterRendersEmptyListWithConfiguredColumns(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", "json")
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	originalRoot := Root
+	Root = nil
+	t.Cleanup(func() { Root = originalRoot })
+
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true).FormatList([]interface{}{}, "id", "name")
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "| ID | NAME |")
 }

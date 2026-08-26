@@ -238,7 +238,7 @@ func (f *DefaultFormatter) shouldRenderTable() bool {
 // array. It returns false for scalar arrays and ordinary objects so callers
 // can fall back to the requested serialization format.
 func renderTable(data interface{}, requestedColumns []string) (bool, error) {
-	rows, label, metadata, ok := tableRows(data)
+	rows, label, metadata, ok := tableRows(data, requestedColumns)
 	if !ok {
 		return false, nil
 	}
@@ -263,7 +263,7 @@ func renderTable(data interface{}, requestedColumns []string) (bool, error) {
 	if label != "" {
 		keys := make([]string, 0, len(metadata))
 		for key, value := range metadata {
-			if _, isRows := value.([]interface{}); !isRows {
+			if _, isRows := objectRowsValue(value, true); !isRows {
 				keys = append(keys, key)
 			}
 		}
@@ -298,12 +298,9 @@ func renderTable(data interface{}, requestedColumns []string) (bool, error) {
 	return true, nil
 }
 
-func tableRows(data interface{}) ([]map[string]interface{}, string, map[string]interface{}, bool) {
-	if rows, ok := data.([]interface{}); ok {
-		return objectRows(rows)
-	}
-	if rows, ok := data.([]map[string]interface{}); ok {
-		return objectRowsFromMaps(rows)
+func tableRows(data interface{}, requestedColumns []string) ([]map[string]interface{}, string, map[string]interface{}, bool) {
+	if rows, ok := objectRowsValue(data, len(requestedColumns) > 0); ok {
+		return rows, "", nil, true
 	}
 
 	object, ok := data.(map[string]interface{})
@@ -315,8 +312,8 @@ func tableRows(data interface{}) ([]map[string]interface{}, string, map[string]i
 	// not accidentally turn an ordinary object response into a table.
 	keys := []string{"items", "data", "results", "records", "entries", "servers"}
 	for _, key := range keys {
-		if rows, ok := object[key].([]interface{}); ok {
-			if result, _, _, valid := objectRows(rows); valid {
+		if result, valid := objectRowsValue(object[key], len(requestedColumns) > 0); valid {
+			if len(result) > 0 || len(requestedColumns) > 0 {
 				return result, key, object, true
 			}
 		}
@@ -324,26 +321,36 @@ func tableRows(data interface{}) ([]map[string]interface{}, string, map[string]i
 	return nil, "", nil, false
 }
 
-func objectRows(values []interface{}) ([]map[string]interface{}, string, map[string]interface{}, bool) {
+func objectRowsValue(value interface{}, allowEmpty bool) ([]map[string]interface{}, bool) {
+	if values, ok := value.([]interface{}); ok {
+		return objectRows(values, allowEmpty)
+	}
+	if values, ok := value.([]map[string]interface{}); ok {
+		return objectRowsFromMaps(values, allowEmpty)
+	}
+	return nil, false
+}
+
+func objectRows(values []interface{}, allowEmpty bool) ([]map[string]interface{}, bool) {
 	rows := make([]map[string]interface{}, 0, len(values))
 	for _, value := range values {
 		row, ok := value.(map[string]interface{})
 		if !ok {
-			return nil, "", nil, false
+			return nil, false
 		}
 		rows = append(rows, row)
 	}
-	if len(rows) == 0 {
-		return nil, "", nil, false
+	if len(rows) == 0 && !allowEmpty {
+		return nil, false
 	}
-	return rows, "", nil, true
+	return rows, true
 }
 
-func objectRowsFromMaps(values []map[string]interface{}) ([]map[string]interface{}, string, map[string]interface{}, bool) {
-	if len(values) == 0 {
-		return nil, "", nil, false
+func objectRowsFromMaps(values []map[string]interface{}, allowEmpty bool) ([]map[string]interface{}, bool) {
+	if len(values) == 0 && !allowEmpty {
+		return nil, false
 	}
-	return values, "", nil, true
+	return values, true
 }
 
 func tableValue(value interface{}) (string, error) {

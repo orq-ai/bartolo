@@ -201,6 +201,54 @@ paths:
 	if got := strings.Join(op.ListFields, ","); got != "name,id" {
 		t.Fatalf("unexpected list fields %q", got)
 	}
+	if !op.IsList {
+		t.Fatal("collection GET operation with list fields should use list formatting")
+	}
+}
+
+func TestProcessAPIRecognizesNestedCollectionResponse(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Nested collection API
+  version: "1"
+paths:
+  /folders/{folder_id}/files:
+    get:
+      operationId: listFolderFiles
+      parameters:
+        - name: folder_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+`)
+
+	api := ProcessAPI("example", doc)
+	var op *Operation
+	if len(api.Operations) > 0 {
+		op = api.Operations[0]
+	} else if len(api.Groups) > 0 && len(api.Groups[0].Operations) > 0 {
+		op = api.Groups[0].Operations[0]
+	}
+	if op == nil {
+		t.Fatal("expected generated nested collection operation")
+	}
+	if !op.IsList {
+		t.Fatal("nested collection GET operation should use list formatting")
+	}
 }
 
 func TestInferGroupedLeafNameNormalizesCommonPatterns(t *testing.T) {
