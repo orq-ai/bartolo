@@ -9,6 +9,12 @@ name: release
 # the module version from its build info — so nothing here can drift out of sync
 # with the code the way the hand-cut tags did (v0.4.4 shipped reporting 0.4.3).
 #
+# Every version decision is made by ./cmd/next-version, which is unit-tested;
+# this file only reacts to what it reports. The steps are idempotent, so a run
+# that dies between pushing the tag and publishing the release is repaired by
+# the next one instead of leaving a tag the module proxy serves with no release
+# to explain it.
+#
 # Only a tag is pushed, never a commit to main, so the plain GITHUB_TOKEN is
 # enough and main's protection stays untouched.
 on:
@@ -47,57 +53,53 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Compute the next version
+      - name: Decide the release
         id: version
         env:
           FORCE_LEVEL: ${{ inputs.force_level }}
         run: |
           set -euo pipefail
-          current="$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)"
           if [ -n "$FORCE_LEVEL" ]; then
-            next="$(go run ./cmd/next-version -force "$FORCE_LEVEL")"
+            go run ./cmd/next-version -github-output -force "$FORCE_LEVEL" | tee -a "$GITHUB_OUTPUT"
           else
-            next="$(go run ./cmd/next-version)"
-          fi
-          echo "current=$current next=$next force='${FORCE_LEVEL}'"
-
-          if [ "$next" = "none" ]; then
-            echo "Nothing since $current warrants a release."
-            echo "released=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if git rev-parse -q --verify "refs/tags/$next" >/dev/null; then
-            echo "$next already exists."
-            echo "released=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            go run ./cmd/next-version -github-output | tee -a "$GITHUB_OUTPUT"
           fi
 
-          # A major bump needs a human. Exit non-zero rather than quietly
-          # skipping: a blocked release must not look like a docs-only push.
-          cur_major="${current#v}"; cur_major="${cur_major%%.*}"
-          next_major="${next#v}"; next_major="${next_major%%.*}"
-          if [ "$next_major" -gt "$cur_major" ] && [ -z "$FORCE_LEVEL" ]; then
-            echo "::error::Refusing an automatic major bump $current -> $next. Re-run this workflow via workflow_dispatch with force_level=major to confirm, or force_level=minor/patch to ship the breaking changes at a lower level."
-            exit 1
-          fi
-
-          echo "released=true" >> "$GITHUB_OUTPUT"
-          echo "tag=$next" >> "$GITHUB_OUTPUT"
+      - name: Refuse an unconfirmed major
+        # A major bump needs a human. Fail rather than skip: a blocked release
+        # must not look like a docs-only push.
+        if: steps.version.outputs.major_bump == 'true' && inputs.force_level == ''
+        run: |
+          echo "::error::Refusing an automatic major bump ${{ steps.version.outputs.current }} -> ${{ steps.version.outputs.next }}. Re-run this workflow via workflow_dispatch with force_level=major to confirm, or force_level=minor/patch to ship the breaking changes at a lower level."
+          exit 1
 
       - name: Push the tag
         if: steps.version.outputs.released == 'true'
         env:
-          TAG: ${{ steps.version.outputs.tag }}
+          TAG: ${{ steps.version.outputs.next }}
         run: |
           set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "$TAG already exists locally."
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag "$TAG"
           git push origin "$TAG"
 
-      - name: Create the GitHub release
-        if: steps.version.outputs.released == 'true'
+      - name: Ensure the release exists
+        # Covers the tag just pushed and, when there is nothing new to release,
+        # the last tag — so a release that failed to publish after its tag went
+        # out is backfilled here rather than staying missing forever.
+        if: steps.version.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.version.outputs.tag }}
-        run: gh release create "$TAG" --title "$TAG" --generate-notes --verify-tag
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already published."
+            exit 0
+          fi
+          gh release create "$TAG" --title "$TAG" --generate-notes --verify-tag

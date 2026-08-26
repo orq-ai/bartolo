@@ -207,9 +207,16 @@ version recorded in the binary's build info, so a binary installed with
 `go install github.com/orq-ai/bartolo@v0.4.7` reports `0.4.7` and one built from
 a checkout reports `devel`. The tag is the only source of truth.
 
-To cut a release that the commits do not warrant, or to confirm a major, run the
-`release` workflow manually with a `force_level`. Preview what a merge would
-produce with `go run ./cmd/next-version`.
+A run of `docs:`/`chore:`/`ci:`-only merges accumulates on `main` without ever
+being tagged, which is correct but invisible: GitHub Releases looks the same
+whether everything is shipped or a month of maintenance is waiting. To ship
+those, or to confirm a major, run the `release` workflow manually with a
+`force_level`.
+
+Preview what a merge would produce with `go run ./cmd/next-version`, which
+prints the next tag or `none`. The same program decides the release in CI and
+validates PR titles (`-check-title`), so a title CI accepts always produces the
+release it implies.
 
 ## Positioning
 

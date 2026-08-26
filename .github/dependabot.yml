@@ -4,6 +4,13 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # The PR title must satisfy the conventional-commit check or the PR cannot
+    # be merged. "fix" so a dependency bump actually cuts a release: a patched
+    # dependency that never reaches a tag is the failure govulncheck exists to
+    # catch.
+    commit-message:
+      prefix: "fix"
+      include: "scope"
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
@@ -17,6 +24,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Release-neutral: an action bump changes nothing a consumer installs.
+    commit-message:
+      prefix: "ci"
+      include: "scope"
     open-pull-requests-limit: 10
     labels:
       - "dependencies"

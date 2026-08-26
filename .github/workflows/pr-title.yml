@@ -1,0 +1,33 @@
+name: pr title
+
+# Merges are squashed, so the PR title becomes the commit subject the release
+# workflow reads to pick the next version. A title that is not a conventional
+# commit is silently release-neutral, so check it here rather than discover it
+# as a release that never happened.
+#
+# Separate from ci.yml because this is the one check that must re-run when the
+# title changes, and `types` cannot be set per job.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  pr-title:
+    name: pr title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The same parser the release derivation uses, so CI cannot accept a
+      # title that then produces no release.
+      - name: Check the title is a conventional commit
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: go run ./cmd/next-version -check-title "$TITLE"

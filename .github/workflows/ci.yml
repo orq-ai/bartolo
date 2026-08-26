@@ -60,23 +60,3 @@ jobs:
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
-
-  pr-title:
-    name: pr title
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    steps:
-      # Merges are squashed, so the PR title becomes the commit subject the
-      # release workflow reads to pick the next version. A title that is not a
-      # conventional commit is silently release-neutral, so check it here
-      # rather than discover it as a release that never happened.
-      - name: Check the title is a conventional commit
-        env:
-          TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          if ! printf '%s' "$TITLE" | grep -qE '^(feat|fix|perf|revert|docs|chore|ci|refactor|test|style|build)(\([^)]+\))?!?: .+'; then
-            echo "::error::PR title must be a conventional commit, e.g. 'fix: reject empty path parameters'."
-            echo "feat -> minor release, fix/perf/revert -> patch, '!' or a BREAKING CHANGE footer -> major."
-            echo "docs, chore, ci, refactor, test, style and build ship without triggering a release."
-            exit 1
-          fi
