@@ -22,14 +22,14 @@ import (
 // long-lived API keys it holds are never world-readable (viper.WriteConfigAs
 // would otherwise create it at the default 0644).
 func writeCredentials(filename string) error {
-	// Make the file 0600 BEFORE viper writes the key, so the secret is never on disk
-	// world-readable, even for a moment. O_CREATE (without O_TRUNC) applies the mode only
-	// on creation and does not touch an existing file's contents, so there is no os.Stat
-	// gate a stat error (EACCES, a network FS) could fall through to WriteConfigAs
-	// creating the file 0644, and no check-then-act race between two runs. The chmod that
-	// follows narrows a file an older build already left 0644; viper.WriteConfigAs then
-	// keeps the existing 0600 mode, so there is no trailing chmod to make the pre-create
-	// look optional in a test (RES-1134 review).
+	// This OpenFile writes nothing: it exists only to put the mode in place BEFORE viper
+	// writes the key, so the secret is never on disk world-readable, even for a moment.
+	// viper.WriteConfigAs opens and truncates the file itself, and keeps the mode of an
+	// existing file. O_CREATE without O_TRUNC applies 0o600 only on creation and leaves an
+	// existing file alone, so there is no os.Stat gate whose error (EACCES, a network FS)
+	// could fall through to WriteConfigAs creating the file 0644, and no check-then-act
+	// race between two runs. The chmod narrows a file an older build already left 0644
+	// (RES-1134 review).
 	f, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
