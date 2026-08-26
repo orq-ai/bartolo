@@ -31,7 +31,7 @@ import (
 var templateFS embed.FS
 
 const projectConfigFilename = ".bartolo.json"
-const bartoloVersion = "0.4.7"
+const bartoloVersion = "0.4.8"
 
 // OpenAPI Extensions
 const (
@@ -255,6 +255,7 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 
 	// Convenience map for operation ID -> operation
 	operationMap := make(map[string]*Operation)
+	usedGoNames := make(map[string]bool)
 	tagDefs := make(map[string]*openapi3.Tag)
 	groupMap := make(map[string]*CommandGroup)
 	groupOrder := make([]string, 0)
@@ -285,7 +286,14 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 			mustDecodeExt(item.Extensions[ExtHidden], &pathHidden)
 		}
 
-		for method, operation := range item.Operations() {
+		methods := make([]string, 0, len(item.Operations()))
+		for method := range item.Operations() {
+			methods = append(methods, method)
+		}
+		sort.Strings(methods)
+
+		for _, method := range methods {
+			operation := item.Operations()[method]
 			if operation.Extensions[ExtIgnore] != nil {
 				// Ignore this operation.
 				continue
@@ -447,9 +455,16 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				}
 			}
 
+			// Two operations can share an operationId.
+			goName := toGoName(name, true)
+			for suffix := 2; usedGoNames[goName]; suffix++ {
+				goName = toGoName(name, true) + strconv.Itoa(suffix)
+			}
+			usedGoNames[goName] = true
+
 			o := &Operation{
 				HandlerName:    commandPath,
-				GoName:         toGoName(name, true),
+				GoName:         goName,
 				Use:            use,
 				Aliases:        aliases,
 				Short:          short,
@@ -1046,8 +1061,9 @@ func isCollectionResponse(operation *openapi3.Operation) bool {
 			if schema.Items != nil {
 				return true
 			}
-			for _, key := range []string{"items", "data", "results", "records", "entries", "servers"} {
-				property := schema.Properties[key]
+			// Any array property counts: wrappers are named after the resource
+			// as often as they are called `data` or `items`.
+			for _, property := range schema.Properties {
 				if property != nil && property.Value != nil && property.Value.Items != nil {
 					return true
 				}

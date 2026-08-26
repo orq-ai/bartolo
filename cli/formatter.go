@@ -3,16 +3,20 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"reflect"
 	"sort"
+	"strings"
 
 	"github.com/alecthomas/chroma"
 	"github.com/alecthomas/chroma/quick"
 	"github.com/alecthomas/chroma/styles"
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
 	"github.com/orq-ai/bartolo/internal/jmespathx"
 	"github.com/spf13/viper"
 	toon "github.com/toon-format/toon-go"
+	"golang.org/x/term"
 	"gopkg.in/yaml.v2"
 )
 
@@ -42,14 +46,21 @@ func init() {
 	}))
 }
 
+const (
+	// maxCellWidth keeps one long value from pushing other columns off screen.
+	maxCellWidth = 40
+
+	// defaultTableWidth is used when the terminal size is unavailable.
+	defaultTableWidth = 120
+)
+
 // ResponseFormatter will filter, prettify, and print out the results of a call.
 type ResponseFormatter interface {
 	Format(interface{}) error
 }
 
-// FormatList asks the configured formatter for its collection-aware output.
-// The fallback keeps custom ResponseFormatter implementations source
-// compatible while allowing the built-in formatter to render terminal tables.
+// FormatList renders a collection through the formatter's collection-aware
+// output, falling back to Format for custom ResponseFormatter implementations.
 func FormatList(data interface{}, columns ...string) error {
 	if listFormatter, ok := Formatter.(interface {
 		FormatList(interface{}, ...string) error
@@ -81,10 +92,8 @@ func (f *DefaultFormatter) Format(data interface{}) error {
 	return f.format(data, false, nil)
 }
 
-// FormatList formats a collection response for a human at a terminal while
-// retaining the normal serialized output for pipes and explicit format flags.
-// Generated collection commands use this method so unrelated object
-// responses (for example `doctor`) remain JSON by default.
+// FormatList renders a collection as a table for a human at a terminal and
+// keeps the serialized output for pipes and explicit format flags.
 func (f *DefaultFormatter) FormatList(data interface{}, columns ...string) error {
 	return f.format(data, true, columns)
 }
@@ -218,9 +227,7 @@ func (f *DefaultFormatter) shouldRenderTable() bool {
 		return false
 	}
 
-	// --json is an explicit request for the serialized representation. An
-	// explicitly supplied -o/--output-format should also win over the
-	// interactive default, even when the value happens to be json.
+	// An explicit --json or -o wins over the interactive table default.
 	if viper.GetBool("json") {
 		return false
 	}
@@ -233,9 +240,7 @@ func (f *DefaultFormatter) shouldRenderTable() bool {
 	return true
 }
 
-// renderTable recognizes the common shapes returned by collection endpoints:
-// either an array of objects or an object containing an items/data/results
-// array. It returns false for scalar arrays and ordinary objects so callers
+// renderTable reports false for anything that is not a collection so callers
 // can fall back to the requested serialization format.
 func renderTable(data interface{}, requestedColumns []string) (bool, error) {
 	rows, label, metadata, ok := tableRows(data, requestedColumns)
@@ -245,18 +250,9 @@ func renderTable(data interface{}, requestedColumns []string) (bool, error) {
 
 	headers := append([]string(nil), requestedColumns...)
 	if len(headers) == 0 {
-		columns := make(map[string]bool)
-		for _, row := range rows {
-			for key := range row {
-				columns[key] = true
-			}
-		}
-		for key := range columns {
-			headers = append(headers, key)
-		}
-		sort.Strings(headers)
+		headers = autoColumns(rows)
 	}
-	if len(headers) == 0 {
+	if len(headers) == 0 && len(rows) > 0 {
 		return false, nil
 	}
 
@@ -280,22 +276,117 @@ func renderTable(data interface{}, requestedColumns []string) (bool, error) {
 		}
 	}
 
-	table := tablewriter.NewWriter(Stdout)
-	table.SetHeader(headers)
-	table.SetAutoWrapText(false)
+	if len(rows) == 0 && len(headers) == 0 {
+		fmt.Fprintln(Stdout, "No results.")
+		return true, nil
+	}
+
+	values := make([][]string, 0, len(rows))
 	for _, row := range rows {
-		values := make([]string, len(headers))
+		cells := make([]string, len(headers))
 		for i, key := range headers {
 			value, err := tableValue(row[key])
 			if err != nil {
 				return false, err
 			}
-			values[i] = value
+			cells[i] = truncateCell(value)
 		}
-		table.Append(values)
+		values = append(values, cells)
 	}
-	table.Render()
+
+	// Columns the schema asked for are never dropped.
+	if len(requestedColumns) == 0 {
+		headers, values = fitColumns(headers, values, terminalWidth())
+	}
+
+	table := tablewriter.NewTable(Stdout,
+		tablewriter.WithHeaderAutoWrap(tw.WrapNone),
+		tablewriter.WithRowAutoWrap(tw.WrapNone),
+	)
+	table.Header(headers)
+	for _, cells := range values {
+		if err := table.Append(cells); err != nil {
+			return false, err
+		}
+	}
+	if err := table.Render(); err != nil {
+		return false, err
+	}
 	return true, nil
+}
+
+// autoColumns picks columns for a collection without x-cli-list-fields:
+// scalar values only, recognizable identifiers first.
+func autoColumns(rows []map[string]interface{}) []string {
+	scalar := make(map[string]bool)
+	for _, row := range rows {
+		for key, value := range row {
+			switch value.(type) {
+			case nil, map[string]interface{}, []interface{}, []map[string]interface{}:
+			default:
+				scalar[key] = true
+			}
+		}
+	}
+
+	headers := make([]string, 0, len(scalar))
+	for _, key := range []string{"id", "key", "name", "display_name", "title", "slug", "type", "status", "state", "model", "created", "created_at", "updated", "updated_at"} {
+		if scalar[key] {
+			headers = append(headers, key)
+			delete(scalar, key)
+		}
+	}
+
+	rest := make([]string, 0, len(scalar))
+	for key := range scalar {
+		rest = append(rest, key)
+	}
+	sort.Strings(rest)
+	return append(headers, rest...)
+}
+
+// fitColumns drops trailing columns that do not fit, always keeping the first.
+func fitColumns(headers []string, values [][]string, width int) ([]string, [][]string) {
+	total := 1
+	keep := 0
+	for i, header := range headers {
+		column := len([]rune(header))
+		for _, cells := range values {
+			if size := len([]rune(cells[i])); size > column {
+				column = size
+			}
+		}
+
+		total += column + 3 // tablewriter pads each cell and draws a separator.
+		if i > 0 && total > width {
+			break
+		}
+		keep = i + 1
+	}
+
+	if keep == len(headers) {
+		return headers, values
+	}
+	for i, cells := range values {
+		values[i] = cells[:keep]
+	}
+	return headers[:keep], values
+}
+
+func terminalWidth() int {
+	if width, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && width > 0 {
+		return width
+	}
+	return defaultTableWidth
+}
+
+func truncateCell(value string) string {
+	value = strings.ReplaceAll(value, "\n", " ")
+	runes := []rune(value)
+	if len(runes) <= maxCellWidth {
+		return value
+	}
+	return string(runes[:maxCellWidth-1]) + "…"
 }
 
 func tableRows(data interface{}, requestedColumns []string) ([]map[string]interface{}, string, map[string]interface{}, bool) {
@@ -308,15 +399,31 @@ func tableRows(data interface{}, requestedColumns []string) ([]map[string]interf
 		return nil, "", nil, false
 	}
 
-	// Prefer conventional collection keys so an unrelated nested array does
-	// not accidentally turn an ordinary object response into a table.
+	// Conventional keys first, so a stray nested array is not mistaken for one.
 	keys := []string{"items", "data", "results", "records", "entries", "servers"}
 	for _, key := range keys {
-		if result, valid := objectRowsValue(object[key], len(requestedColumns) > 0); valid {
-			if len(result) > 0 || len(requestedColumns) > 0 {
-				return result, key, object, true
-			}
+		if result, valid := objectRowsValue(object[key], true); valid {
+			return result, key, object, true
 		}
+	}
+
+	// Otherwise accept a wrapper named after the resource, such as `schedules`,
+	// as long as there is exactly one array of objects to choose from.
+	found := ""
+	var rows []map[string]interface{}
+	for key, value := range object {
+		result, valid := objectRowsValue(value, false)
+		if !valid {
+			continue
+		}
+		if found != "" {
+			// Ambiguous: leave it to the serialized output.
+			return nil, "", nil, false
+		}
+		found, rows = key, result
+	}
+	if found != "" {
+		return rows, found, object, true
 	}
 	return nil, "", nil, false
 }
