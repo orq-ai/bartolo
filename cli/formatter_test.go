@@ -225,3 +225,27 @@ func TestFitColumnsDropsTrailingColumns(t *testing.T) {
 	assert.Equal(t, []string{"id", "name"}, headers)
 	assert.Equal(t, [][]string{{"one", "first"}}, values)
 }
+
+func TestDefaultFormatterSkipsListTypeDiscriminator(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", "json")
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	originalRoot := Root
+	Root = nil
+	t.Cleanup(func() { Root = originalRoot })
+
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true).FormatList(map[string]interface{}{
+		"object":   "list",
+		"has_more": true,
+		"data":     []interface{}{map[string]interface{}{"id": "one"}},
+	})
+	assert.NoError(t, err)
+	assert.NotContains(t, out.String(), "object: list")
+	assert.Contains(t, out.String(), "has_more: true")
+}

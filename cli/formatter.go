@@ -259,9 +259,10 @@ func renderTable(data interface{}, requestedColumns []string) (bool, error) {
 	if label != "" {
 		keys := make([]string, 0, len(metadata))
 		for key, value := range metadata {
-			if _, isRows := objectRowsValue(value, true); !isRows {
-				keys = append(keys, key)
+			if _, isRows := objectRowsValue(value, true); isRows || isTypeDiscriminator(key, value) {
+				continue
 			}
+			keys = append(keys, key)
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
@@ -458,6 +459,16 @@ func objectRowsFromMaps(values []map[string]interface{}, allowEmpty bool) ([]map
 		return nil, false
 	}
 	return values, true
+}
+
+// isTypeDiscriminator reports whether an envelope field only restates that the
+// response is a collection, such as Stripe-style `"object": "list"`.
+func isTypeDiscriminator(key string, value interface{}) bool {
+	switch key {
+	case "object", "kind", "type":
+		return value == "list" || value == "collection"
+	}
+	return false
 }
 
 func tableValue(value interface{}) (string, error) {
