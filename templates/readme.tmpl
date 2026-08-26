@@ -128,7 +128,9 @@ Bartolo keeps generated and user-owned code separate:
 
 ## Output Conventions
 
+- Collection commands render object results as readable tables when run in an interactive terminal. The generated schema can set the default columns with `x-cli-list-fields`; otherwise the columns are inferred from the response and trimmed to fit the terminal. Use `--jmespath` for a one-off projection and `--json` for the complete response.
 - Prefer `--json` when you want machine-readable output.
+- Piping a response also keeps the serialized output stable for scripts and agents.
 - Use `--help` on any command group or command to inspect flags and required args.
 - Use `help-input` when a command accepts a request body from stdin or CLI shorthand.
 - Use `server list`, `server use`, and `server set` to manage generated server defaults.

@@ -154,6 +154,101 @@ paths:
 	if op.Use != "list" {
 		t.Fatalf("expected grouped operation use %q, got %q", "list", op.Use)
 	}
+	if !op.IsList {
+		t.Fatal("collection GET operation should use list formatting")
+	}
+}
+
+func TestProcessAPIReadsListFieldsExtension(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: List fields API
+  version: "1"
+paths:
+  /files:
+    get:
+      operationId: listFiles
+      x-cli-list-fields:
+        - name
+        - id
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    name:
+                      type: string
+`)
+
+	api := ProcessAPI("example", doc)
+	var op *Operation
+	if len(api.Operations) > 0 {
+		op = api.Operations[0]
+	} else if len(api.Groups) > 0 && len(api.Groups[0].Operations) > 0 {
+		op = api.Groups[0].Operations[0]
+	}
+	if op == nil {
+		t.Fatal("expected generated list operation")
+	}
+	if got := strings.Join(op.ListFields, ","); got != "name,id" {
+		t.Fatalf("unexpected list fields %q", got)
+	}
+	if !op.IsList {
+		t.Fatal("collection GET operation with list fields should use list formatting")
+	}
+}
+
+func TestProcessAPIRecognizesNestedCollectionResponse(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Nested collection API
+  version: "1"
+paths:
+  /folders/{folder_id}/files:
+    get:
+      operationId: listFolderFiles
+      parameters:
+        - name: folder_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+`)
+
+	api := ProcessAPI("example", doc)
+	var op *Operation
+	if len(api.Operations) > 0 {
+		op = api.Operations[0]
+	} else if len(api.Groups) > 0 && len(api.Groups[0].Operations) > 0 {
+		op = api.Groups[0].Operations[0]
+	}
+	if op == nil {
+		t.Fatal("expected generated nested collection operation")
+	}
+	if !op.IsList {
+		t.Fatal("nested collection GET operation should use list formatting")
+	}
 }
 
 func TestInferGroupedLeafNameNormalizesCommonPatterns(t *testing.T) {
@@ -953,5 +1048,95 @@ paths:
 	// cannot collapse the URL into a collection-level DELETE/GET.
 	if !strings.Contains(rendered, `== ""`) {
 		t.Fatal("generated client must reject empty path parameters")
+	}
+}
+
+func TestProcessAPIRecognizesResourceNamedCollectionWrapper(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Wrapper API
+  version: "1"
+paths:
+  /agents/{agent_key}/schedules:
+    get:
+      operationId: listSchedules
+      parameters:
+        - name: agent_key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schedules:
+                    type: array
+                    items:
+                      type: object
+`)
+
+	api := ProcessAPI("example", doc)
+	var op *Operation
+	if len(api.Operations) > 0 {
+		op = api.Operations[0]
+	} else if len(api.Groups) > 0 && len(api.Groups[0].Operations) > 0 {
+		op = api.Groups[0].Operations[0]
+	}
+	if op == nil {
+		t.Fatal("expected generated operation")
+	}
+	if !op.IsList {
+		t.Fatal("collection wrapped in a resource-named key should use list formatting")
+	}
+}
+
+func TestProcessAPIDeduplicatesGoNames(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Duplicate operation id API
+  version: "1"
+paths:
+  /evaluators/invoke:
+    post:
+      operationId: InvokeEval
+      responses:
+        "200":
+          description: ok
+  /evals/invoke:
+    post:
+      operationId: InvokeEval
+      responses:
+        "200":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+	seen := map[string]bool{}
+	count := 0
+	for _, op := range api.Operations {
+		if seen[op.GoName] {
+			t.Fatalf("duplicate Go name %q", op.GoName)
+		}
+		seen[op.GoName] = true
+		count++
+	}
+	for _, group := range api.Groups {
+		for _, op := range group.Operations {
+			if seen[op.GoName] {
+				t.Fatalf("duplicate Go name %q", op.GoName)
+			}
+			seen[op.GoName] = true
+			count++
+		}
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 operations, got %d", count)
 	}
 }

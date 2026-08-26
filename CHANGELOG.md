@@ -4,10 +4,33 @@ All notable changes to Bartolo will be documented in this file.
 
 The project was restarted on 2026-04-09 as a new public release stream under the Bartolo name.
 
-## Unreleased
+## 2026-08-26 (v0.4.8)
 
+- Bumped Bartolo to v0.4.8.
 - `auth list-profiles` no longer prints stored credentials. Any profile field whose name looks like a credential is now shown with its first and last four characters around a fixed-width `********` middle (`sk-o********mnop`), so keys no longer leak into terminal scrollback, CI logs, screen recordings and support transcripts. Which fields count is decided by the same predicate that decides whether `auth setup` prompts for a field without echo.
 - `auth list-profiles` now goes through the response formatter instead of writing a table straight to stdout, so `--json` and `-o yaml` return the profile list in the requested format like every other command.
+- Added interactive tables for generated collection commands. Use the
+  operation-level `x-cli-list-fields` extension to choose and order the
+  default columns; `--json`, explicit output formats, and piped output remain
+  machine-readable.
+
+  Without `x-cli-list-fields` the columns are picked from the response:
+  nested objects and arrays are skipped because serializing them into a cell
+  makes the table unreadable, cells are truncated, recognizable identifiers
+  (`id`, `name`, `status`, ...) come first, and the remaining columns are
+  dropped from the right until the table fits the terminal. An empty
+  collection prints `No results.` instead of the raw envelope.
+
+  Envelope fields print as a single line below the table, showing `<shown> of
+  <total>` when the response carries a total. Paging bookkeeping (`limit`,
+  `offset`, cursors) and type discriminators such as `"object": "list"` are
+  left to `--json`.
+
+  Collections wrapped in a key named after the resource (`domains`,
+  `schedules`, `values`) are recognized as well as the conventional `data` and
+  `items` envelopes, as long as the response has exactly one array of objects.
+- Fixed a name collision that made a generated CLI fail to compile when two
+  operations in a spec share an `operationId`.
 
 ## 2026-08-26 (v0.4.7)
 

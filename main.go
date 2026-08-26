@@ -31,7 +31,7 @@ import (
 var templateFS embed.FS
 
 const projectConfigFilename = ".bartolo.json"
-const bartoloVersion = "0.4.7"
+const bartoloVersion = "0.4.8"
 
 // OpenAPI Extensions
 const (
@@ -40,6 +40,7 @@ const (
 	ExtGroup       = "x-cli-group"
 	ExtIgnore      = "x-cli-ignore"
 	ExtHidden      = "x-cli-hidden"
+	ExtListFields  = "x-cli-list-fields"
 	ExtName        = "x-cli-name"
 	ExtWaiters     = "x-cli-waiters"
 )
@@ -79,6 +80,8 @@ type Operation struct {
 	BodyFields     []*BodyField
 	Hidden         bool
 	NeedsResponse  bool
+	IsList         bool
+	ListFields     []string
 	Waiters        []*WaiterParams
 	Group          *CommandGroup
 	CommandPath    string
@@ -252,6 +255,7 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 
 	// Convenience map for operation ID -> operation
 	operationMap := make(map[string]*Operation)
+	usedGoNames := make(map[string]bool)
 	tagDefs := make(map[string]*openapi3.Tag)
 	groupMap := make(map[string]*CommandGroup)
 	groupOrder := make([]string, 0)
@@ -282,7 +286,14 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 			mustDecodeExt(item.Extensions[ExtHidden], &pathHidden)
 		}
 
-		for method, operation := range item.Operations() {
+		methods := make([]string, 0, len(item.Operations()))
+		for method := range item.Operations() {
+			methods = append(methods, method)
+		}
+		sort.Strings(methods)
+
+		for _, method := range methods {
+			operation := item.Operations()[method]
 			if operation.Extensions[ExtIgnore] != nil {
 				// Ignore this operation.
 				continue
@@ -305,6 +316,11 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 			if operation.Extensions[ExtAliases] != nil {
 				// We need to decode the extension value into our string slice.
 				mustDecodeExt(operation.Extensions[ExtAliases], &aliases)
+			}
+
+			var listFields []string
+			if operation.Extensions[ExtListFields] != nil {
+				mustDecodeExt(operation.Extensions[ExtListFields], &listFields)
 			}
 
 			params := getParams(item, method)
@@ -439,9 +455,16 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				}
 			}
 
+			// Two operations can share an operationId.
+			goName := toGoName(name, true)
+			for suffix := 2; usedGoNames[goName]; suffix++ {
+				goName = toGoName(name, true) + strconv.Itoa(suffix)
+			}
+			usedGoNames[goName] = true
+
 			o := &Operation{
 				HandlerName:    commandPath,
-				GoName:         toGoName(name, true),
+				GoName:         goName,
 				Use:            use,
 				Aliases:        aliases,
 				Short:          short,
@@ -458,6 +481,8 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				BodyExample:    reqInfo.exampleBody,
 				BodyFields:     bodyFields,
 				Hidden:         hidden,
+				IsList:         strings.EqualFold(method, "get") && (isCollectionPath(path) || isCollectionResponse(operation) || len(listFields) > 0),
+				ListFields:     listFields,
 				Group:          group,
 				CommandPath:    commandPath,
 				LeafName:       leafName,
@@ -1003,6 +1028,49 @@ func isActionSegment(segment string) bool {
 	default:
 		return false
 	}
+}
+
+func isCollectionPath(rawPath string) bool {
+	for _, segment := range strings.Split(strings.Trim(rawPath, "/"), "/") {
+		if strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") {
+			return false
+		}
+	}
+	return true
+}
+
+func isCollectionResponse(operation *openapi3.Operation) bool {
+	for code, response := range operation.Responses.Map() {
+		status, err := strconv.Atoi(code)
+		if err != nil || status < 200 || status >= 300 || response == nil || response.Value == nil {
+			continue
+		}
+
+		for _, content := range response.Value.Content {
+			if content == nil {
+				continue
+			}
+			if _, ok := content.Example.([]interface{}); ok {
+				return true
+			}
+			if content.Schema == nil || content.Schema.Value == nil {
+				continue
+			}
+
+			schema := content.Schema.Value
+			if schema.Items != nil {
+				return true
+			}
+			// Any array property counts: wrappers are named after the resource
+			// as often as they are called `data` or `items`.
+			for _, property := range schema.Properties {
+				if property != nil && property.Value != nil && property.Value.Items != nil {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func isVersionToken(segment string) bool {

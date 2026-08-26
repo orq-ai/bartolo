@@ -84,8 +84,27 @@ Bartolo will synthesize a decent CLI from a plain schema, but it gets significan
 | `x-cli-group` | Force an operation into a higher-level noun. |
 | `x-cli-hidden` | Hide a path or operation from normal help. |
 | `x-cli-ignore` | Exclude a path, operation, or parameter entirely. |
+| `x-cli-list-fields` | Set the default columns for an interactive collection response. |
 | `x-cli-name` | Override a generated CLI name for an API, operation, or parameter. |
 | `x-cli-waiters` | Add polling-based waiter commands and follow-up flags. |
+
+For example, a collection operation can define the default interactive
+columns while leaving the complete response available through `--json` or a
+pipe:
+
+```yaml
+paths:
+  /widgets:
+    get:
+      x-cli-list-fields:
+        - id
+        - name
+        - status
+```
+
+Without the extension the columns are inferred from the response: nested
+objects and arrays are skipped, long values are truncated, and columns that do
+not fit the terminal are dropped from the right.
 
 Bartolo also groups operations automatically from:
 
