@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -66,17 +67,62 @@ func UserAgentMiddleware() {
 // prints an API key, bearer token, or cookie. Matches on the lowercased name, so
 // `Authorization`/`AUTHORIZATION` and any header hinting at a secret are covered.
 func redactHeaderValue(key, val string) string {
-	k := strings.ToLower(key)
-	switch k {
-	case "authorization", "proxy-authorization", "cookie", "set-cookie":
-		return "[REDACTED]"
-	}
-	// One definition of sensitive for the package: the auth handler is consumer-supplied,
-	// so the header names it sends (X-Orq-Key, X-Session-Key) cannot be enumerated here.
-	if looksSensitiveKey(k) {
+	if looksSensitiveHeader(key) {
 		return "[REDACTED]"
 	}
 	return val
+}
+
+// looksSensitiveHeader reports whether a header or query-parameter name carries a
+// credential. It extends looksSensitiveKey — the package's one definition of a secret
+// profile field — with names that only appear on the wire: the auth handler is
+// consumer-supplied, so `X-Auth`, `X-Signature` and friends cannot be enumerated here.
+func looksSensitiveHeader(name string) bool {
+	n := strings.ToLower(name)
+	switch n {
+	case "authorization", "proxy-authorization", "cookie", "set-cookie":
+		return true
+	}
+	if looksSensitiveKey(n) {
+		return true
+	}
+	for _, hint := range []string{"auth", "credential", "signature", "session"} {
+		if strings.Contains(n, hint) {
+			return true
+		}
+	}
+	return false
+}
+
+// redactURL renders a URL with the value of every sensitive query parameter masked.
+// An API key can be carried in the query rather than a header (apikey.LocationQuery),
+// and `--verbose` prints the request line, so the URL needs the same treatment the
+// headers get.
+func redactURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	if u.RawQuery == "" {
+		return u.String()
+	}
+
+	query := u.Query()
+	redacted := false
+	for name := range query {
+		if !looksSensitiveHeader(name) {
+			continue
+		}
+		query.Set(name, "[REDACTED]")
+		redacted = true
+	}
+	if !redacted {
+		return u.String()
+	}
+
+	// Copy: the request is logged before it goes out, and must go out intact.
+	clean := *u
+	clean.RawQuery = query.Encode()
+	return clean.String()
 }
 
 // LogMiddleware adds verbose log info to HTTP requests.
@@ -115,7 +161,7 @@ func LogMiddleware(useColor bool) {
 				body = "\n" + body
 			}
 
-			http := fmt.Sprintf("%s %s %s\n%s%s", ctx.Request.Method, ctx.Request.URL, ctx.Request.Proto, headers, body)
+			http := fmt.Sprintf("%s %s %s\n%s%s", ctx.Request.Method, redactURL(ctx.Request.URL), ctx.Request.Proto, headers, body)
 
 			if useColor {
 				sb := strings.Builder{}

@@ -44,6 +44,20 @@ var reservedFlagNames = map[string]string{
 	"force": "destructive-command flag",
 }
 
+// AddForceFlag registers the `--force` flag that ConfirmDestructive reads on a
+// destructive command. The `-f` shorthand is only attached when it is free: a
+// consumer can claim it first through cli.AddFlag or a global, and pflag panics on a
+// duplicate shorthand — before `--help` gets a chance to render.
+func AddForceFlag(cmd *cobra.Command) {
+	const description = "Skip the confirmation prompt for this destructive command"
+
+	short := "f"
+	if cmd.Flags().ShorthandLookup(short) != nil || cmd.Root().PersistentFlags().ShorthandLookup(short) != nil {
+		short = ""
+	}
+	cmd.Flags().BoolP("force", short, false, description)
+}
+
 // ReservedFlagName reports whether name is reserved for a global or built-in
 // flag, along with a short description of what claims it. Generated CLIs use
 // this to rename colliding parameter and body-field flags.

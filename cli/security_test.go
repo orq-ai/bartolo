@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,13 +11,14 @@ import (
 	"github.com/spf13/viper"
 )
 
-// ConfirmDestructive stops an accidental delete, so pin its three paths.
+// ConfirmDestructive stops an accidental delete, so pin its four paths.
 func TestConfirmDestructive(t *testing.T) {
 	cmdWithForce := func(force bool) *cobra.Command {
-		c := &cobra.Command{}
+		c := &cobra.Command{Use: "widgets"}
 		c.Flags().Bool("force", force, "")
 		return c
 	}
+	args := []string{"abc"}
 	origInteractive, origAsk, origExit := isInteractive, askConfirm, exitFunc
 	t.Cleanup(func() { isInteractive, askConfirm, exitFunc = origInteractive, origAsk, origExit })
 
@@ -24,7 +26,7 @@ func TestConfirmDestructive(t *testing.T) {
 	isInteractive = func() bool { return true }
 	askConfirm = func(string) (bool, error) { t.Fatal("prompt ran despite --force"); return false, nil }
 	exitFunc = func(code int) { t.Fatalf("exitFunc(%d) called on the --force path", code) }
-	if !ConfirmDestructive(cmdWithForce(true), "delete widget") {
+	if !ConfirmDestructive(cmdWithForce(true), args) {
 		t.Error("--force should proceed")
 	}
 
@@ -33,23 +35,43 @@ func TestConfirmDestructive(t *testing.T) {
 	askConfirm = func(string) (bool, error) { t.Fatal("prompt ran in a non-interactive shell"); return false, nil }
 	exitCode := -1
 	exitFunc = func(code int) { exitCode = code }
-	if ConfirmDestructive(cmdWithForce(false), "delete widget") {
+	if ConfirmDestructive(cmdWithForce(false), args) {
 		t.Error("non-interactive without --force should refuse")
 	}
 	if exitCode != ExitUsage {
 		t.Errorf("non-interactive refusal exit code = %d, want %d (ExitUsage)", exitCode, ExitUsage)
 	}
 
-	// Interactive No, and a failing prompt: both refuse without touching the exit code.
-	exitFunc = func(code int) { t.Fatalf("exitFunc(%d) called on an interactive path", code) }
+	// Interactive No: refuses, and leaves the exit code alone — cancelling is not an error.
+	exitFunc = func(code int) { t.Fatalf("exitFunc(%d) called after an interactive No", code) }
 	isInteractive = func() bool { return true }
 	askConfirm = func(string) (bool, error) { return false, nil }
-	if ConfirmDestructive(cmdWithForce(false), "delete widget") {
+	if ConfirmDestructive(cmdWithForce(false), args) {
 		t.Error("answering No should refuse")
 	}
+
+	// A broken prompt is a runtime failure, not a decline: refusing with exit 0 would
+	// read as a completed delete.
+	exitCode = -1
+	exitFunc = func(code int) { exitCode = code }
 	askConfirm = func(string) (bool, error) { return false, errors.New("prompt failed") }
-	if ConfirmDestructive(cmdWithForce(false), "delete widget") {
+	if ConfirmDestructive(cmdWithForce(false), args) {
 		t.Error("a prompt error should refuse")
+	}
+	if exitCode != ExitError {
+		t.Errorf("prompt-error exit code = %d, want %d (ExitError)", exitCode, ExitError)
+	}
+
+	// The prompt names the target, not the command's usage template.
+	isInteractive = func() bool { return true }
+	exitFunc = func(code int) { t.Fatalf("exitFunc(%d) called on the prompt path", code) }
+	prompted := ""
+	askConfirm = func(action string) (bool, error) { prompted = action; return true, nil }
+	if !ConfirmDestructive(cmdWithForce(false), args) {
+		t.Error("answering Yes should proceed")
+	}
+	if prompted != "widgets abc" {
+		t.Errorf("prompt named %q, want %q (command path plus arguments)", prompted, "widgets abc")
 	}
 }
 
@@ -115,6 +137,13 @@ func TestRedactHeaderValue(t *testing.T) {
 		"X-Password":      "hunter2",
 		"X-Session-Key":   "sess-123",
 		"X-Access-Key-Id": "AKIA123",
+		// Wire-only names looksSensitiveKey does not cover: a consumer-supplied auth
+		// handler can send any of these.
+		"X-Auth":           "sk-123",
+		"X-Credential":     "c-123",
+		"X-Signature":      "sig-123",
+		"X-Session":        "sess-123",
+		"WWW-Authenticate": "Bearer realm=\"api\"",
 	}
 	for key, val := range redacted {
 		if got := redactHeaderValue(key, val); got != "[REDACTED]" {
@@ -134,6 +163,33 @@ func TestRedactHeaderValue(t *testing.T) {
 	}
 }
 
+// An API key can travel in the query string (apikey.LocationQuery), and `--verbose`
+// prints the request line, so the URL needs the same redaction the headers get.
+func TestRedactURL(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"https://api.example.com/widgets", "https://api.example.com/widgets"},
+		{"https://api.example.com/widgets?limit=10", "https://api.example.com/widgets?limit=10"},
+		{"https://api.example.com/widgets?api_key=sk-123", "https://api.example.com/widgets?api_key=%5BREDACTED%5D"},
+		{"https://api.example.com/widgets?limit=10&token=t-1", "https://api.example.com/widgets?limit=10&token=%5BREDACTED%5D"},
+		{"https://api.example.com/widgets?signature=abc", "https://api.example.com/widgets?signature=%5BREDACTED%5D"},
+	} {
+		u, err := url.Parse(tc.in)
+		if err != nil {
+			t.Fatalf("parse %q: %v", tc.in, err)
+		}
+		if got := redactURL(u); got != tc.want {
+			t.Errorf("redactURL(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+		if u.String() != tc.in {
+			t.Errorf("redactURL mutated the request URL: %q, want %q", u.String(), tc.in)
+		}
+	}
+
+	if got := redactURL(nil); got != "" {
+		t.Errorf("redactURL(nil) = %q, want empty", got)
+	}
+}
+
 // A Delete command registers --force itself, so a spec field named "force" must be
 // renamed rather than register the flag twice and panic pflag at startup.
 func TestForceFlagNameIsReserved(t *testing.T) {
@@ -142,6 +198,44 @@ func TestForceFlagNameIsReserved(t *testing.T) {
 	}
 	if got := ResolveGeneratedFlagName("body", "force"); got != "body-force" {
 		t.Errorf("ResolveGeneratedFlagName(body, force) = %q, want body-force", got)
+	}
+}
+
+// A consumer can claim -f first (cli.AddFlag, or a global), and pflag panics on a
+// duplicate shorthand before --help even renders, so --force gives the shorthand up.
+func TestAddForceFlagYieldsTakenShorthand(t *testing.T) {
+	root := &cobra.Command{Use: "example"}
+
+	free := &cobra.Command{Use: "delete"}
+	root.AddCommand(free)
+	AddForceFlag(free)
+	if f := free.Flags().ShorthandLookup("f"); f == nil || f.Name != "force" {
+		t.Error("-f should bind to --force when it is free")
+	}
+
+	taken := &cobra.Command{Use: "delete"}
+	taken.Flags().BoolP("follow", "f", false, "")
+	root.AddCommand(taken)
+	AddForceFlag(taken)
+	if f := taken.Flags().ShorthandLookup("f"); f == nil || f.Name != "follow" {
+		t.Error("-f should stay with the flag that claimed it first")
+	}
+	if taken.Flags().Lookup("force") == nil {
+		t.Error("--force must still be registered when the shorthand is taken")
+	}
+
+	global := &cobra.Command{Use: "example"}
+	global.PersistentFlags().BoolP("filter", "f", false, "")
+	child := &cobra.Command{Use: "delete"}
+	global.AddCommand(child)
+	AddForceFlag(child)
+	if child.Flags().ShorthandLookup("f") != nil {
+		t.Error("-f should be left to the global that claimed it")
+	}
+	// The panic this guards against happens when cobra merges the persistent flags in.
+	child.InheritedFlags()
+	if child.Flags().Lookup("force") == nil {
+		t.Error("--force must still be registered when a global holds the shorthand")
 	}
 }
 
@@ -159,8 +253,10 @@ func TestWriteCredentialsIsNotWorldReadable(t *testing.T) {
 		if err != nil {
 			t.Fatalf("stat: %v", err)
 		}
-		if perm := info.Mode().Perm(); perm != 0o600 {
-			t.Errorf("credentials file mode = %o, want 600 (group/other must not read a key file)", perm)
+		// perm&0o077, not perm == 0o600: on Windows Mode().Perm() reports 0666 for any
+		// writable file, and os.Chmod there only toggles the read-only attribute.
+		if perm := info.Mode().Perm(); perm&0o077 != 0 {
+			t.Errorf("credentials file mode = %o, want no group/other bits on a key file", perm)
 		}
 	}
 
@@ -181,8 +277,8 @@ func TestWriteCredentialsIsNotWorldReadable(t *testing.T) {
 		if err != nil {
 			t.Fatalf("stat: %v (the file must be pre-created before the key is written)", err)
 		}
-		if perm := info.Mode().Perm(); perm != 0o600 {
-			t.Errorf("credentials file mode at creation = %o, want 600", perm)
+		if perm := info.Mode().Perm(); perm&0o077 != 0 {
+			t.Errorf("credentials file mode at creation = %o, want no group/other bits", perm)
 		}
 	})
 
@@ -195,10 +291,11 @@ func TestWriteCredentialsIsNotWorldReadable(t *testing.T) {
 	})
 }
 
-// Both add-profile paths resolve each key's value here; cover all three branches.
+// Both add-profile paths resolve each key's value here; cover all four branches.
 func TestResolveProfileValue(t *testing.T) {
-	orig := promptProfileValue
-	t.Cleanup(func() { promptProfileValue = orig })
+	origPrompt, origInteractive := promptProfileValue, isInteractive
+	t.Cleanup(func() { promptProfileValue, isInteractive = origPrompt, origInteractive })
+	isInteractive = func() bool { return true }
 
 	// Positional value present: used verbatim, and the prompt never runs.
 	promptProfileValue = func(string) (string, error) {
@@ -215,10 +312,20 @@ func TestResolveProfileValue(t *testing.T) {
 		t.Errorf("prompted: got (%q, %v), want (typed-secret, true)", v, ok)
 	}
 
-	// No positional value, prompt fails (no TTY): ok is false, so the caller exits usage.
+	// No positional value, prompt fails: ok is false, so the caller exits usage.
 	promptProfileValue = func(string) (string, error) { return "", errors.New("no terminal") }
 	if v, ok := resolveProfileValue("api_key", "api-key", []string{"prod"}, 0); ok || v != "" {
 		t.Errorf("prompt failure: got (%q, %v), want (empty, false)", v, ok)
+	}
+
+	// No terminal: the prompt is never reached, so an idle CI pipe cannot block on it.
+	isInteractive = func() bool { return false }
+	promptProfileValue = func(string) (string, error) {
+		t.Fatal("prompt ran without a terminal; an open pipe would block here")
+		return "", nil
+	}
+	if v, ok := resolveProfileValue("api_key", "api-key", []string{"prod"}, 0); ok || v != "" {
+		t.Errorf("no terminal: got (%q, %v), want (empty, false)", v, ok)
 	}
 }
 

@@ -430,9 +430,15 @@ func resolveProfileValue(key, label string, args []string, i int) (value string,
 		// Backward-compat: positional value (discouraged for secrets).
 		return args[i+1], true
 	}
+	// Check for a terminal before prompting rather than after: survey reads stdin
+	// directly, so an open-but-idle pipe (a CI runner, `subprocess.Popen`) blocks
+	// forever instead of returning the error this used to rely on.
+	if !isInteractive() {
+		fmt.Fprintf(os.Stderr, "no %s provided; pass it as an argument or run in an interactive terminal\n", label)
+		return "", false
+	}
 	v, err := promptProfileValue(key)
 	if err != nil {
-		// No positional value and no usable TTY: a missing argument is a usage error.
 		fmt.Fprintf(os.Stderr, "no %s provided; pass it as an argument or run in an interactive terminal\n", label)
 		return "", false
 	}
@@ -514,10 +520,15 @@ var exitFunc = os.Exit
 // ConfirmDestructive gates a destructive command behind a confirmation: --force
 // proceeds, a non-interactive shell without it refuses and exits ExitUsage so a script
 // cannot read a skipped delete as a success, otherwise it prompts and defaults to No.
-func ConfirmDestructive(cmd *cobra.Command, action string) bool {
+// args are the command's positional arguments, so the prompt names the target being
+// deleted rather than the command's usage template.
+func ConfirmDestructive(cmd *cobra.Command, args []string) bool {
 	if force, err := cmd.Flags().GetBool("force"); err == nil && force {
 		return true
 	}
+
+	action := strings.TrimSpace(cmd.CommandPath() + " " + strings.Join(args, " "))
+
 	if !isInteractive() {
 		fmt.Fprintf(os.Stderr, "Refusing to run %q without --force in a non-interactive shell.\n", action)
 		exitFunc(ExitUsage)
@@ -525,7 +536,11 @@ func ConfirmDestructive(cmd *cobra.Command, action string) bool {
 	}
 	proceed, err := askConfirm(action)
 	if err != nil {
-		return false
+		// The prompt itself broke. Refusing silently would exit 0 and read as a
+		// completed delete, so fail like any other runtime error.
+		fmt.Fprintf(os.Stderr, "Could not read a confirmation for %q: %v\n", action, err)
+		exitFunc(ExitError)
+		return false // unreachable: exitFunc does not return
 	}
 	return proceed
 }

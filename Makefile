@@ -45,6 +45,10 @@ smoke:
 		test -x "$$SMOKE_DIR/scripts/build.sh"; \
 		test -x "$$SMOKE_DIR/scripts/install-local.sh"; \
 		test -x "$$SMOKE_DIR/bin/example"; \
-		test -x "$$INSTALL_DIR/example"
+		test -x "$$INSTALL_DIR/example"; \
+		printf '==> smoke: generated delete refuses without --force\n'; \
+		set +e; "$$SMOKE_DIR/bin/example" widgets delete abc </dev/null >/dev/null 2>&1; \
+		code=$$?; set -e; \
+		test "$$code" -eq 2 || { echo "delete without --force exited $$code, want 2"; exit 1; }
 
 verify: smoke test
