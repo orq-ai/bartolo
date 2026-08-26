@@ -781,7 +781,7 @@ func TestLoadOpenAPIDocumentSupportsNumericExclusiveBounds(t *testing.T) {
 	if schema.Min == nil || *schema.Min != 0 {
 		t.Fatalf("expected minimum 0 after normalization, got %#v", schema.Min)
 	}
-	if !schema.ExclusiveMin {
+	if !schema.ExclusiveMin.IsTrue() {
 		t.Fatal("expected exclusiveMinimum=true after normalization")
 	}
 }

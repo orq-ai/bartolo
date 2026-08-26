@@ -10,6 +10,7 @@ import (
 
 	survey "github.com/AlecAivazis/survey/v2"
 	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -89,8 +90,8 @@ func initAuth() {
 
 					listKeys := handler.ProfileKeys()
 
-					table := tablewriter.NewWriter(os.Stdout)
-					table.SetHeader(append([]string{fmt.Sprintf("%s Profile Name", typeName)}, listKeys...))
+					table := tablewriter.NewTable(os.Stdout, tablewriter.WithHeaderAutoFormat(tw.Off))
+					table.Header(append([]string{fmt.Sprintf("%s Profile Name", typeName)}, listKeys...))
 
 					for name, p := range profiles {
 						profile := p.(map[string]interface{})
@@ -513,8 +514,8 @@ func InitCredentials(options ...func(*CredentialsFile) error) {
 		Run: func(cmd *cobra.Command, args []string) {
 			profiles := Creds.GetStringMap("profiles")
 			if profiles != nil {
-				table := tablewriter.NewWriter(os.Stdout)
-				table.SetHeader(append([]string{"Profile Name"}, Creds.listKeys...))
+				table := tablewriter.NewTable(os.Stdout, tablewriter.WithHeaderAutoFormat(tw.Off))
+				table.Header(append([]string{"Profile Name"}, Creds.listKeys...))
 
 				for name, profile := range profiles {
 					row := []string{name}
