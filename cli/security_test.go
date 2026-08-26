@@ -179,6 +179,26 @@ func TestWriteCredentialsIsNotWorldReadable(t *testing.T) {
 		write(t, filepath.Join(t.TempDir(), "credentials.json"))
 	})
 
+	// Creation-time mode, not just the end state: with WriteConfigAs failing (viper
+	// rejects an unknown extension before it writes), the only thing that set the mode
+	// is the pre-create. Weakening that mode to 0644 fails here even though the end-state
+	// cases still pass (RES-1134 review).
+	t.Run("mode_at_creation", func(t *testing.T) {
+		filename := filepath.Join(t.TempDir(), "credentials.unsupported")
+		Creds = &CredentialsFile{viper.New(), []string{}, []string{}}
+		Creds.Set("profiles.test.type", "apikey")
+		if err := writeCredentials(filename); err == nil {
+			t.Fatal("writeCredentials: want an error from WriteConfigAs on an unknown extension")
+		}
+		info, err := os.Stat(filename)
+		if err != nil {
+			t.Fatalf("stat: %v (the file must be pre-created before the key is written)", err)
+		}
+		if perm := info.Mode().Perm(); perm != 0o600 {
+			t.Errorf("credentials file mode at creation = %o, want 600", perm)
+		}
+	})
+
 	t.Run("existing_0644_narrowed", func(t *testing.T) {
 		filename := filepath.Join(t.TempDir(), "credentials.json")
 		if err := os.WriteFile(filename, []byte("{}"), 0o644); err != nil {
