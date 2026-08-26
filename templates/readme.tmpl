@@ -60,6 +60,21 @@ Profile setup:
 ```sh
 {{ .AuthDoc.ProfileCommand }}
 ```
+
+Bind a profile to its own API base URL with `--server` when adding it, so you do
+not have to repeat the flag on every call:
+
+```sh
+{{ .CommandName }} auth add-profile --server https://api.staging.example.com staging <api-key>
+```
+
+`{{ .CommandName }} auth setup` takes the same flag.
+
+Resolution order, most specific first: an explicit `--server` flag or
+`<PREFIX>_SERVER` environment variable (same prefix as the variables above),
+then the profile's bound server, then a persisted `server set` default, then
+the generated server default. `auth list-profiles` shows the server bound to
+each profile, and `doctor` shows the one the active profile resolves to.
 {{- else }}
 
 {{ .AuthDoc.Summary }}
