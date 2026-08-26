@@ -81,7 +81,7 @@ jobs:
       - name: Decide the release
         id: version
         env:
-          FORCE_LEVEL: ${{ inputs.force_level }}
+          FORCE_LEVEL: ${{ github.event.inputs.force_level }}
         run: |
           set -euo pipefail
           current="$(svu current)"
@@ -115,7 +115,7 @@ jobs:
       - name: Refuse an unconfirmed major
         # A major bump needs a human. Fail rather than skip: a blocked release
         # must not look like a docs-only push.
-        if: steps.version.outputs.major_bump == 'true' && inputs.force_level != 'major'
+        if: steps.version.outputs.major_bump == 'true' && github.event.inputs.force_level != 'major'
         run: |
           echo "::error::Refusing an automatic major bump ${{ steps.version.outputs.current }} -> ${{ steps.version.outputs.next }}. Re-run this workflow via workflow_dispatch with force_level=major to confirm, or force_level=minor/patch to ship the breaking changes at a lower level."
           exit 1
