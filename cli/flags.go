@@ -39,9 +39,8 @@ var reservedFlagNames = map[string]string{
 	"from-file": "request-body flag",
 	"stdin":     "request-body flag",
 
-	// Registered directly on destructive (Delete) commands by the generated
-	// command templates. A spec parameter or body field named `force` would
-	// otherwise register `--force` twice and make pflag panic at startup.
+	// Registered on Delete commands by the templates; a colliding spec field would
+	// register `--force` twice and panic pflag at startup.
 	"force": "destructive-command flag",
 }
 

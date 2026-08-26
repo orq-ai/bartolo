@@ -71,11 +71,8 @@ func redactHeaderValue(key, val string) string {
 	case "authorization", "proxy-authorization", "cookie", "set-cookie":
 		return "[REDACTED]"
 	}
-	// Reuse looksSensitiveKey (key/token/secret/password) rather than a narrower list
-	// here: the auth handler is consumer-supplied, so bartolo cannot enumerate header
-	// names, and a header the credentials layer treats as secret must not be the one
-	// `--verbose` prints (e.g. X-Orq-Key, X-Session-Key). One definition of sensitive
-	// for the whole package (RES-1134 review).
+	// One definition of sensitive for the package: the auth handler is consumer-supplied,
+	// so the header names it sends (X-Orq-Key, X-Session-Key) cannot be enumerated here.
 	if looksSensitiveKey(k) {
 		return "[REDACTED]"
 	}

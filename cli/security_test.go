@@ -10,9 +10,7 @@ import (
 	"github.com/spf13/viper"
 )
 
-// ConfirmDestructive is what stops an accidental delete, so pin its three paths:
-// --force proceeds, a non-interactive shell without --force refuses, and a No at
-// the prompt refuses (RES-1134).
+// ConfirmDestructive stops an accidental delete, so pin its three paths.
 func TestConfirmDestructive(t *testing.T) {
 	cmdWithForce := func(force bool) *cobra.Command {
 		c := &cobra.Command{}
@@ -30,8 +28,7 @@ func TestConfirmDestructive(t *testing.T) {
 		t.Error("--force should proceed")
 	}
 
-	// Non-interactive without --force: refuses without prompting, and exits non-zero
-	// so a scripted caller can tell the skipped delete from a successful one.
+	// Non-interactive without --force: refuses without prompting, and exits non-zero.
 	isInteractive = func() bool { return false }
 	askConfirm = func(string) (bool, error) { t.Fatal("prompt ran in a non-interactive shell"); return false, nil }
 	exitCode := -1
@@ -43,8 +40,7 @@ func TestConfirmDestructive(t *testing.T) {
 		t.Errorf("non-interactive refusal exit code = %d, want %d (ExitUsage)", exitCode, ExitUsage)
 	}
 
-	// Interactive, answered No: refuses. Also refuses if the prompt errors. Neither
-	// path touches the exit code — a human cancelling is not an error.
+	// Interactive No, and a failing prompt: both refuse without touching the exit code.
 	exitFunc = func(code int) { t.Fatalf("exitFunc(%d) called on an interactive path", code) }
 	isInteractive = func() bool { return true }
 	askConfirm = func(string) (bool, error) { return false, nil }
@@ -57,10 +53,8 @@ func TestConfirmDestructive(t *testing.T) {
 	}
 }
 
-// hasInteractiveInput must reject all three non-terminal shapes, not just the pipe:
-// /dev/null (docker without -i, systemd, cron), a pipe (CI), and a closed stdin. The
-// old os.ModeCharDevice test passed for /dev/null because it is a character device,
-// which is exactly the shape most non-interactive runs use (RES-1134).
+// All three non-terminal shapes must read as non-interactive; the old os.ModeCharDevice
+// test passed for /dev/null, the shape docker without -i, systemd and cron hand over.
 func TestHasInteractiveInputRejectsNonTerminals(t *testing.T) {
 	orig := os.Stdin
 	t.Cleanup(func() { os.Stdin = orig })
@@ -103,7 +97,7 @@ func TestHasInteractiveInputRejectsNonTerminals(t *testing.T) {
 	})
 }
 
-// A verbose HTTP log must never print an API key, bearer token, or cookie (RES-1134).
+// A verbose HTTP log must never print an API key, bearer token, or cookie.
 func TestRedactHeaderValue(t *testing.T) {
 	secret := "Bearer sk-live-supersecret"
 	redacted := map[string]string{
@@ -115,9 +109,7 @@ func TestRedactHeaderValue(t *testing.T) {
 		"X-Api-Key":           "sk-123",
 		"X-My-Token":          "t-123",
 		"X-Client-Secret":     "s-123",
-		// Headers the credentials layer (looksSensitiveKey) already treats as secret
-		// but the narrower list used to print. A generated CLI against our own API
-		// sends X-Orq-Key (RES-1134 review).
+		// Headers looksSensitiveKey covers but the narrower switch above does not.
 		"X-Orq-Key":       "sk-123",
 		"Private-Key":     "----",
 		"X-Password":      "hunter2",
@@ -142,9 +134,8 @@ func TestRedactHeaderValue(t *testing.T) {
 	}
 }
 
-// A generated Delete command registers --force itself, so a spec parameter or
-// body field named "force" must be renamed rather than register the flag twice
-// and panic pflag at startup (RES-1134).
+// A Delete command registers --force itself, so a spec field named "force" must be
+// renamed rather than register the flag twice and panic pflag at startup.
 func TestForceFlagNameIsReserved(t *testing.T) {
 	if _, reserved := ReservedFlagName("force"); !reserved {
 		t.Fatal("force must be reserved so a colliding spec field is renamed")
@@ -154,10 +145,8 @@ func TestForceFlagNameIsReserved(t *testing.T) {
 	}
 }
 
-// The credentials file holds long-lived API keys and must be 0600 (RES-1134). Two paths:
-// a new file must be 0600 from creation (no 0644 window), and a pre-existing 0644 file
-// must be narrowed. Because writeCredentials no longer chmods after WriteConfigAs, removing
-// the pre-create makes the new-file case fail here rather than pass silently.
+// The credentials file holds long-lived API keys: a new one must be 0600 from creation
+// (no 0644 window) and a pre-existing 0644 one must be narrowed.
 func TestWriteCredentialsIsNotWorldReadable(t *testing.T) {
 	write := func(t *testing.T, filename string) {
 		Creds = &CredentialsFile{viper.New(), []string{}, []string{}}
@@ -179,10 +168,8 @@ func TestWriteCredentialsIsNotWorldReadable(t *testing.T) {
 		write(t, filepath.Join(t.TempDir(), "credentials.json"))
 	})
 
-	// Creation-time mode, not just the end state: with WriteConfigAs failing (viper
-	// rejects an unknown extension before it writes), the only thing that set the mode
-	// is the pre-create. Weakening that mode to 0644 fails here even though the end-state
-	// cases still pass (RES-1134 review).
+	// Creation-time mode, not the end state: viper rejects the unknown extension before
+	// writing, so the pre-create is the only thing that can have set the mode.
 	t.Run("mode_at_creation", func(t *testing.T) {
 		filename := filepath.Join(t.TempDir(), "credentials.unsupported")
 		Creds = &CredentialsFile{viper.New(), []string{}, []string{}}
@@ -208,8 +195,7 @@ func TestWriteCredentialsIsNotWorldReadable(t *testing.T) {
 	})
 }
 
-// resolveProfileValue is what both add-profile paths use to get each key's value. The
-// promptProfileValue seam lets us test all three branches without a terminal (RES-1134).
+// Both add-profile paths resolve each key's value here; cover all three branches.
 func TestResolveProfileValue(t *testing.T) {
 	orig := promptProfileValue
 	t.Cleanup(func() { promptProfileValue = orig })
@@ -236,9 +222,8 @@ func TestResolveProfileValue(t *testing.T) {
 	}
 }
 
-// looksSensitiveKey decides whether add-profile hides the typed value. A secret must
-// never echo; a non-secret such as OAuth's client-id must stay visible so the user can
-// see what they typed (RES-1134 review).
+// looksSensitiveKey decides whether add-profile echoes the typed value: secrets must
+// not, a non-secret such as OAuth's client-id must.
 func TestLooksSensitiveKey(t *testing.T) {
 	for _, key := range []string{"api_key", "api-key", "client_secret", "access_token", "password", "X-Orq-Key"} {
 		if !looksSensitiveKey(key) {

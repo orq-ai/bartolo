@@ -18,18 +18,11 @@ import (
 	"gopkg.in/h2non/gentleman.v2/context"
 )
 
-// writeCredentials persists the credentials file and keeps it at 0600, so the
-// long-lived API keys it holds are never world-readable (viper.WriteConfigAs
-// would otherwise create it at the default 0644).
+// writeCredentials persists the credentials file at 0600, so the long-lived API keys
+// it holds are never world-readable (viper.WriteConfigAs would create it 0644).
 func writeCredentials(filename string) error {
-	// This OpenFile writes nothing: it exists only to put the mode in place BEFORE viper
-	// writes the key, so the secret is never on disk world-readable, even for a moment.
-	// viper.WriteConfigAs opens and truncates the file itself, and keeps the mode of an
-	// existing file. O_CREATE without O_TRUNC applies 0o600 only on creation and leaves an
-	// existing file alone, so there is no os.Stat gate whose error (EACCES, a network FS)
-	// could fall through to WriteConfigAs creating the file 0644, and no check-then-act
-	// race between two runs. The chmod narrows a file an older build already left 0644
-	// (RES-1134 review).
+	// Writes nothing: sets the mode before viper writes the key, so the secret is never
+	// world-readable even briefly. The chmod narrows a file an older build left 0644.
 	f, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
@@ -242,8 +235,8 @@ func UseAuth(typeName string, handler AuthHandler) {
 	// Set up the add-profile command.
 	keys := handler.ProfileKeys()
 
-	// Key values are OPTIONAL positional args: passing a secret on the command line
-	// leaks it into shell history and `ps`, so the secure default is to prompt for it.
+	// Key values are OPTIONAL: a secret passed on the command line leaks into shell
+	// history and `ps`, so the default is to prompt for it.
 	use := " [flags] <name>"
 	for _, name := range keys {
 		use += " [<" + strings.Replace(name, "_", "-", -1) + ">]"
@@ -389,31 +382,23 @@ func pickAuthHandler(preferredType string) (string, AuthHandler, error) {
 	return resolved, AuthHandlers[resolved], nil
 }
 
-// resolveProfileValue returns the value for one profile key on add-profile: the
-// positional argument when supplied, otherwise a prompt via the promptProfileValue
-// seam. ok is false only when there is no positional argument and the prompt failed
-// (no usable terminal), in which case the caller exits with a usage error. Extracted so
-// both add-profile paths share one definition and are testable without a real terminal
-// (RES-1134 review).
+// resolveProfileValue returns one profile key's value: the positional argument if given,
+// else a prompt. ok is false when there is neither, and the caller exits ExitUsage.
 func resolveProfileValue(key, label string, args []string, i int) (value string, ok bool) {
 	if i+1 < len(args) {
-		// Backward-compat: value supplied positionally (discouraged for secrets).
+		// Backward-compat: positional value (discouraged for secrets).
 		return args[i+1], true
 	}
 	v, err := promptProfileValue(key)
 	if err != nil {
-		// No positional value and no usable TTY (pipe, /dev/null, CI): a missing
-		// argument is a usage error. promptProfileValue only hides genuinely sensitive
-		// keys, so a client-id still echoes.
+		// No positional value and no usable TTY: a missing argument is a usage error.
 		fmt.Fprintf(os.Stderr, "no %s provided; pass it as an argument or run in an interactive terminal\n", label)
 		return "", false
 	}
 	return v, true
 }
 
-// promptProfileValue is a seam (a var, not a plain func) so the add-profile paths that
-// call it can be tested without a real terminal, the same pattern as isInteractive /
-// askConfirm above (RES-1134 review).
+// promptProfileValue is a var so tests can replace the prompt, like isInteractive below.
 var promptProfileValue = func(key string) (string, error) {
 	message := strings.ReplaceAll(key, "_", " ")
 	message = strings.Title(message)
@@ -461,18 +446,12 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 }
 
 func hasInteractiveInput() bool {
-	// term.IsTerminal, not os.ModeCharDevice: /dev/null is itself a character device,
-	// so the ModeCharDevice test returned true for exactly the non-interactive shapes
-	// this guard exists to catch — docker without -i, systemd units and cron all hand
-	// the process /dev/null on stdin — and let the confirmation prompt render to
-	// something that cannot answer. IsTerminal is true only for a real terminal
-	// (RES-1134 review).
+	// term.IsTerminal, not os.ModeCharDevice: /dev/null is a character device, so
+	// ModeCharDevice read as interactive under docker without -i, systemd and cron.
 	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
-// isInteractive and askConfirm are seams so ConfirmDestructive's three paths
-// (--force, non-interactive refusal, prompt answered No) can be tested without a
-// real terminal.
+// isInteractive and askConfirm are vars so ConfirmDestructive is testable without a TTY.
 var isInteractive = hasInteractiveInput
 
 var askConfirm = func(action string) (bool, error) {
@@ -484,18 +463,12 @@ var askConfirm = func(action string) (bool, error) {
 	return proceed, err
 }
 
-// exitFunc is a seam so the non-interactive-refusal exit can be tested without
-// ending the test process.
+// exitFunc is a var so the refusal exit can be tested without ending the test process.
 var exitFunc = os.Exit
 
-// ConfirmDestructive gates a destructive command (such as a delete) behind a
-// confirmation. It proceeds when the command's --force flag is set; in a
-// non-interactive shell without --force it refuses and exits ExitUsage (so a
-// scripted caller sees a non-zero status and can tell a skipped delete from a
-// successful one, rather than reading a delete that never happened as a success);
-// otherwise it prompts and defaults to No. An interactive No returns false and
-// leaves the exit code to the caller, since a human deliberately cancelling is not
-// an error (RES-1134 review).
+// ConfirmDestructive gates a destructive command behind a confirmation: --force
+// proceeds, a non-interactive shell without it refuses and exits ExitUsage so a script
+// cannot read a skipped delete as a success, otherwise it prompts and defaults to No.
 func ConfirmDestructive(cmd *cobra.Command, action string) bool {
 	if force, err := cmd.Flags().GetBool("force"); err == nil && force {
 		return true
@@ -503,7 +476,7 @@ func ConfirmDestructive(cmd *cobra.Command, action string) bool {
 	if !isInteractive() {
 		fmt.Fprintf(os.Stderr, "Refusing to run %q without --force in a non-interactive shell.\n", action)
 		exitFunc(ExitUsage)
-		return false // unreachable in production (exitFunc does not return); keeps the seam usable
+		return false // unreachable: exitFunc does not return
 	}
 	proceed, err := askConfirm(action)
 	if err != nil {
