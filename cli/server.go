@@ -31,7 +31,8 @@ func newServerListCommand() *cobra.Command {
 			servers := GetServers()
 			items := make([]map[string]interface{}, 0, len(servers))
 			currentURL := ResolveServer()
-			override := viper.GetString("server")
+			// Anything not from this list means an override is in play.
+			overridden := currentURL != SelectedServer()
 
 			for i, server := range servers {
 				items = append(items, map[string]interface{}{
@@ -39,12 +40,12 @@ func newServerListCommand() *cobra.Command {
 					"description": server["description"],
 					"url":         server["url"],
 					"selected":    server["url"] == currentURL,
-					"override":    override != "" && override == server["url"],
 				})
 			}
 
 			return Formatter.Format(map[string]interface{}{
 				"selected_server": currentURL,
+				"overridden":      overridden,
 				"servers":         items,
 			})
 		},
@@ -61,6 +62,8 @@ func newServerCurrentCommand() *cobra.Command {
 				"server":          ResolveServer(),
 				"server_index":    viper.GetInt("server-index"),
 				"server_override": viper.GetString("server"),
+				"server_default":  viper.GetString("server-default"),
+				"profile_server":  ProfileServer(),
 			})
 		},
 	}
@@ -78,8 +81,9 @@ func newServerUseCommand() *cobra.Command {
 			}
 
 			if err := saveJSONConfig(map[string]interface{}{
-				"server":       "",
-				"server-index": index,
+				"server":         nil,
+				"server-default": nil,
+				"server-index":   index,
 			}); err != nil {
 				return err
 			}
@@ -105,7 +109,8 @@ func newServerSetCommand() *cobra.Command {
 			}
 
 			if err := saveJSONConfig(map[string]interface{}{
-				"server": url,
+				"server":         nil,
+				"server-default": url,
 			}); err != nil {
 				return err
 			}
@@ -126,7 +131,8 @@ func newServerClearCommand() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := saveJSONConfig(map[string]interface{}{
-				"server": "",
+				"server":         nil,
+				"server-default": nil,
 			}); err != nil {
 				return err
 			}

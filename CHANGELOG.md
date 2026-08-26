@@ -6,12 +6,30 @@ The project was restarted on 2026-04-09 as a new public release stream under the
 
 ## Unreleased
 
+- `auth list-profiles` no longer prints stored credentials. Any profile field whose name looks like a credential is now shown with its first and last four characters around a fixed-width `********` middle (`sk-o********mnop`), so keys no longer leak into terminal scrollback, CI logs, screen recordings and support transcripts. Which fields count is decided by the same predicate that decides whether `auth setup` prompts for a field without echo.
+- `auth list-profiles` now goes through the response formatter instead of writing a table straight to stdout, so `--json` and `-o yaml` return the profile list in the requested format like every other command.
+
 ### Security (RES-1134)
 
 - **`--verbose` no longer prints secrets.** The HTTP header logger redacted nothing, so `Authorization: Bearer <key>` and cookies were written to the debug log. Sensitive headers now render as `[REDACTED]`, matched case-insensitively.
 - **The credentials file is written `0600`.** `viper.WriteConfigAs` left the long-lived API-key file world-readable at `0644`; every write now chmods it to `0600`.
 - **API keys are no longer required as positional args.** `auth add-profile` prompts for each secret without echo instead of taking it on the command line (where it lands in shell history and `ps`). Positional values still work for backward compatibility but are discouraged.
 - **Destructive `delete` commands now confirm.** Generated delete commands prompt before running and gain a `-f, --force` flag; a non-interactive shell without `--force` refuses rather than deleting silently.
+
+## 2026-08-26 (v0.4.7)
+
+- Bumped Bartolo to v0.4.7.
+- Added per-profile servers. `auth add-profile --server <url>` and `auth setup --server <url>` bind an API base URL to the profile, and generated commands resolve it automatically, so staging, self-hosted and localhost profiles no longer need the flag on every call. Only an explicit `--server` on that invocation binds one — an environment variable or a persisted default is never silently baked into a new profile. Profiles saved without a server keep using the generated default.
+- Reordered server resolution so a more specific source always wins: an explicit `--server` flag, `<PREFIX>_SERVER` environment variable or programmatic override, then the active profile's bound server, then the `server set` default, then `server-index` and the generated default. Previously a `server set` from months earlier silently outranked every profile.
+
+  **The `server set` default moved from the `server` key in `config.json` to `server-default`**, because sharing `server` with the flag is what made the persisted value outrank everything: viper cannot tell the two apart once merged. A config file written by an older version still resolves, and is rewritten the next time `server set` or `server clear` runs.
+
+- **Breaking (runtime library)**: removed the deprecated `cli.InitCredentials`, `cli.ProfileKeys` and `cli.ProfileListKeys`. They were superseded by `cli.UseAuth`, which is what the generator has emitted for some time, and they carried a second copy of `add-profile` and `list-profiles` that never gained per-profile servers and still panicked on a profile missing a field. `cli.UseAuth` is the replacement.
+- **Breaking (runtime library)**: `cli.RunAuthSetup` and `cli.saveAuthProfile` take a server argument. `cli.ResolveServer()` now applies the full precedence above; the short-lived `ResolveServerFor` is gone, since `RegisterServers` already gives the runtime the OpenAPI defaults. Generated clients call `ResolveServer()`, which also bounds-checks `server-index` — the inlined lookup they used before panicked on an out-of-range index.
+- Added `cli.SelectedServer()`, the registered OpenAPI server at the configured index with no overrides applied.
+- Surfaced servers in `auth list-profiles` (a column per profile) and in `doctor` (`config.profile_server`, `config.server_default`). `list-profiles` no longer panics on a profile that is missing a column.
+
+  **Regenerate to pick up per-profile servers in API commands.** Generated client code is written into the consuming repo, so bumping the dependency alone updates the built-in `doctor`, `request` and `server` commands but leaves generated commands on the old inlined resolution — `doctor` would report the profile's server while requests still went to the default.
 
 ## 2026-08-13 (v0.4.6)
 

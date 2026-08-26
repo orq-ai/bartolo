@@ -149,7 +149,7 @@ func TestForceFlagNameIsReserved(t *testing.T) {
 // (no 0644 window) and a pre-existing 0644 one must be narrowed.
 func TestWriteCredentialsIsNotWorldReadable(t *testing.T) {
 	write := func(t *testing.T, filename string) {
-		Creds = &CredentialsFile{viper.New(), []string{}, []string{}}
+		Creds = &CredentialsFile{viper.New()}
 		Creds.SetConfigName("credentials")
 		Creds.Set("profiles.test.type", "apikey")
 		if err := writeCredentials(filename); err != nil {
@@ -172,7 +172,7 @@ func TestWriteCredentialsIsNotWorldReadable(t *testing.T) {
 	// writing, so the pre-create is the only thing that can have set the mode.
 	t.Run("mode_at_creation", func(t *testing.T) {
 		filename := filepath.Join(t.TempDir(), "credentials.unsupported")
-		Creds = &CredentialsFile{viper.New(), []string{}, []string{}}
+		Creds = &CredentialsFile{viper.New()}
 		Creds.Set("profiles.test.type", "apikey")
 		if err := writeCredentials(filename); err == nil {
 			t.Fatal("writeCredentials: want an error from WriteConfigAs on an unknown extension")

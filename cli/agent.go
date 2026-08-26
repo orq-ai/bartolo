@@ -41,13 +41,29 @@ func GetServers() []map[string]string {
 	return servers
 }
 
-// ResolveServer returns the active server URL from either the override flag or
-// the registered OpenAPI server list.
+// ResolveServer returns the active server URL, most specific source first:
+// `--server`, `<PREFIX>_SERVER` or viper.Set, the active profile's server, the
+// `server set` default (kept off the flag's key so viper cannot rank it as
+// explicit), then the selected OpenAPI server.
 func ResolveServer() string {
-	if override := viper.GetString("server"); override != "" {
+	if override := strings.TrimSpace(viper.GetString("server")); override != "" {
 		return override
 	}
 
+	if server := ProfileServer(); server != "" {
+		return server
+	}
+
+	if persisted := strings.TrimSpace(viper.GetString("server-default")); persisted != "" {
+		return persisted
+	}
+
+	return SelectedServer()
+}
+
+// SelectedServer returns the registered OpenAPI server at `server-index`,
+// ignoring overrides. An out-of-range index falls back to the first entry.
+func SelectedServer() string {
 	if len(registeredServers) == 0 {
 		return ""
 	}
@@ -58,6 +74,15 @@ func ResolveServer() string {
 	}
 
 	return registeredServers[index]["url"]
+}
+
+// ProfileServer returns the server bound to the active credentials profile.
+func ProfileServer() string {
+	if Creds == nil {
+		return ""
+	}
+
+	return strings.TrimSpace(GetProfile()["server"])
 }
 
 func initAgentCommands() {
@@ -105,6 +130,8 @@ func doctorStatus() map[string]interface{} {
 			"profile":         viper.GetString("profile"),
 			"server_index":    viper.GetInt("server-index"),
 			"server_override": viper.GetString("server"),
+			"profile_server":  ProfileServer(),
+			"server_default":  viper.GetString("server-default"),
 			"selected_server": ResolveServer(),
 		},
 		"servers": GetServers(),
@@ -121,7 +148,7 @@ func doctorStatus() map[string]interface{} {
 func runDoctorFixes(status map[string]interface{}) (bool, error) {
 	auth, _ := status["auth"].(map[string]interface{})
 	if configured, _ := auth["configured"].(bool); !configured {
-		if err := RunAuthSetup(viper.GetString("profile"), ""); err != nil {
+		if err := RunAuthSetup(viper.GetString("profile"), "", ""); err != nil {
 			return false, err
 		}
 		return true, nil
