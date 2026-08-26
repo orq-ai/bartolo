@@ -896,3 +896,62 @@ func TestReserveGeneratedFlagNamesResolvesParamBodyCollision(t *testing.T) {
 		t.Fatalf("unexpected rename record: %+v", renamed)
 	}
 }
+
+func TestGeneratedClientURLEscapesPathParamsAndRejectsEmpty(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Path Param API
+  version: "1"
+paths:
+  /v2/agents/{agent_id}:
+    get:
+      operationId: GetAgent
+      summary: Get agent
+      parameters:
+        - in: path
+          name: agent_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+    delete:
+      operationId: DeleteAgent
+      summary: Delete agent
+      parameters:
+        - in: path
+          name: agent_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+
+	if !api.Imports.Url {
+		t.Fatal("expected Imports.Url to be true when path params are present")
+	}
+
+	rendered := renderTemplate("templates/generated_client.tmpl", commandTemplateFuncs(), api)
+
+	if !strings.Contains(rendered, "neturl \"net/url\"") {
+		t.Fatal("generated client should import net/url when path params are present")
+	}
+
+	// Every path-param substitution must go through neturl.PathEscape so that
+	// crafted IDs like "../../v2/projects" cannot traverse to other endpoints.
+	if !strings.Contains(rendered, "neturl.PathEscape(") {
+		t.Fatal("generated client must URL-escape path parameters with neturl.PathEscape")
+	}
+
+	// Empty path-param values must be rejected client-side so a missing ID
+	// cannot collapse the URL into a collection-level DELETE/GET.
+	if !strings.Contains(rendered, `== ""`) {
+		t.Fatal("generated client must reject empty path parameters")
+	}
+}

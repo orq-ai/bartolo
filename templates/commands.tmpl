@@ -7,6 +7,7 @@ import (
 	{{ if .Imports.Fmt }}"fmt"{{ end }}
 	{{ if .Imports.Strings }}"strings"{{ end }}
 	{{ if .Imports.Time }}"time"{{ end }}
+	{{ if .Imports.Url }}neturl "net/url"{{ end }}
 
 	{{ if .AuthInit }}"github.com/orq-ai/bartolo/apikey"{{ end }}
 	"github.com/orq-ai/bartolo/cli"
@@ -75,7 +76,15 @@ func {{ $api }}Servers() []map[string]string {
 
 		{{- range $i, $param := .RequiredParams }}
 			{{- if eq $param.In "path" }}
-				url = strings.Replace(url, "{{`{`}}{{ $param.Name | escapeStr }}{{`}`}}", {{ $param.GoName }}, 1)
+				if {{ $param.GoName }} == "" {
+					return nil, nil, errors.Errorf("path parameter {{ $param.Name }} cannot be empty")
+				}
+			{{- end }}
+		{{- end }}
+
+		{{- range $i, $param := .RequiredParams }}
+			{{- if eq $param.In "path" }}
+				url = strings.Replace(url, "{{`{`}}{{ $param.Name | escapeStr }}{{`}`}}", neturl.PathEscape({{ $param.GoName }}), 1)
 			{{- end }}
 		{{- end }}
 
@@ -150,7 +159,15 @@ func {{ $api }}Servers() []map[string]string {
 
 			{{- range $i, $param := .RequiredParams }}
 				{{- if eq $param.In "path" }}
-					url = strings.Replace(url, "{{`{`}}{{ $param.Name | escapeStr }}{{`}`}}", {{ $param.GoName }}, 1)
+					if {{ $param.GoName }} == "" {
+						return nil, nil, errors.Errorf("path parameter {{ $param.Name }} cannot be empty")
+					}
+				{{- end }}
+			{{- end }}
+
+			{{- range $i, $param := .RequiredParams }}
+				{{- if eq $param.In "path" }}
+					url = strings.Replace(url, "{{`{`}}{{ $param.Name | escapeStr }}{{`}`}}", neturl.PathEscape({{ $param.GoName }}), 1)
 				{{- end }}
 			{{- end }}
 
