@@ -4,8 +4,9 @@ All notable changes to Bartolo will be documented in this file.
 
 The project was restarted on 2026-04-09 as a new public release stream under the Bartolo name.
 
-## Unreleased
+## 2026-08-26 (v0.4.7)
 
+- Bumped Bartolo to v0.4.7.
 - Added per-profile servers. `auth add-profile --server <url>` and `auth setup --server <url>` bind an API base URL to the profile, and generated commands resolve it automatically, so staging, self-hosted and localhost profiles no longer need the flag on every call. Only an explicit `--server` on that invocation binds one — an environment variable or a persisted default is never silently baked into a new profile. Profiles saved without a server keep using the generated default.
 - Reordered server resolution so a more specific source always wins: an explicit `--server` flag, `<PREFIX>_SERVER` environment variable or programmatic override, then the active profile's bound server, then the `server set` default, then `server-index` and the generated default. Previously a `server set` from months earlier silently outranked every profile.
 
