@@ -341,13 +341,9 @@ func newCompletionCommand() *cobra.Command {
 }
 
 // migrateLegacyServerConfig moves a `server set` override written by an older
-// version out of the `server` key and into `server-default`.
-//
-// The file has to be rewritten rather than read and remapped: `server` is also
-// the flag's key, so as long as the value sits there viper serves it from the
-// config file at the same precedence as an explicit `--server`, which is the
-// bug the separate key exists to fix. Any failure leaves the file alone and
-// keeps the old resolution.
+// version out of the `server` key and into `server-default`. Rewriting the file
+// is the point: left under `server`, viper serves the value at flag precedence.
+// Any failure leaves the file alone and keeps the old resolution.
 func migrateLegacyServerConfig(configDir string) {
 	filename := path.Join(configDir, "config.json")
 

@@ -88,9 +88,8 @@ func initAuth() {
 						continue
 					}
 
-					// `server` is optional and not part of ProfileKeys, so it is
-					// added explicitly. Copy first: appending into the slice a
-					// handler returned would write through to its backing array.
+					// Copy: appending into the handler's own slice would write
+					// through to its backing array.
 					listKeys := append([]string{}, handler.ProfileKeys()...)
 					if !containsString(listKeys, "server") {
 						listKeys = append(listKeys, "server")
@@ -272,9 +271,8 @@ func UseAuth(typeName string, handler AuthHandler) {
 	}
 }
 
-// explicitServer returns `--server` only when it was passed on this
-// invocation. An environment variable or a persisted default is a default, not
-// a binding, so neither is baked into a profile.
+// explicitServer returns `--server` only when passed on this invocation, so an
+// env var or persisted default is never baked into a profile.
 func explicitServer(cmd *cobra.Command) string {
 	flag := cmd.Flag("server")
 	if flag == nil || !flag.Changed {

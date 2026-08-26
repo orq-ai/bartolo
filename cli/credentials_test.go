@@ -52,8 +52,7 @@ func TestSaveAuthProfile(t *testing.T) {
 	}
 }
 
-// resetAuthState clears the package-level auth singletons so each test can call
-// Init/UseAuth against a fresh temporary HOME.
+// resetAuthState clears the auth singletons and points HOME at a temp dir.
 func resetAuthState(t *testing.T) string {
 	t.Helper()
 
@@ -78,8 +77,8 @@ func resetAuthState(t *testing.T) string {
 	return home
 }
 
-// serverFixture initialises a CLI with one registered spec server and an
-// `acme` profile. Pass profileServer "" for a profile with no bound server.
+// serverFixture builds a CLI with one spec server and an `acme` profile bound
+// to profileServer, or to nothing when it is empty.
 func serverFixture(t *testing.T, profileServer string) {
 	t.Helper()
 	resetAuthState(t)
@@ -182,8 +181,7 @@ func TestResolveServerPrefersProfileOverConfigServer(t *testing.T) {
 	}
 }
 
-// The OAuth session bridge in a custom layer sets the server programmatically.
-// viper treats Set as its highest-precedence source and so must this.
+// orq-cli's OAuth bridge sets the server via viper.Set, which viper ranks highest.
 func TestResolveServerPrefersViperSetOverProfile(t *testing.T) {
 	serverFixture(t, "https://orq.acme.internal")
 
@@ -194,8 +192,7 @@ func TestResolveServerPrefersViperSetOverProfile(t *testing.T) {
 	}
 }
 
-// A CLI built with no env prefix reads a bare SERVER, per viper's own
-// mergeWithEnvPrefix.
+// With no env prefix, viper's mergeWithEnvPrefix reads a bare SERVER.
 func TestResolveServerPrefersEnvOverProfileWithoutEnvPrefix(t *testing.T) {
 	t.Setenv("SERVER", "https://bare-env.example.com")
 	resetAuthState(t)
@@ -212,8 +209,7 @@ func TestResolveServerPrefersEnvOverProfileWithoutEnvPrefix(t *testing.T) {
 	}
 }
 
-// A config.json written before the persisted default moved to its own key
-// keeps working.
+// A config.json written before the persisted default moved keys still resolves.
 func TestResolveServerReadsLegacyConfigServerKey(t *testing.T) {
 	home := resetAuthState(t)
 	writeConfig(t, home, `{"server":"https://legacy.example.com"}`)
@@ -224,8 +220,7 @@ func TestResolveServerReadsLegacyConfigServerKey(t *testing.T) {
 	}
 }
 
-// The legacy key shares `server` with the flag, so migrating it out is what
-// stops a months-old `server set` from outranking the profile.
+// The legacy key shares `server` with the flag, so it must be migrated out.
 func TestResolveServerPrefersProfileOverLegacyConfigServerKey(t *testing.T) {
 	home := resetAuthState(t)
 	writeConfig(t, home, `{"server":"https://legacy.example.com"}`)

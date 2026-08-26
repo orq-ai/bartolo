@@ -41,15 +41,10 @@ func GetServers() []map[string]string {
 	return servers
 }
 
-// ResolveServer returns the active server URL. The most specific source wins:
-// an explicit `--server` flag, `<PREFIX>_SERVER` environment variable or
-// programmatic override, then the active profile's bound server, then the
-// `server set` default persisted in config.json, then the selected entry from
-// the OpenAPI server list.
-//
-// Explicit sources are exactly the ones viper ranks above a config file, which
-// is why the persisted default lives under its own key rather than sharing
-// `server` with the flag.
+// ResolveServer returns the active server URL, most specific source first:
+// `--server`, `<PREFIX>_SERVER` or viper.Set, the active profile's server, the
+// `server set` default (kept off the flag's key so viper cannot rank it as
+// explicit), then the selected OpenAPI server.
 func ResolveServer() string {
 	if override := strings.TrimSpace(viper.GetString("server")); override != "" {
 		return override
@@ -66,9 +61,8 @@ func ResolveServer() string {
 	return SelectedServer()
 }
 
-// SelectedServer returns the registered OpenAPI server at the configured
-// index, ignoring every override. An out-of-range index falls back to the
-// first entry.
+// SelectedServer returns the registered OpenAPI server at `server-index`,
+// ignoring overrides. An out-of-range index falls back to the first entry.
 func SelectedServer() string {
 	if len(registeredServers) == 0 {
 		return ""
@@ -82,8 +76,7 @@ func SelectedServer() string {
 	return registeredServers[index]["url"]
 }
 
-// ProfileServer returns the API base URL bound to the active credentials
-// profile. Profiles saved before this field existed return an empty string.
+// ProfileServer returns the server bound to the active credentials profile.
 func ProfileServer() string {
 	if Creds == nil {
 		return ""

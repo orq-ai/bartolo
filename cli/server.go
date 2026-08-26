@@ -31,8 +31,7 @@ func newServerListCommand() *cobra.Command {
 			servers := GetServers()
 			items := make([]map[string]interface{}, 0, len(servers))
 			currentURL := ResolveServer()
-			// The resolved URL only comes from this list when nothing outranks
-			// it, so anything else means an override is in play.
+			// Anything not from this list means an override is in play.
 			overridden := currentURL != SelectedServer()
 
 			for i, server := range servers {
