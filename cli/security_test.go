@@ -235,3 +235,19 @@ func TestResolveProfileValue(t *testing.T) {
 		t.Errorf("prompt failure: got (%q, %v), want (empty, false)", v, ok)
 	}
 }
+
+// looksSensitiveKey decides whether add-profile hides the typed value. A secret must
+// never echo; a non-secret such as OAuth's client-id must stay visible so the user can
+// see what they typed (RES-1134 review).
+func TestLooksSensitiveKey(t *testing.T) {
+	for _, key := range []string{"api_key", "api-key", "client_secret", "access_token", "password", "X-Orq-Key"} {
+		if !looksSensitiveKey(key) {
+			t.Errorf("looksSensitiveKey(%q) = false, want true (must not echo)", key)
+		}
+	}
+	for _, key := range []string{"client_id", "username", "region", "endpoint"} {
+		if looksSensitiveKey(key) {
+			t.Errorf("looksSensitiveKey(%q) = true, want false (should echo)", key)
+		}
+	}
+}
