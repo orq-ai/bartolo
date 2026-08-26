@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,7 +32,35 @@ import (
 var templateFS embed.FS
 
 const projectConfigFilename = ".bartolo.json"
-const bartoloVersion = "0.4.8"
+
+// bartoloVersion is the module version this binary was installed with, not a
+// constant anyone has to remember to bump. `go install ...@vX.Y.Z` records the
+// version in the build info, so the git tag is the single source of truth and
+// the reported version cannot drift away from it the way v0.4.4 did (tagged
+// v0.4.4, reported 0.4.3).
+var bartoloVersion = resolveVersion()
+
+// devel is what a binary built straight from a checkout reports: `go build` has
+// no module version to record, so there is no honest number to print.
+const devel = "devel"
+
+func resolveVersion() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return devel
+	}
+	return normalizeVersion(info.Main.Version)
+}
+
+// normalizeVersion turns a module version recorded in the build info into the
+// string bartolo reports. Go writes "(devel)" for a plain `go build`, and an
+// empty string when the binary was not built as a module at all.
+func normalizeVersion(raw string) string {
+	if raw == "" || raw == "(devel)" {
+		return devel
+	}
+	return strings.TrimPrefix(raw, "v")
+}
 
 // OpenAPI Extensions
 const (

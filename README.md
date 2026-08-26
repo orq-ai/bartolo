@@ -188,6 +188,29 @@ make verify
 - `make smoke` builds Bartolo, scaffolds a fresh temporary CLI, generates commands, and confirms the result builds.
 - `make verify` runs smoke plus the full Go test suite.
 
+## Releasing
+
+Releases are automatic. Merging to `main` derives the next version from the
+conventional-commit subjects since the last tag, pushes that tag, and publishes
+a GitHub Release. Merges are squashed, so the PR title is what counts, and CI
+rejects a title that is not a conventional commit:
+
+| Title prefix | Result |
+| --- | --- |
+| `feat:` | minor release |
+| `fix:`, `perf:`, `revert:` | patch release |
+| `!` after the type, or a `BREAKING CHANGE:` footer | major release, refused unless forced |
+| `docs:`, `chore:`, `ci:`, `refactor:`, `test:`, `style:`, `build:` | ships in the next release, triggers none |
+
+There is no version constant to bump. `bartolo version` reports the module
+version recorded in the binary's build info, so a binary installed with
+`go install github.com/orq-ai/bartolo@v0.4.7` reports `0.4.7` and one built from
+a checkout reports `devel`. The tag is the only source of truth.
+
+To cut a release that the commits do not warrant, or to confirm a major, run the
+`release` workflow manually with a `force_level`. Preview what a merge would
+produce with `go run ./cmd/next-version`.
+
 ## Positioning
 
 Bartolo is not trying to be a generic SDK generator. It is focused on one thing: turning an OpenAPI document into a CLI that feels intentional enough to publish for real users and structured enough to be driven by tools like Codex and Claude.

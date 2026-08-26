@@ -1,0 +1,103 @@
+name: release
+
+# Tag-driven release. On push to main, derive the next version from the
+# conventional-commit subjects since the last tag, push that tag, and publish a
+# GitHub Release. There is nothing to build or upload: bartolo ships through
+# `go install`, and the proxy serves whatever the tag points at.
+#
+# The tag is the only place a version is recorded — `bartolo version` reports
+# the module version from its build info — so nothing here can drift out of sync
+# with the code the way the hand-cut tags did (v0.4.4 shipped reporting 0.4.3).
+#
+# Only a tag is pushed, never a commit to main, so the plain GITHUB_TOKEN is
+# enough and main's protection stays untouched.
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      force_level:
+        description: "Force bump (major/minor/patch); blank = derive from commits. Required to release a major."
+        required: false
+        default: ""
+        type: choice
+        options: ["", "major", "minor", "patch"]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # push the tag + create the GitHub Release
+
+jobs:
+  release:
+    name: tag + release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history + tags for version derivation
+          persist-credentials: true # the tag push below reuses this credential
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Compute the next version
+        id: version
+        env:
+          FORCE_LEVEL: ${{ inputs.force_level }}
+        run: |
+          set -euo pipefail
+          current="$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)"
+          if [ -n "$FORCE_LEVEL" ]; then
+            next="$(go run ./cmd/next-version -force "$FORCE_LEVEL")"
+          else
+            next="$(go run ./cmd/next-version)"
+          fi
+          echo "current=$current next=$next force='${FORCE_LEVEL}'"
+
+          if [ "$next" = "none" ]; then
+            echo "Nothing since $current warrants a release."
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git rev-parse -q --verify "refs/tags/$next" >/dev/null; then
+            echo "$next already exists."
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # A major bump needs a human. Exit non-zero rather than quietly
+          # skipping: a blocked release must not look like a docs-only push.
+          cur_major="${current#v}"; cur_major="${cur_major%%.*}"
+          next_major="${next#v}"; next_major="${next_major%%.*}"
+          if [ "$next_major" -gt "$cur_major" ] && [ -z "$FORCE_LEVEL" ]; then
+            echo "::error::Refusing an automatic major bump $current -> $next. Re-run this workflow via workflow_dispatch with force_level=major to confirm, or force_level=minor/patch to ship the breaking changes at a lower level."
+            exit 1
+          fi
+
+          echo "released=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$next" >> "$GITHUB_OUTPUT"
+
+      - name: Push the tag
+        if: steps.version.outputs.released == 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
+
+      - name: Create the GitHub release
+        if: steps.version.outputs.released == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: gh release create "$TAG" --title "$TAG" --generate-notes --verify-tag

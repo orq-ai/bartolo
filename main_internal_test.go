@@ -1197,3 +1197,18 @@ paths:
 		t.Fatalf("expected path-inferred group to carry section, got %q", sections["ping"])
 	}
 }
+
+func TestNormalizeVersion(t *testing.T) {
+	cases := map[string]string{
+		"v0.4.7":      "0.4.7",
+		"v1.2.3-rc.1": "1.2.3-rc.1",
+		"0.4.7":       "0.4.7",
+		"(devel)":     devel,
+		"":            devel,
+	}
+	for raw, want := range cases {
+		if got := normalizeVersion(raw); got != want {
+			t.Errorf("normalizeVersion(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
