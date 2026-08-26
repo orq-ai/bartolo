@@ -21,6 +21,11 @@ The project was restarted on 2026-04-09 as a new public release stream under the
   dropped from the right until the table fits the terminal. An empty
   collection prints `No results.` instead of the raw envelope.
 
+  Envelope fields print as a single line below the table, showing `<shown> of
+  <total>` when the response carries a total. Paging bookkeeping (`limit`,
+  `offset`, cursors) and type discriminators such as `"object": "list"` are
+  left to `--json`.
+
   Collections wrapped in a key named after the resource (`domains`,
   `schedules`, `values`) are recognized as well as the conventional `data` and
   `items` envelopes, as long as the response has exactly one array of objects.

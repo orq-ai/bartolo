@@ -213,8 +213,7 @@ func TestDefaultFormatterReportsEmptyCollection(t *testing.T) {
 		"has_more": false,
 	})
 	assert.NoError(t, err)
-	assert.Contains(t, out.String(), "has_more: false")
-	assert.Contains(t, out.String(), "No results.")
+	assert.Equal(t, "No results.\n", out.String())
 }
 
 func TestFitColumnsDropsTrailingColumns(t *testing.T) {
@@ -226,7 +225,7 @@ func TestFitColumnsDropsTrailingColumns(t *testing.T) {
 	assert.Equal(t, [][]string{{"one", "first"}}, values)
 }
 
-func TestDefaultFormatterSkipsListTypeDiscriminator(t *testing.T) {
+func TestDefaultFormatterSummarizesEnvelopeInFooter(t *testing.T) {
 	viper.Reset()
 	viper.Set("output-format", "json")
 	viper.Set("jmespath", "")
@@ -246,6 +245,44 @@ func TestDefaultFormatterSkipsListTypeDiscriminator(t *testing.T) {
 		"data":     []interface{}{map[string]interface{}{"id": "one"}},
 	})
 	assert.NoError(t, err)
-	assert.NotContains(t, out.String(), "object: list")
-	assert.Contains(t, out.String(), "has_more: true")
+	assert.NotContains(t, out.String(), "object")
+	assert.Contains(t, out.String(), "1 shown, more available")
+}
+
+func TestDefaultFormatterFooterCountsAgainstTotal(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", "json")
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	originalRoot := Root
+	Root = nil
+	t.Cleanup(func() { Root = originalRoot })
+
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true).FormatList(map[string]interface{}{
+		"data":     []interface{}{map[string]interface{}{"id": "one"}},
+		"total":    float64(47),
+		"limit":    float64(1),
+		"offset":   float64(0),
+		"has_more": true,
+		"object":   "list",
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "1 of 47")
+	assert.NotContains(t, out.String(), "limit")
+	assert.NotContains(t, out.String(), "offset")
+}
+
+func TestTableFooterKeepsUnrecognizedEnvelopeFields(t *testing.T) {
+	footer, err := tableFooter(2, "evaluators", map[string]interface{}{
+		"enabled": true,
+		"id":      "pol_1",
+		"name":    "PII guard",
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, "enabled: true · id: pol_1 · name: PII guard", footer)
 }

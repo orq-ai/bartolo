@@ -256,27 +256,6 @@ func renderTable(data interface{}, requestedColumns []string) (bool, error) {
 		return false, nil
 	}
 
-	if label != "" {
-		keys := make([]string, 0, len(metadata))
-		for key, value := range metadata {
-			if _, isRows := objectRowsValue(value, true); isRows || isTypeDiscriminator(key, value) {
-				continue
-			}
-			keys = append(keys, key)
-		}
-		sort.Strings(keys)
-		for _, key := range keys {
-			value, err := tableValue(metadata[key])
-			if err != nil {
-				return false, err
-			}
-			fmt.Fprintf(Stdout, "%s: %s\n", key, value)
-		}
-		if len(keys) > 0 {
-			fmt.Fprintln(Stdout)
-		}
-	}
-
 	if len(rows) == 0 && len(headers) == 0 {
 		fmt.Fprintln(Stdout, "No results.")
 		return true, nil
@@ -313,7 +292,76 @@ func renderTable(data interface{}, requestedColumns []string) (bool, error) {
 	if err := table.Render(); err != nil {
 		return false, err
 	}
+
+	footer, err := tableFooter(len(rows), label, metadata)
+	if err != nil {
+		return false, err
+	}
+	if footer != "" {
+		fmt.Fprintln(Stdout, footer)
+	}
 	return true, nil
+}
+
+// tableFooter summarizes the envelope in one line below the table: how many
+// rows are shown out of how many exist, then whatever else the envelope holds.
+// Pagination plumbing is for scripts reading --json, not for a reader looking
+// at a table.
+func tableFooter(shown int, label string, metadata map[string]interface{}) (string, error) {
+	if label == "" {
+		return "", nil
+	}
+
+	parts := make([]string, 0, len(metadata))
+	if total, ok := metadataInt(metadata, "total", "total_count"); ok {
+		parts = append(parts, fmt.Sprintf("%d of %d", shown, total))
+	} else if more, ok := metadata["has_more"].(bool); ok && more {
+		parts = append(parts, fmt.Sprintf("%d shown, more available", shown))
+	}
+
+	keys := make([]string, 0, len(metadata))
+	for key, value := range metadata {
+		if _, isRows := objectRowsValue(value, true); isRows || isEnvelopePlumbing(key, value) {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value, err := tableValue(metadata[key])
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, fmt.Sprintf("%s: %s", key, truncateCell(value)))
+	}
+	return strings.Join(parts, " · "), nil
+}
+
+func metadataInt(metadata map[string]interface{}, keys ...string) (int, bool) {
+	for _, key := range keys {
+		switch value := metadata[key].(type) {
+		case float64:
+			return int(value), true
+		case int:
+			return value, true
+		}
+	}
+	return 0, false
+}
+
+// isEnvelopePlumbing reports whether an envelope field is paging bookkeeping or
+// only restates that the response is a collection, such as Stripe-style
+// `"object": "list"`.
+func isEnvelopePlumbing(key string, value interface{}) bool {
+	switch key {
+	case "object", "kind", "type":
+		return value == "list" || value == "collection"
+	case "has_more", "total", "total_count", "count", "limit", "offset", "page",
+		"per_page", "cursor", "next_cursor", "prev_cursor", "next", "previous",
+		"starting_after", "ending_before":
+		return true
+	}
+	return false
 }
 
 // autoColumns picks columns for a collection without x-cli-list-fields:
@@ -459,16 +507,6 @@ func objectRowsFromMaps(values []map[string]interface{}, allowEmpty bool) ([]map
 		return nil, false
 	}
 	return values, true
-}
-
-// isTypeDiscriminator reports whether an envelope field only restates that the
-// response is a collection, such as Stripe-style `"object": "list"`.
-func isTypeDiscriminator(key string, value interface{}) bool {
-	switch key {
-	case "object", "kind", "type":
-		return value == "list" || value == "collection"
-	}
-	return false
 }
 
 func tableValue(value interface{}) (string, error) {
