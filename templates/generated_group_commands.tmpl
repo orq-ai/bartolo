@@ -77,6 +77,9 @@ func register{{ $group.GoName }}Commands(root *cobra.Command) {
 			Hidden: {{ $group.Hidden }},
 		{{- end }}
 	}
+	{{- if $group.HelpSection }}
+	bartolocli.HelpSection(root, {{ $group.GoName }}Cmd, "{{ $group.HelpSection | escapeStr }}")
+	{{- end }}
 	root.AddCommand({{ $group.GoName }}Cmd)
 
 	{{ range $operation := .Operations }}

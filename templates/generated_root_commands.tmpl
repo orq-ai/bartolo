@@ -185,6 +185,9 @@ func registerRootCommands(root *cobra.Command) {
 					{{- end }}
 				},
 			}
+			{{- if .HelpSection }}
+			bartolocli.HelpSection(root, cmd, "{{ .HelpSection | escapeStr }}")
+			{{- end }}
 			root.AddCommand(cmd)
 
 			{{- if .CanHaveBody }}

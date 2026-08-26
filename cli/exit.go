@@ -51,6 +51,7 @@ func Execute() int {
 // contract below and lets cobra-level failures report success.
 func ExecuteContext(ctx context.Context) int {
 	rejectUnknownSubcommands(Root)
+	sweepIntoOtherHelpSection(Root)
 
 	// Cobra prints the usage block on failure with Println, which goes to
 	// stdout and corrupts piped output. Silence it and reprint it on stderr

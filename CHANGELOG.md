@@ -31,6 +31,7 @@ The project was restarted on 2026-04-09 as a new public release stream under the
   `items` envelopes, as long as the response has exactly one array of objects.
 - Fixed a name collision that made a generated CLI fail to compile when two
   operations in a spec share an `operationId`.
+- Added `x-cli-help-section`, which puts a top-level command under a titled `--help` section straight from the schema. Set it on a tag (or on a single operation, which wins) and the generated CLI calls `cli.HelpSection` before registering the command. Regenerating a spec with a new tag now lands the command in the right section instead of relying on a hand-maintained mapping in the consuming CLI. Once any command has a section, `cli.Execute` sweeps the rest into a trailing `Other` section, so cobra's `Additional Commands` block does not appear alongside named ones.
 
 ## 2026-08-26 (v0.4.7)
 

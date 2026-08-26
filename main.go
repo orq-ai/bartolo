@@ -42,6 +42,7 @@ const (
 	ExtHidden      = "x-cli-hidden"
 	ExtListFields  = "x-cli-list-fields"
 	ExtName        = "x-cli-name"
+	ExtHelpSection = "x-cli-help-section"
 	ExtWaiters     = "x-cli-waiters"
 )
 
@@ -84,6 +85,7 @@ type Operation struct {
 	ListFields     []string
 	Waiters        []*WaiterParams
 	Group          *CommandGroup
+	HelpSection    string
 	CommandPath    string
 	LeafName       string
 }
@@ -108,6 +110,7 @@ type CommandGroup struct {
 	Long        string
 	Aliases     []string
 	Hidden      bool
+	HelpSection string
 	Operations  []*Operation
 	Description string
 }
@@ -484,6 +487,7 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				IsList:         strings.EqualFold(method, "get") && (isCollectionPath(path) || isCollectionResponse(operation) || len(listFields) > 0),
 				ListFields:     listFields,
 				Group:          group,
+				HelpSection:    getPreferredStringExt(operation.Extensions, ExtHelpSection),
 				CommandPath:    commandPath,
 				LeafName:       leafName,
 			}
@@ -724,6 +728,7 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 	}
 
 	cliName := slug(groupName)
+	section := ""
 	short := displayNameFromSlug(cliName)
 	long := ""
 	var aliases []string
@@ -750,10 +755,15 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		if tagDef.Extensions[ExtHidden] != nil {
 			mustDecodeExt(tagDef.Extensions[ExtHidden], &hidden)
 		}
+		section = getPreferredStringExt(tagDef.Extensions, ExtHelpSection)
 	}
 
 	if override := getPreferredStringExt(operation.Extensions, ExtGroup); override != "" {
 		cliName = slug(override)
+	}
+
+	if override := getPreferredStringExt(operation.Extensions, ExtHelpSection); override != "" {
+		section = override
 	}
 
 	return &CommandGroup{
@@ -764,6 +774,7 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		Long:        escapeString(long),
 		Aliases:     aliases,
 		Hidden:      hidden,
+		HelpSection: section,
 		Description: long,
 	}
 }
