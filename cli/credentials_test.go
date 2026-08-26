@@ -1,7 +1,7 @@
 package cli
 
 import (
-	"bytes"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
+	"github.com/stretchr/testify/assert"
 )
 
 type stubAuthHandler struct{}
@@ -260,7 +261,7 @@ func TestAuthSetupBindsServer(t *testing.T) {
 func TestListProfilesRendersServerColumn(t *testing.T) {
 	serverFixture(t, "https://orq.acme.internal")
 
-	out := captureStdout(t, func() { execute("auth list-profiles") })
+	out := execute("auth list-profiles")
 
 	if !strings.Contains(out, "https://orq.acme.internal") {
 		t.Fatalf("expected profile server in table, got %q", out)
@@ -291,32 +292,53 @@ func TestResolveServerFallsBackWhenProfileHasNoServer(t *testing.T) {
 func TestListProfilesToleratesMissingServer(t *testing.T) {
 	serverFixture(t, "")
 
-	out := captureStdout(t, func() { execute("auth list-profiles") })
+	out := execute("auth list-profiles")
 
 	if !strings.Contains(out, "acme") {
 		t.Fatalf("expected profile row, got %q", out)
 	}
 }
 
-// captureStdout collects os.Stdout, which is where tablewriter renders.
-func captureStdout(t *testing.T, fn func()) string {
-	t.Helper()
-
-	read, write, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
+func TestMaskIfSecret(t *testing.T) {
+	for _, field := range []string{"api_key", "API-Key", "access_token", "client_secret", "password"} {
+		assert.Equal(t, "sk-o********mnop", maskIfSecret(field, "sk-orq-abcdefghijklmnop"), field)
 	}
 
-	original := os.Stdout
-	os.Stdout = write
-	defer func() { os.Stdout = original }()
+	// A short secret shows nothing at all, and the mask width never tracks the
+	// real length.
+	assert.Equal(t, "********", maskIfSecret("api_key", "sk-orq-abcd"))
 
-	fn()
-	write.Close()
+	// Multi-byte secrets are cut on rune boundaries, not bytes.
+	assert.Equal(t, "日本語で********密ですね", maskIfSecret("password", "日本語ですごく長い秘密ですね"))
 
-	var buf bytes.Buffer
-	if _, err := buf.ReadFrom(read); err != nil {
-		t.Fatal(err)
+	// Non-secret fields pass through untouched.
+	assert.Equal(t, "https://api.orq.ai", maskIfSecret("base_url", "https://api.orq.ai"))
+	assert.Equal(t, "prod", maskIfSecret("type", "prod"))
+}
+
+func TestListProfilesMasksSecretsAndHonorsJSON(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	const secret = "sk-orq-abcdefghijklmnop"
+	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{secret}, "https://acme.example.com"); err != nil {
+		t.Fatalf("saveAuthProfile: %v", err)
 	}
-	return buf.String()
+
+	viper.Set("output-format", "json")
+	out := execute("auth list-profiles --json")
+
+	assert.NotContains(t, out, secret)
+
+	var decoded struct {
+		Profiles []map[string]interface{} `json:"profiles"`
+	}
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, out)
+	}
+	assert.Len(t, decoded.Profiles, 1)
+	assert.Equal(t, "acme", decoded.Profiles[0]["name"])
+	assert.Equal(t, "sk-o********mnop", decoded.Profiles[0]["api_key"])
+	assert.Equal(t, "https://acme.example.com", decoded.Profiles[0]["server"])
 }

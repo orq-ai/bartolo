@@ -9,8 +9,6 @@ import (
 	"strings"
 
 	survey "github.com/AlecAivazis/survey/v2"
-	"github.com/olekukonko/tablewriter"
-	"github.com/olekukonko/tablewriter/tw"
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -69,53 +67,43 @@ func initAuth() {
 		Aliases: []string{"ls"},
 		Short:   "List available configured authentication profiles",
 		Args:    cobra.NoArgs,
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			profiles := Creds.GetStringMap("profiles")
+			if len(profiles) == 0 {
+				fmt.Printf("No profiles configured. Use `%s auth setup` to add one.\n", Root.CommandPath())
+				return nil
+			}
 
-			if profiles != nil {
-				// Use a map as a set to find the available auth type names.
-				types := make(map[string]bool)
-				for _, v := range profiles {
-					if typeName := v.(map[string]interface{})["type"]; typeName != nil {
-						types[typeName.(string)] = true
-					}
+			listed := make([]map[string]interface{}, 0, len(profiles))
+			for _, name := range sortedKeys(profiles) {
+				profile, ok := profiles[name].(map[string]interface{})
+				if !ok {
+					continue
 				}
 
-				// For each type name, draw a table with the relevant profile keys
-				for typeName := range types {
-					handler := AuthHandlers[typeName]
-					if handler == nil {
+				typeName, _ := profile["type"].(string)
+				entry := map[string]interface{}{"name": name, "type": typeName}
+
+				keys := []string{"server"}
+				if handler := AuthHandlers[typeName]; handler != nil {
+					keys = append(keys, handler.ProfileKeys()...)
+				} else {
+					keys = append(keys, sortedKeys(profile)...)
+				}
+
+				for _, key := range keys {
+					field := strings.Replace(key, "-", "_", -1)
+					if field == "type" {
 						continue
 					}
-
-					// Copy: appending into the handler's own slice would write
-					// through to its backing array.
-					listKeys := append([]string{}, handler.ProfileKeys()...)
-					if !containsString(listKeys, "server") {
-						listKeys = append(listKeys, "server")
+					if value, ok := profile[field]; ok {
+						entry[field] = maskIfSecret(field, value)
 					}
-
-					table := tablewriter.NewTable(os.Stdout, tablewriter.WithHeaderAutoFormat(tw.Off))
-					table.Header(append([]string{fmt.Sprintf("%s Profile Name", typeName)}, listKeys...))
-
-					for name, p := range profiles {
-						profile := p.(map[string]interface{})
-						if ptype := profile["type"]; ptype == nil || ptype.(string) != typeName {
-							continue
-						}
-
-						row := []string{name}
-						for _, key := range listKeys {
-							value, _ := profile[strings.Replace(key, "-", "_", -1)].(string)
-							row = append(row, value)
-						}
-						table.Append(row)
-					}
-					table.Render()
 				}
-			} else {
-				fmt.Printf("No profiles configured. Use `%s auth setup` to add one.\n", Root.CommandPath())
+				listed = append(listed, entry)
 			}
+
+			return Formatter.Format(map[string]interface{}{"profiles": listed})
 		},
 	})
 	authCommand.AddCommand(newAuthSetupCommand())
@@ -136,6 +124,38 @@ func initAuth() {
 
 		h.Next(ctx)
 	})
+}
+
+// sortedKeys returns a map's keys in a stable order.
+func sortedKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// maskIfSecret keeps a credential out of the output. Whether a field counts as
+// a credential is decided by looksSensitiveKey, the same predicate that decides
+// whether `auth setup` prompts for it without echo.
+func maskIfSecret(name string, value interface{}) interface{} {
+	if !looksSensitiveKey(name) {
+		return value
+	}
+
+	s, ok := value.(string)
+	if !ok || s == "" {
+		return value
+	}
+
+	runes := []rune(s)
+	// The middle is a fixed width rather than the real one, so the output does
+	// not disclose the secret's length either.
+	if len(runes) < 12 {
+		return "********"
+	}
+	return string(runes[:4]) + "********" + string(runes[len(runes)-4:])
 }
 
 func resolveAuthHandler(profile map[string]string) (string, AuthHandler) {
@@ -280,16 +300,6 @@ func explicitServer(cmd *cobra.Command) string {
 	}
 
 	return strings.TrimSpace(flag.Value.String())
-}
-
-func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-
-	return false
 }
 
 func newAuthSetupCommand() *cobra.Command {
