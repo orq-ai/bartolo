@@ -342,3 +342,23 @@ func TestListProfilesMasksSecretsAndHonorsJSON(t *testing.T) {
 	assert.Equal(t, "sk-o********mnop", decoded.Profiles[0]["api_key"])
 	assert.Equal(t, "https://acme.example.com", decoded.Profiles[0]["server"])
 }
+
+func TestAuthUseSetsActiveProfile(t *testing.T) {
+	serverFixture(t, "")
+	viper.Set("profile", "default")
+
+	execute("auth use acme")
+
+	assert.Equal(t, "acme", activeProfileName())
+	assert.Equal(t, "secret", GetProfile()["api_key"])
+
+	data, err := os.ReadFile(filepath.Join(viper.GetString("config-directory"), "config.json"))
+	assert.NoError(t, err)
+	assert.Contains(t, string(data), `"profile": "acme"`)
+}
+
+func TestAuthUseRejectsUnknownProfile(t *testing.T) {
+	serverFixture(t, "")
+
+	assert.Contains(t, execute("auth use nope"), `unknown profile "nope"`)
+}

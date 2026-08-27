@@ -67,6 +67,7 @@ Every generated CLI starts with a useful operator surface:
 
 - `doctor` shows config, auth source, and selected server.
 - `auth add-profile --server` and `auth setup --server` bind a profile to its own API base URL, so staging, self-hosted, and local profiles resolve without repeating the flag.
+- `auth use <name>` picks the active profile so `--profile` does not have to be repeated; an explicit `--profile` outranks the API key environment variables.
 - `request` provides a raw escape hatch for unmodeled endpoints.
 - `default-format` shows or persists the preferred default output format.
 - `--json`, `--output-format`, and `-j`/`--jmespath` make automation and projection straightforward.

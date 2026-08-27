@@ -90,14 +90,22 @@ func (h *Handler) AuthStatus(profile map[string]string) map[string]interface{} {
 }
 
 func (h *Handler) lookupKey(profile map[string]string) (string, string) {
+	key := strings.TrimSpace(profile[apiKey])
+
+	// An explicit `--profile` is a deliberate choice of account, so it outranks
+	// whatever key happens to be in the environment.
+	if key != "" && cli.ProfileExplicit() {
+		return h.applyPrefix(key), "profile"
+	}
+
 	for _, envVar := range h.EnvVars {
 		if value := strings.TrimSpace(os.Getenv(envVar)); value != "" {
 			return h.applyPrefix(value), "env"
 		}
 	}
 
-	if value := strings.TrimSpace(profile[apiKey]); value != "" {
-		return h.applyPrefix(value), "profile"
+	if key != "" {
+		return h.applyPrefix(key), "profile"
 	}
 
 	return "", "missing"

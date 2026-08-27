@@ -110,6 +110,7 @@ func initAuth() {
 				return nil
 			}
 
+			active := activeProfileName()
 			listed := make([]map[string]interface{}, 0, len(profiles))
 			for _, name := range sortedKeys(profiles) {
 				profile, ok := profiles[name].(map[string]interface{})
@@ -118,7 +119,7 @@ func initAuth() {
 				}
 
 				typeName, _ := profile["type"].(string)
-				entry := map[string]interface{}{"name": name, "type": typeName}
+				entry := map[string]interface{}{"name": name, "type": typeName, "active": name == active}
 
 				keys := []string{"server"}
 				if handler := AuthHandlers[typeName]; handler != nil {
@@ -140,6 +141,24 @@ func initAuth() {
 			}
 
 			return Formatter.Format(map[string]interface{}{"profiles": listed})
+		},
+	})
+	authCommand.AddCommand(&cobra.Command{
+		Use:     "use <name>",
+		Aliases: []string{"switch"},
+		Short:   "Set the active authentication profile",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := sanitizeProfileName(args[0])
+			if name == "" || !Creds.IsSet("profiles."+name) {
+				return fmt.Errorf("unknown profile %q", args[0])
+			}
+
+			if err := saveJSONConfig(map[string]interface{}{"profile": name}); err != nil {
+				return err
+			}
+
+			return Formatter.Format(map[string]interface{}{"active_profile": name, "persisted": true})
 		},
 	})
 	authCommand.AddCommand(newAuthSetupCommand())
@@ -648,7 +667,25 @@ var Creds *CredentialsFile
 
 // GetProfile returns the current profile's configuration.
 func GetProfile() map[string]string {
-	return Creds.GetStringMapString("profiles." + strings.Replace(viper.GetString("profile"), ".", "-", -1))
+	return Creds.GetStringMapString("profiles." + activeProfileName())
+}
+
+// activeProfileName is the profile selected by `--profile`, the persisted
+// `auth use` default, or "default".
+func activeProfileName() string {
+	return sanitizeProfileName(viper.GetString("profile"))
+}
+
+// ProfileExplicit reports whether `--profile` was passed on this invocation,
+// as opposed to coming from config or the built-in default. Auth handlers use
+// it to let an explicit profile outrank ambient environment credentials.
+func ProfileExplicit() bool {
+	if Root == nil {
+		return false
+	}
+
+	flag := Root.PersistentFlags().Lookup("profile")
+	return flag != nil && flag.Changed
 }
 
 // InitCredentialsFile sets up the creds file and `profile` global parameter.
