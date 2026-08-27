@@ -200,14 +200,30 @@ counts, and CI rejects a title that is not a conventional commit:
 | `feat:` | minor release |
 | `fix:` | patch release |
 | `!:` after the type, or a `BREAKING CHANGE:` line anywhere in the body | minor release while Bartolo is 0.x (see below) |
-| `perf:`, `docs:`, `chore:`, `ci:`, `refactor:`, `test:`, `style:`, `build:`, `revert:` | ships in the next release, triggers none |
+| a `(deps)` scope — `chore(deps):`, `build(deps):` — but not `ci(deps):` | patch release |
+| `docs:`, `chore:`, `ci:`, `refactor:`, `test:`, `style:`, `build:` | ships in the next release, triggers none |
+| anything else, including `perf:` and a bare `revert:` | **fails the release run** |
 
-The column is "contains", not "starts with", on purpose: svu matches `feat:` and
-`fix:` case-insensitively *anywhere* in the subject, not just as a prefix. So
-`Revert "fix: ..."` — GitHub's own revert-button subject — cuts a patch release,
-and a subject that quotes another commit inherits that commit's bump. `perf:` is
-release-neutral because svu recognises only `feat` and `fix`; title user-visible
-performance work `fix:` if it should ship.
+Three things about that table are worth knowing before you write a title.
+
+"Contains", not "starts with": svu matches `feat:` and `fix:` case-insensitively
+*anywhere* in the subject. So `Revert "fix: ..."` — GitHub's own revert-button
+subject — cuts a patch release, and a subject quoting another commit inherits
+that commit's bump.
+
+`(deps)` is special-cased by the release workflow, not by svu. Dependabot titles
+its PRs `chore(deps): ...`, which svu would treat as release-neutral, but every
+Go dependency is compiled into the binary `go install` serves — a patched
+dependency that never reaches a tag is the failure govulncheck exists to catch.
+So the workflow promotes a deps-scoped subject to a patch. `ci(deps):` is
+excluded, because a GitHub Actions bump changes nothing a consumer installs.
+
+The last row is the important one. Release-neutral has to mean *by intent*, not
+*by accident*: `perf:` and a bare `revert:` are well-formed conventional commits
+that ship user-visible change and bump nothing, which is exactly how a security
+fix ends up sitting on `main` untagged. So the release run fails on any subject
+whose type is not on the neutral list above. Title user-visible performance work
+`fix:`, and land a revert either as `fix:` or with a forced release.
 
 There is no version constant to bump. `bartolo version` reports the module
 version recorded in the binary's build info, so a binary installed with
@@ -229,10 +245,11 @@ whether everything is shipped or a month of maintenance is waiting. To ship
 those, or to cut a major, run the `release` workflow manually with a
 `force_level` — `svu major` overrides `v0: true`.
 
-What is *not* allowed to be invisible is a subject svu cannot parse. The release
-run fails when it releases nothing and finds a non-conventional subject since the
-last tag, because that commit is release-neutral by accident rather than by
-choice — the failure mode that left a security fix sitting untagged on `main`.
+A release run that finds `main` already ahead of the commit it was fired for —
+two PRs merged inside one CI cycle, so the older run finishes last — reports a
+notice and exits green. Nothing is lost: the run for the newer commit releases
+everything up to it, this commit included. A red release run always means a
+release that should have happened did not.
 
 Release notes are generated on the GitHub Release from the merged PRs.
 `CHANGELOG.md` is frozen at the last hand-written entry and covers only the

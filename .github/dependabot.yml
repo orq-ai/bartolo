@@ -4,20 +4,15 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    # The PR title must satisfy the conventional-commit check or the PR cannot
-    # be merged. "fix" so a dependency bump actually cuts a release: a patched
-    # dependency that never reaches a tag is the failure govulncheck exists to
-    # catch. Every Go dependency is compiled into the binary a consumer installs,
-    # so there is no subset of these bumps that a release could skip — and
-    # dependabot cannot vary the prefix per update type anyway. Version churn is
-    # capped instead by the group below: one grouped PR per week, so at most one
-    # release a week comes from dependency updates. Not necessarily a *patch*
-    # release: squash merges carry the PR body into the commit body, and svu
-    # reads `BREAKING CHANGE:` anywhere in a body, so a bump whose upstream
-    # release notes contain that phrase cuts a minor. `.svu.yml`'s `v0: true`
-    # is what keeps it from cutting a major.
+    # `chore(deps)`, the conventional type for a dependency bump. svu releases
+    # on feat/fix only, so on its own that would be release-neutral — the
+    # release workflow promotes any `(deps)`-scoped subject to a patch instead,
+    # because every Go dependency is compiled into the binary a consumer
+    # installs and a patched dependency that never reaches a tag is the failure
+    # govulncheck exists to catch. The type stays honest and the release still
+    # happens. Churn is capped by the group below: one grouped PR per week.
     commit-message:
-      prefix: "fix"
+      prefix: "chore"
       include: "scope"
     open-pull-requests-limit: 10
     labels:
@@ -32,7 +27,10 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
-    # Release-neutral: an action bump changes nothing a consumer installs.
+    # Release-neutral: an action bump changes nothing a consumer installs. `ci`
+    # is on the release workflow's release-neutral allow-list and is the one
+    # `(deps)` scope it does not promote to a patch, so these merge green
+    # without cutting a version.
     commit-message:
       prefix: "ci"
       include: "scope"
