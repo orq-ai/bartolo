@@ -74,7 +74,18 @@ Each secret is prompted for without echo. In CI or automation, use `--<key>-file
 (or `--<key>-file -` for stdin) to supply secrets without putting them on the command line.
 Positional arguments still work but print a warning for sensitive keys.
 
-Resolution order, most specific first: an explicit `--server` flag or
+Pick the profile every command uses, so `--profile` does not have to be repeated:
+
+```sh
+{{ .CommandName }} auth use staging
+```
+
+`auth list-profiles` marks the active one. A `--profile` passed on the command
+line outranks both that selection and the API key environment variables above,
+so `--profile staging` cannot end up sending a key from the environment; a
+profile selected by `auth use` still yields to those variables.
+
+Server resolution order, most specific first: an explicit `--server` flag or
 `<PREFIX>_SERVER` environment variable (same prefix as the variables above),
 then the profile's bound server, then a persisted `server set` default, then
 the generated server default. `auth list-profiles` shows the server bound to
@@ -138,6 +149,7 @@ Bartolo keeps generated and user-owned code separate:
 - Use `--help` on any command group or command to inspect flags and required args.
 - Use `help-input` when a command accepts a request body from stdin or CLI shorthand.
 - Use `server list`, `server use`, and `server set` to manage generated server defaults.
+- Use `auth list-profiles` and `auth use` to see and pick the active credentials profile.
 - `make build` writes the binary to `./bin/{{ .CommandName }}`.
 - `make install-local` installs the binary to `~/.local/bin/{{ .CommandName }}` by default.
 - `make completions` writes shell completion files into `./completions/`.

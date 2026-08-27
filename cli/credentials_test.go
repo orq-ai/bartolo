@@ -349,16 +349,39 @@ func TestAuthUseSetsActiveProfile(t *testing.T) {
 
 	execute("auth use acme")
 
-	assert.Equal(t, "acme", activeProfileName())
+	assert.Equal(t, "acme", ActiveProfileName())
 	assert.Equal(t, "secret", GetProfile()["api_key"])
 
 	data, err := os.ReadFile(filepath.Join(viper.GetString("config-directory"), "config.json"))
 	assert.NoError(t, err)
-	assert.Contains(t, string(data), `"profile": "acme"`)
+	assert.Contains(t, string(data), `"profile-default": "acme"`)
+}
+
+// `auth use` persists off the flag's viper key. Writing it to `profile` would
+// land on viper's override layer, which outranks a bound flag, so `--profile`
+// would stop working for the rest of the process.
+func TestExplicitProfileBeatsAuthUse(t *testing.T) {
+	serverFixture(t, "")
+	execute("auth use acme")
+
+	assert.NoError(t, Root.PersistentFlags().Set("profile", "other"))
+	assert.Equal(t, "other", ActiveProfileName())
 }
 
 func TestAuthUseRejectsUnknownProfile(t *testing.T) {
 	serverFixture(t, "")
+	viper.Set("profile", "default")
 
 	assert.Contains(t, execute("auth use nope"), `unknown profile "nope"`)
+	assert.Equal(t, "default", ActiveProfileName())
+	_, err := os.Stat(filepath.Join(viper.GetString("config-directory"), "config.json"))
+	assert.True(t, os.IsNotExist(err), "rejected profile must not write config.json")
+}
+
+func TestActiveProfileNameAndListingAreCaseInsensitive(t *testing.T) {
+	serverFixture(t, "")
+	assert.NoError(t, Root.PersistentFlags().Set("profile", "ACME"))
+
+	assert.Equal(t, "acme", ActiveProfileName())
+	assert.Contains(t, execute("auth list-profiles --json"), `"active": true`)
 }

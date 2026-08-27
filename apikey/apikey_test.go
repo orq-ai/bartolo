@@ -102,15 +102,28 @@ func TestExplicitProfileBeatsEnvKey(t *testing.T) {
 	t.Setenv("TEST_API_KEY", "from-env")
 	cli.Creds.Set("profiles.acme.api_key", "from-profile")
 
-	// Unset `--profile` leaves the environment in charge.
 	cli.Creds.Set("profiles.default.api_key", "from-default-profile")
 	r := cli.Client.Get()
 	r.Do()
 	assert.Equal(t, "from-env", r.Context.Request.Header.Get("x-auth"))
 
-	// An explicit `--profile` outranks it.
 	assert.NoError(t, cli.Root.PersistentFlags().Set("profile", "acme"))
 	r = cli.Client.Get()
 	r.Do()
+	assert.Equal(t, "from-profile", r.Context.Request.Header.Get("x-auth"))
+}
+
+func TestProfileKeyUsedWhenNoEnvVarIsSet(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cli.Init(&cli.Config{
+		AppName:   "test",
+		EnvPrefix: "TEST",
+	})
+	Init("x-auth", LocationHeader)
+	cli.Creds.Set("profiles.default.api_key", "from-profile")
+
+	r := cli.Client.Get()
+	r.Do()
+
 	assert.Equal(t, "from-profile", r.Context.Request.Header.Get("x-auth"))
 }

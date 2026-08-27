@@ -9,7 +9,6 @@ import (
 
 	"github.com/orq-ai/bartolo/cli"
 	"github.com/rs/zerolog"
-	"github.com/spf13/viper"
 	"golang.org/x/oauth2"
 	"gopkg.in/h2non/gentleman.v2/context"
 )
@@ -53,7 +52,7 @@ func Scopes(scopes ...string) func(*config) error {
 func TokenMiddleware(source oauth2.TokenSource, ctx *context.Context, h context.Handler) {
 	// Setup logger with the current profile.
 	log := ctx.Get("log").(*zerolog.Logger).
-		With().Str("profile", viper.GetString("profile")).Logger()
+		With().Str("profile", cli.ActiveProfileName()).Logger()
 
 	if err := TokenHandler(source, &log, ctx.Request); err != nil {
 		h.Error(ctx, err)
@@ -68,10 +67,10 @@ func TokenHandler(source oauth2.TokenSource, log *zerolog.Logger, request *http.
 	var cached *oauth2.Token
 
 	// Load any existing token from the CLI's cache file.
-	expiresKey := "profiles." + viper.GetString("profile") + ".expires"
-	typeKey := "profiles." + viper.GetString("profile") + ".type"
-	tokenKey := "profiles." + viper.GetString("profile") + ".token"
-	refreshKey := "profiles." + viper.GetString("profile") + ".refresh"
+	expiresKey := "profiles." + cli.ActiveProfileName() + ".expires"
+	typeKey := "profiles." + cli.ActiveProfileName() + ".type"
+	tokenKey := "profiles." + cli.ActiveProfileName() + ".token"
+	refreshKey := "profiles." + cli.ActiveProfileName() + ".refresh"
 
 	expiry := cli.Cache.GetTime(expiresKey)
 	if !expiry.IsZero() {

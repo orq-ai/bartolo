@@ -17,7 +17,6 @@ import (
 	"github.com/orq-ai/bartolo/cli"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"github.com/spf13/viper"
 	"golang.org/x/oauth2"
 )
 
@@ -169,7 +168,7 @@ func (h *AuthCodeHandler) OnRequest(log *zerolog.Logger, request *http.Request) 
 
 		// Try to get a cached refresh token from the current profile and use
 		// it to wrap the auth code token source with a refreshing source.
-		refreshKey := "profiles." + viper.GetString("profile") + ".refresh"
+		refreshKey := "profiles." + cli.ActiveProfileName() + ".refresh"
 		refreshSource := RefreshTokenSource{
 			ClientID:       h.ClientID,
 			TokenURL:       h.TokenURL,

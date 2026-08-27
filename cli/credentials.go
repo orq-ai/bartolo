@@ -110,7 +110,7 @@ func initAuth() {
 				return nil
 			}
 
-			active := activeProfileName()
+			active := ActiveProfileName()
 			listed := make([]map[string]interface{}, 0, len(profiles))
 			for _, name := range sortedKeys(profiles) {
 				profile, ok := profiles[name].(map[string]interface{})
@@ -154,7 +154,7 @@ func initAuth() {
 				return fmt.Errorf("unknown profile %q", args[0])
 			}
 
-			if err := saveJSONConfig(map[string]interface{}{"profile": name}); err != nil {
+			if err := saveJSONConfig(map[string]interface{}{"profile-default": name}); err != nil {
 				return err
 			}
 
@@ -253,7 +253,7 @@ func GetAuthStatus() map[string]interface{} {
 	}
 
 	profile := GetProfile()
-	status["profile"] = viper.GetString("profile")
+	status["profile"] = ActiveProfileName()
 
 	typeName, handler := resolveAuthHandler(profile)
 	if typeName != "" {
@@ -305,7 +305,7 @@ func UseAuth(typeName string, handler AuthHandler) {
 	}
 
 	run := func(cmd *cobra.Command, args []string) error {
-		name := strings.Replace(args[0], ".", "-", -1)
+		name := sanitizeProfileName(args[0])
 		Creds.Set("profiles."+name+".type", typeName)
 
 		for i, key := range keys {
@@ -554,8 +554,12 @@ func looksSensitiveKey(key string) bool {
 	return false
 }
 
+// sanitizeProfileName canonicalizes a profile name. Viper lower-cases config
+// keys, so a name that is not lower-cased here matches the stored profile on
+// lookup but not on comparison, and periods would nest the profile instead of
+// naming it.
 func sanitizeProfileName(value string) string {
-	return strings.Replace(strings.TrimSpace(value), ".", "-", -1)
+	return strings.ToLower(strings.Replace(strings.TrimSpace(value), ".", "-", -1))
 }
 
 func saveAuthProfile(typeName string, profileName string, keys []string, values []string, server string) error {
@@ -639,6 +643,7 @@ func (c *CredentialsFile) GetStringMap(key string) map[string]interface{} {
 func (c *CredentialsFile) GetStringMapString(key string) map[string]string {
 	return c.viper.GetStringMapString(key)
 }
+func (c *CredentialsFile) IsSet(key string) bool     { return c.viper.IsSet(key) }
 func (c *CredentialsFile) SetConfigName(name string) { c.viper.SetConfigName(name) }
 func (c *CredentialsFile) AddConfigPath(path string) { c.viper.AddConfigPath(path) }
 func (c *CredentialsFile) ReadInConfig() error       { return c.viper.ReadInConfig() }
@@ -667,13 +672,27 @@ var Creds *CredentialsFile
 
 // GetProfile returns the current profile's configuration.
 func GetProfile() map[string]string {
-	return Creds.GetStringMapString("profiles." + activeProfileName())
+	return Creds.GetStringMapString("profiles." + ActiveProfileName())
 }
 
-// activeProfileName is the profile selected by `--profile`, the persisted
-// `auth use` default, or "default".
-func activeProfileName() string {
-	return sanitizeProfileName(viper.GetString("profile"))
+// ActiveProfileName returns the profile in force, most specific source first:
+// `--profile`, `<PREFIX>_PROFILE` or viper.Set, the `auth use` default (kept
+// off the flag's key so viper cannot rank it as explicit, as with
+// `server-default`), then "default".
+func ActiveProfileName() string {
+	if ProfileExplicit() {
+		return sanitizeProfileName(Root.Flag("profile").Value.String())
+	}
+
+	if name := sanitizeProfileName(viper.GetString("profile")); name != "" && name != "default" {
+		return name
+	}
+
+	if persisted := sanitizeProfileName(viper.GetString("profile-default")); persisted != "" {
+		return persisted
+	}
+
+	return "default"
 }
 
 // ProfileExplicit reports whether `--profile` was passed on this invocation,
@@ -684,7 +703,7 @@ func ProfileExplicit() bool {
 		return false
 	}
 
-	flag := Root.PersistentFlags().Lookup("profile")
+	flag := Root.Flag("profile")
 	return flag != nil && flag.Changed
 }
 

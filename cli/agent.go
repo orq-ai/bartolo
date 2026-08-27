@@ -127,7 +127,7 @@ func doctorStatus() map[string]interface{} {
 		},
 		"config": map[string]interface{}{
 			"directory":       viper.GetString("config-directory"),
-			"profile":         viper.GetString("profile"),
+			"profile":         ActiveProfileName(),
 			"server_index":    viper.GetInt("server-index"),
 			"server_override": viper.GetString("server"),
 			"profile_server":  ProfileServer(),
@@ -148,7 +148,7 @@ func doctorStatus() map[string]interface{} {
 func runDoctorFixes(status map[string]interface{}) (bool, error) {
 	auth, _ := status["auth"].(map[string]interface{})
 	if configured, _ := auth["configured"].(bool); !configured {
-		if err := RunAuthSetup(viper.GetString("profile"), "", ""); err != nil {
+		if err := RunAuthSetup(ActiveProfileName(), "", ""); err != nil {
 			return false, err
 		}
 		return true, nil
