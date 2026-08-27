@@ -42,16 +42,26 @@ func GetServers() []map[string]string {
 }
 
 // ResolveServer returns the active server URL, most specific source first:
-// `--server`, `<PREFIX>_SERVER` or viper.Set, the active profile's server, the
+// `--server`, the active profile's server, `<PREFIX>_SERVER` or viper.Set, the
 // `server set` default (kept off the flag's key so viper cannot rank it as
 // explicit), then the selected OpenAPI server.
+//
+// The profile sits above the environment because a profile pins a server and a
+// key together: ranking them separately is what lets a command reach one
+// deployment holding another one's credentials.
 func ResolveServer() string {
-	if override := strings.TrimSpace(viper.GetString("server")); override != "" {
-		return override
+	if FlagChanged(Root, "server") {
+		if override := strings.TrimSpace(Root.Flag("server").Value.String()); override != "" {
+			return override
+		}
 	}
 
 	if server := ProfileServer(); server != "" {
 		return server
+	}
+
+	if override := strings.TrimSpace(viper.GetString("server")); override != "" {
+		return override
 	}
 
 	if persisted := strings.TrimSpace(viper.GetString("server-default")); persisted != "" {

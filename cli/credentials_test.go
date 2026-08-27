@@ -64,7 +64,8 @@ func resetAuthState(t *testing.T) string {
 	Creds = nil
 	authInitialized = false
 	authCommand = nil
-	authAddCommand = nil
+	profileCommand = nil
+	authAddCommands = nil
 	AuthHandlers = make(map[string]AuthHandler)
 	registeredServers = nil
 
@@ -163,9 +164,18 @@ func TestResolveServerPrefersFlagOverProfile(t *testing.T) {
 	}
 }
 
-func TestResolveServerPrefersEnvOverProfile(t *testing.T) {
+func TestResolveServerPrefersProfileOverEnv(t *testing.T) {
 	t.Setenv("TEST_AUTH_SERVER", "https://env.example.com")
 	serverFixture(t, "https://orq.acme.internal")
+
+	if got := ResolveServer(); got != "https://orq.acme.internal" {
+		t.Fatalf("expected profile server over env, got %q", got)
+	}
+}
+
+func TestResolveServerFallsBackToEnvWithoutProfileServer(t *testing.T) {
+	t.Setenv("TEST_AUTH_SERVER", "https://env.example.com")
+	serverFixture(t, "")
 
 	if got := ResolveServer(); got != "https://env.example.com" {
 		t.Fatalf("expected env override, got %q", got)
@@ -182,9 +192,10 @@ func TestResolveServerPrefersProfileOverConfigServer(t *testing.T) {
 	}
 }
 
-// orq-cli's OAuth bridge sets the server via viper.Set, which viper ranks highest.
-func TestResolveServerPrefersViperSetOverProfile(t *testing.T) {
-	serverFixture(t, "https://orq.acme.internal")
+// orq-cli's OAuth bridge sets the server via viper.Set. It ranks with the
+// environment now: above the generated defaults, below the chosen profile.
+func TestResolveServerPrefersViperSetOverServerIndex(t *testing.T) {
+	serverFixture(t, "")
 
 	viper.Set("server", "https://session.example.com")
 
@@ -194,13 +205,13 @@ func TestResolveServerPrefersViperSetOverProfile(t *testing.T) {
 }
 
 // With no env prefix, viper's mergeWithEnvPrefix reads a bare SERVER.
-func TestResolveServerPrefersEnvOverProfileWithoutEnvPrefix(t *testing.T) {
+func TestResolveServerReadsEnvWithoutEnvPrefix(t *testing.T) {
 	t.Setenv("SERVER", "https://bare-env.example.com")
 	resetAuthState(t)
 	Init(&Config{AppName: "test-auth"})
 	UseAuth("", stubAuthHandler{})
 	RegisterServers([]map[string]string{{"description": "Prod", "url": "https://prod.example.com"}})
-	if err := saveAuthProfile("", "acme", []string{"api-key", "server"}, []string{"secret", "https://orq.acme.internal"}, ""); err != nil {
+	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, ""); err != nil {
 		t.Fatalf("saveAuthProfile: %v", err)
 	}
 	viper.Set("profile", "acme")
@@ -327,7 +338,7 @@ func TestListProfilesMasksSecretsAndHonorsJSON(t *testing.T) {
 	}
 
 	viper.Set("output-format", "json")
-	out := execute("auth list-profiles --json")
+	out := execute("auth profile list --json")
 
 	assert.NotContains(t, out, secret)
 
@@ -383,5 +394,37 @@ func TestActiveProfileNameAndListingAreCaseInsensitive(t *testing.T) {
 	assert.NoError(t, Root.PersistentFlags().Set("profile", "ACME"))
 
 	assert.Equal(t, "acme", ActiveProfileName())
-	assert.Contains(t, execute("auth list-profiles --json"), `"active": true`)
+	assert.Contains(t, execute("auth profile list --json"), `"active": true`)
+}
+
+func TestAuthProfileClearDropsPersistedSelection(t *testing.T) {
+	serverFixture(t, "")
+	viper.Set("profile", "default")
+	execute("auth profile use acme")
+
+	execute("auth profile clear")
+
+	assert.Equal(t, "default", ActiveProfileName())
+	assert.False(t, ProfileSelected())
+}
+
+func TestEmptyProfileFlagDisablesProfiles(t *testing.T) {
+	serverFixture(t, "https://orq.acme.internal")
+	execute("auth profile use acme")
+
+	assert.NoError(t, Root.PersistentFlags().Set("profile", ""))
+
+	assert.Empty(t, GetProfile())
+	assert.Equal(t, "https://prod.example.com", ResolveServer())
+}
+
+func TestAddProfileRejectsEmptyKey(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"  "}, "")
+
+	assert.ErrorContains(t, err, "api-key cannot be empty")
+	assert.False(t, ProfileExists("acme"))
 }

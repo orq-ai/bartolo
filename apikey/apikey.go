@@ -46,7 +46,7 @@ func (h *Handler) OnRequest(log *zerolog.Logger, request *http.Request) error {
 	profile := cli.GetProfile()
 	key, source := h.lookupKey(profile)
 	if key == "" {
-		return fmt.Errorf("missing API key; configure a profile with `auth setup` or set one of %s", strings.Join(h.EnvVars, ", "))
+		return h.missingKeyError(source)
 	}
 
 	log.Debug().Str("auth-source", source).Msg("Using API key authentication")
@@ -90,10 +90,18 @@ func (h *Handler) AuthStatus(profile map[string]string) map[string]interface{} {
 }
 
 func (h *Handler) lookupKey(profile map[string]string) (string, string) {
-	key := strings.TrimSpace(profile[apiKey])
-
-	if key != "" && cli.ProfileExplicit() {
+	if key := strings.TrimSpace(profile[apiKey]); key != "" {
 		return h.applyPrefix(key), "profile"
+	}
+
+	// A chosen profile is authoritative. Falling back to an ambient key here is
+	// how `--profile staging` ends up sending the production key it was passed
+	// to avoid, so an incomplete or unknown profile is an error instead.
+	if cli.ProfileSelected() {
+		if cli.ProfileExists(cli.ActiveProfileName()) {
+			return "", "profile-incomplete"
+		}
+		return "", "profile-unknown"
 	}
 
 	for _, envVar := range h.EnvVars {
@@ -102,11 +110,20 @@ func (h *Handler) lookupKey(profile map[string]string) (string, string) {
 		}
 	}
 
-	if key != "" {
-		return h.applyPrefix(key), "profile"
+	return "", "missing"
+}
+
+func (h *Handler) missingKeyError(source string) error {
+	name := cli.ActiveProfileName()
+
+	switch source {
+	case "profile-unknown":
+		return fmt.Errorf("profile %q is not configured; run `auth setup --profile %s` or pick one with `auth profile list`", name, name)
+	case "profile-incomplete":
+		return fmt.Errorf("profile %q has no API key; run `auth setup --profile %s`", name, name)
 	}
 
-	return "", "missing"
+	return fmt.Errorf("missing API key; configure a profile with `auth setup` or set one of %s", strings.Join(h.EnvVars, ", "))
 }
 
 func (h *Handler) applyPrefix(value string) string {

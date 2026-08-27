@@ -92,7 +92,7 @@ func TestCustomAPIKeyEnvVarTakesPrecedence(t *testing.T) {
 	assert.Equal(t, "custom-secret", r.Context.Request.Header.Get("x-auth"))
 }
 
-func TestExplicitProfileBeatsEnvKey(t *testing.T) {
+func TestSelectedProfileBeatsEnvKey(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	cli.Init(&cli.Config{
 		AppName:   "test",
@@ -102,7 +102,6 @@ func TestExplicitProfileBeatsEnvKey(t *testing.T) {
 	t.Setenv("TEST_API_KEY", "from-env")
 	cli.Creds.Set("profiles.acme.api_key", "from-profile")
 
-	cli.Creds.Set("profiles.default.api_key", "from-default-profile")
 	r := cli.Client.Get()
 	r.Do()
 	assert.Equal(t, "from-env", r.Context.Request.Header.Get("x-auth"))
@@ -126,4 +125,38 @@ func TestProfileKeyUsedWhenNoEnvVarIsSet(t *testing.T) {
 	r.Do()
 
 	assert.Equal(t, "from-profile", r.Context.Request.Header.Get("x-auth"))
+}
+
+func TestSelectedProfileWithoutKeyIsAnError(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cli.Init(&cli.Config{
+		AppName:   "test",
+		EnvPrefix: "TEST",
+	})
+	Init("x-auth", LocationHeader)
+	t.Setenv("TEST_API_KEY", "from-env")
+	cli.Creds.Set("profiles.acme.type", "")
+	assert.NoError(t, cli.Root.PersistentFlags().Set("profile", "acme"))
+
+	r := cli.Client.Get()
+	r.Do()
+
+	assert.ErrorContains(t, r.Context.Error, `profile "acme" has no API key`)
+	assert.Empty(t, r.Context.Request.Header.Get("x-auth"))
+}
+
+func TestUnknownProfileIsAnError(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cli.Init(&cli.Config{
+		AppName:   "test",
+		EnvPrefix: "TEST",
+	})
+	Init("x-auth", LocationHeader)
+	t.Setenv("TEST_API_KEY", "from-env")
+	assert.NoError(t, cli.Root.PersistentFlags().Set("profile", "typo"))
+
+	r := cli.Client.Get()
+	r.Do()
+
+	assert.ErrorContains(t, r.Context.Error, `profile "typo" is not configured`)
 }

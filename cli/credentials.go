@@ -71,7 +71,13 @@ var AuthHandlers = make(map[string]AuthHandler)
 
 var authInitialized bool
 var authCommand *cobra.Command
-var authAddCommand *cobra.Command
+var profileCommand *cobra.Command
+
+// authAddCommands holds every registered spelling of the add-profile command.
+// `UseAuth` fills in the argument list and handler on each of them, because the
+// grouped `auth profile add` and the original `auth add-profile` are separate
+// cobra commands sharing one implementation.
+var authAddCommands []*cobra.Command
 
 // initAuth sets up basic commands and the credentials file so that new auth
 // handlers can be registered. This is safe to call many times.
@@ -91,18 +97,62 @@ func initAuth() {
 	}
 	Root.AddCommand(authCommand)
 
-	authAddCommand = &cobra.Command{
-		Use:     "add-profile",
-		Aliases: []string{"add"},
-		Short:   "Add user profile for authentication",
+	profileCommand = &cobra.Command{
+		Use:     "profile",
+		Aliases: []string{"profiles"},
+		Short:   "Manage authentication profiles",
 	}
-	authCommand.AddCommand(authAddCommand)
+	authCommand.AddCommand(profileCommand)
 
-	authCommand.AddCommand(&cobra.Command{
-		Use:     "list-profiles",
-		Aliases: []string{"ls"},
-		Short:   "List available configured authentication profiles",
-		Args:    cobra.NoArgs,
+	authAddCommands = []*cobra.Command{
+		newAuthAddCommand(profileCommand, "add", ""),
+		newAuthAddCommand(authCommand, "add-profile", "use `auth profile add` instead"),
+	}
+
+	profileCommand.AddCommand(newProfileListCommand("list", ""))
+	profileCommand.AddCommand(newProfileUseCommand("use", ""))
+	profileCommand.AddCommand(newProfileClearCommand())
+
+	authCommand.AddCommand(newProfileListCommand("list-profiles", "use `auth profile list` instead"))
+	authCommand.AddCommand(newProfileUseCommand("use", "use `auth profile use` instead"))
+
+	authCommand.AddCommand(newAuthSetupCommand())
+
+	// Install auth middleware
+	Client.UseRequest(func(ctx *context.Context, h context.Handler) {
+		profile := GetProfile()
+		_, handler := resolveAuthHandler(profile)
+		if handler == nil {
+			h.Error(ctx, fmt.Errorf("no authentication handler configured"))
+			return
+		}
+
+		if err := handler.OnRequest(ctx.Get("log").(*zerolog.Logger), ctx.Request); err != nil {
+			h.Error(ctx, err)
+			return
+		}
+
+		h.Next(ctx)
+	})
+}
+
+func newAuthAddCommand(parent *cobra.Command, use string, deprecated string) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:        use,
+		Short:      "Add user profile for authentication",
+		Deprecated: deprecated,
+	}
+	parent.AddCommand(cmd)
+	return cmd
+}
+
+func newProfileListCommand(use string, deprecated string) *cobra.Command {
+	return &cobra.Command{
+		Use:        use,
+		Aliases:    []string{"ls"},
+		Short:      "List available configured authentication profiles",
+		Args:       cobra.NoArgs,
+		Deprecated: deprecated,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			profiles := Creds.GetStringMap("profiles")
 			if len(profiles) == 0 {
@@ -142,15 +192,19 @@ func initAuth() {
 
 			return Formatter.Format(map[string]interface{}{"profiles": listed})
 		},
-	})
-	authCommand.AddCommand(&cobra.Command{
-		Use:     "use <name>",
-		Aliases: []string{"switch"},
-		Short:   "Set the active authentication profile",
-		Args:    cobra.ExactArgs(1),
+	}
+}
+
+func newProfileUseCommand(use string, deprecated string) *cobra.Command {
+	return &cobra.Command{
+		Use:        use + " <name>",
+		Aliases:    []string{"switch"},
+		Short:      "Set the active authentication profile",
+		Args:       cobra.ExactArgs(1),
+		Deprecated: deprecated,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := sanitizeProfileName(args[0])
-			if name == "" || !Creds.IsSet("profiles."+name) {
+			if !ProfileExists(name) {
 				return fmt.Errorf("unknown profile %q", args[0])
 			}
 
@@ -160,25 +214,22 @@ func initAuth() {
 
 			return Formatter.Format(map[string]interface{}{"active_profile": name, "persisted": true})
 		},
-	})
-	authCommand.AddCommand(newAuthSetupCommand())
+	}
+}
 
-	// Install auth middleware
-	Client.UseRequest(func(ctx *context.Context, h context.Handler) {
-		profile := GetProfile()
-		_, handler := resolveAuthHandler(profile)
-		if handler == nil {
-			h.Error(ctx, fmt.Errorf("no authentication handler configured"))
-			return
-		}
+func newProfileClearCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "clear",
+		Short: "Stop using a persisted active profile",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := saveJSONConfig(map[string]interface{}{"profile-default": nil}); err != nil {
+				return err
+			}
 
-		if err := handler.OnRequest(ctx.Get("log").(*zerolog.Logger), ctx.Request); err != nil {
-			h.Error(ctx, err)
-			return
-		}
-
-		h.Next(ctx)
-	})
+			return Formatter.Format(map[string]interface{}{"active_profile": ActiveProfileName(), "persisted": true})
+		},
+	}
 }
 
 // sortedKeys returns a map's keys in a stable order.
@@ -305,23 +356,16 @@ func UseAuth(typeName string, handler AuthHandler) {
 	}
 
 	run := func(cmd *cobra.Command, args []string) error {
-		name := sanitizeProfileName(args[0])
-		Creds.Set("profiles."+name+".type", typeName)
-
+		values := make([]string, 0, len(keys))
 		for i, key := range keys {
 			value, err := resolveProfileValue(cmd, key, args, i)
 			if err != nil {
 				return err
 			}
-			Creds.Set("profiles."+name+"."+strings.Replace(key, "-", "_", -1), value)
+			values = append(values, value)
 		}
 
-		if server := explicitServer(cmd); server != "" {
-			Creds.Set("profiles."+name+".server", server)
-		}
-
-		filename := filepath.Join(viper.GetString("config-directory"), "credentials.json")
-		return Creds.Save(filename)
+		return saveAuthProfile(typeName, sanitizeProfileName(args[0]), keys, values, explicitServer(cmd))
 	}
 
 	addKeyFileFlags := func(cmd *cobra.Command) {
@@ -331,42 +375,70 @@ func UseAuth(typeName string, handler AuthHandler) {
 		}
 	}
 
-	if typeName == "" {
-		// Backward-compatibility use-case without an explicit type. Set up the
-		// `add-profile` command as the only way to authenticate.
-		if authAddCommand.RunE != nil {
-			// This fallback code path was already used, so we must be registering
-			// a *second* anonymous auth type, which is not allowed.
-			panic("register auth type names to use multi-auth")
+	for _, cmd := range authAddCommands {
+		if typeName == "" {
+			// Backward-compatibility use-case without an explicit type. Set up the
+			// add command as the only way to authenticate.
+			if cmd.RunE != nil {
+				// This fallback code path was already used, so we must be registering
+				// a *second* anonymous auth type, which is not allowed.
+				panic("register auth type names to use multi-auth")
+			}
+
+			cmd.Use += use
+			cmd.Short = "Add a new named authentication profile"
+			cmd.Args = cobra.RangeArgs(1, 1+len(keys))
+			cmd.RunE = run
+			addKeyFileFlags(cmd)
+			continue
 		}
 
-		authAddCommand.Use = "add-profile" + use
-		authAddCommand.Short = "Add a new named authentication profile"
-		authAddCommand.Args = cobra.RangeArgs(1, 1+len(keys))
-		authAddCommand.RunE = run
-		addKeyFileFlags(authAddCommand)
-	} else {
-		// Add a new type-specific `add-profile` subcommand.
-		cmd := &cobra.Command{
+		// Add a new type-specific subcommand.
+		typed := &cobra.Command{
 			Use:   typeName + use,
 			Short: "Add a new named " + typeName + " authentication profile",
 			Args:  cobra.RangeArgs(1, 1+len(keys)),
 			RunE:  run,
 		}
-		addKeyFileFlags(cmd)
-		authAddCommand.AddCommand(cmd)
+		addKeyFileFlags(typed)
+		cmd.AddCommand(typed)
 	}
+}
+
+// requireProfileValues rejects a profile that would be saved without every
+// field its auth type declares. A profile missing its key is worse than no
+// profile at all: it silently falls back to whatever credential is in the
+// environment, which is how a staging profile ends up sending a production key.
+func requireProfileValues(keys []string, values []string) error {
+	for i, key := range keys {
+		if i >= len(values) || strings.TrimSpace(values[i]) == "" {
+			return fmt.Errorf("%s cannot be empty", strings.Replace(key, "_", " ", -1))
+		}
+	}
+
+	return nil
 }
 
 // explicitServer returns `--server` only when passed on this invocation, so an
 // env var or persisted default is never baked into a profile.
 func explicitServer(cmd *cobra.Command) string {
-	flag := cmd.Flag("server")
-	if flag == nil || !flag.Changed {
+	if !FlagChanged(cmd, "server") {
 		return ""
 	}
 
-	return strings.TrimSpace(flag.Value.String())
+	return strings.TrimSpace(cmd.Flag("server").Value.String())
+}
+
+// FlagChanged reports whether a flag was passed on this invocation, as opposed
+// to carrying an environment, config or default value. Viper cannot answer this:
+// it merges all of those into one value.
+func FlagChanged(cmd *cobra.Command, name string) bool {
+	if cmd == nil {
+		return false
+	}
+
+	flag := cmd.Flag(name)
+	return flag != nil && flag.Changed
 }
 
 func newAuthSetupCommand() *cobra.Command {
@@ -567,6 +639,10 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 		return fmt.Errorf("profile values do not match keys")
 	}
 
+	if err := requireProfileValues(keys, values); err != nil {
+		return err
+	}
+
 	Creds.Set("profiles."+profileName+".type", typeName)
 	for i, key := range keys {
 		Creds.Set("profiles."+profileName+"."+strings.Replace(key, "-", "_", -1), values[i])
@@ -672,39 +748,54 @@ var Creds *CredentialsFile
 
 // GetProfile returns the current profile's configuration.
 func GetProfile() map[string]string {
-	return Creds.GetStringMapString("profiles." + ActiveProfileName())
+	name := ActiveProfileName()
+	if name == "" {
+		return nil
+	}
+
+	return Creds.GetStringMapString("profiles." + name)
 }
 
-// ActiveProfileName returns the profile in force, most specific source first:
-// `--profile`, `<PREFIX>_PROFILE` or viper.Set, the `auth use` default (kept
-// off the flag's key so viper cannot rank it as explicit, as with
-// `server-default`), then "default".
+// ProfileExists reports whether a profile of that name is configured.
+func ProfileExists(name string) bool {
+	return Creds != nil && name != "" && Creds.IsSet("profiles."+name)
+}
+
+// ActiveProfileName returns the profile in force, or "" when profiles are
+// switched off with `--profile ""`.
 func ActiveProfileName() string {
-	if ProfileExplicit() {
-		return sanitizeProfileName(Root.Flag("profile").Value.String())
+	name, _ := resolveProfile()
+	return name
+}
+
+// ProfileSelected reports whether the active profile was chosen — by
+// `--profile`, `<PREFIX>_PROFILE`, viper.Set or `auth profile use` — rather
+// than being the built-in fallback. A chosen profile is authoritative: its
+// credentials and server outrank the environment, and it is an error rather
+// than a silent fallback when it cannot supply them.
+func ProfileSelected() bool {
+	_, selected := resolveProfile()
+	return selected
+}
+
+// resolveProfile ranks the profile sources, most specific first: `--profile`,
+// then `<PREFIX>_PROFILE` or viper.Set, then the `auth profile use` default.
+// That default is kept off the flag's viper key — as `server-default` is kept
+// off `server` — because viper ranks a persisted override above a bound flag.
+func resolveProfile() (string, bool) {
+	if FlagChanged(Root, "profile") {
+		return sanitizeProfileName(Root.Flag("profile").Value.String()), true
 	}
 
 	if name := sanitizeProfileName(viper.GetString("profile")); name != "" && name != "default" {
-		return name
+		return name, true
 	}
 
 	if persisted := sanitizeProfileName(viper.GetString("profile-default")); persisted != "" {
-		return persisted
+		return persisted, true
 	}
 
-	return "default"
-}
-
-// ProfileExplicit reports whether `--profile` was passed on this invocation,
-// as opposed to coming from config or the built-in default. Auth handlers use
-// it to let an explicit profile outrank ambient environment credentials.
-func ProfileExplicit() bool {
-	if Root == nil {
-		return false
-	}
-
-	flag := Root.Flag("profile")
-	return flag != nil && flag.Changed
+	return "default", false
 }
 
 // InitCredentialsFile sets up the creds file and `profile` global parameter.
