@@ -227,3 +227,60 @@ rather than calling log.Fatal so cobra can classify them — a usage error exits
 
 	return nil
 {{ end }}
+
+{{/*
+operationCommand builds and registers one operation's cobra command. `parent`
+is declared by the caller: the root command, or the group command the operation
+belongs to.
+*/}}
+{{ define "operationCommand" }}
+	params := viper.New()
+
+	var examples string
+
+	{{- $op := . }}
+	{{ range $ex := .Examples }}
+		examples += "  " + parent.CommandPath() + " {{ $op.Use }} {{ $ex }}\n"
+	{{ end }}
+	{{- if .BodyExample }}
+		examples += "  " + parent.CommandPath() + " {{ $op.Use }} --example\n"
+	{{- end }}
+
+	cmd := &cobra.Command{
+		Use: "{{ .Use | escapeStr }}",
+		{{- if .Aliases }}
+			Aliases: []string{
+				{{- range .Aliases }}
+					"{{ . | escapeStr }}",
+				{{- end }}
+			},
+		{{- end }}
+		Short:   "{{ .Short | escapeStr }}",
+		Long:    bartolocli.Markdown("{{ .Long }}"),
+		{{- if .Hidden }}
+			Hidden: {{ .Hidden }},
+		{{- end }}
+		Example: examples,
+		Args:    cobra.MinimumNArgs({{ len .RequiredParams }}),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			{{ template "operationRun" . }}
+		},
+	}
+	{{- if .HelpSection }}
+	bartolocli.HelpSection(parent, cmd, "{{ .HelpSection | escapeStr }}")
+	{{- end }}
+	parent.AddCommand(cmd)
+
+	{{- if eq .Method "Delete" }}
+	bartolocli.AddForceFlag(cmd)
+	{{- end }}
+
+	{{- if .CanHaveBody }}
+	bartolocli.AddBodyFlags(cmd)
+	{{- if .BodyExample }}
+	bartolocli.AddExampleFlag(cmd)
+	{{- end }}
+	bartolocli.AddBodyFieldFlags(cmd, {{ template "bodyFields" . }})
+	{{- end }}
+	{{ template "params" . }}
+{{ end }}

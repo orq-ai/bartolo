@@ -38,53 +38,11 @@ func register{{ $group.GoName }}Commands(root *cobra.Command) {
 	{{- end }}
 	root.AddCommand({{ $group.GoName }}Cmd)
 
-	{{ range $operation := .Operations }}
+	{{ range .Operations }}
 		func() {
-			params := viper.New()
+			parent := {{ $group.GoName }}Cmd
 
-			var examples string
-
-			{{ range $ex := .Examples }}
-				examples += "  " + {{ $group.GoName }}Cmd.CommandPath() + " {{ $operation.Use }} {{ $ex }}\n"
-			{{ end }}
-			{{- if .BodyExample }}
-				examples += "  " + {{ $group.GoName }}Cmd.CommandPath() + " {{ $operation.Use }} --example\n"
-			{{- end }}
-
-			cmd := &cobra.Command{
-				Use: "{{ .Use | escapeStr }}",
-				{{- if .Aliases }}
-					Aliases: []string{
-						{{- range .Aliases }}
-							"{{ . | escapeStr }}",
-						{{- end }}
-					},
-				{{- end }}
-				Short:   "{{ .Short | escapeStr }}",
-				Long:    bartolocli.Markdown("{{ .Long }}"),
-				{{- if .Hidden }}
-					Hidden: {{ .Hidden }},
-				{{- end }}
-				Example: examples,
-				Args:    cobra.MinimumNArgs({{ len .RequiredParams }}),
-				RunE: func(cmd *cobra.Command, args []string) error {
-					{{ template "operationRun" . }}
-				},
-			}
-			{{ $group.GoName }}Cmd.AddCommand(cmd)
-
-			{{- if eq .Method "Delete" }}
-			bartolocli.AddForceFlag(cmd)
-			{{- end }}
-
-			{{- if .CanHaveBody }}
-			bartolocli.AddBodyFlags(cmd)
-			{{- if .BodyExample }}
-			bartolocli.AddExampleFlag(cmd)
-			{{- end }}
-			bartolocli.AddBodyFieldFlags(cmd, {{ template "bodyFields" . }})
-			{{- end }}
-			{{ template "params" . }}
+			{{ template "operationCommand" . }}
 		}()
 	{{ end }}
 }
