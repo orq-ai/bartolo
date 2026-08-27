@@ -12,8 +12,27 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"golang.org/x/term"
 	"gopkg.in/h2non/gentleman.v2/context"
 )
+
+// writeCredentials persists the credentials file at 0600, so the long-lived API keys
+// it holds are never world-readable (viper.WriteConfigAs would create it 0644).
+func writeCredentials(filename string) error {
+	// Writes nothing: sets the mode before viper writes the key, so the secret is never
+	// world-readable even briefly. The chmod narrows a file an older build left 0644.
+	f, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(filename, 0o600); err != nil {
+		return err
+	}
+	return Creds.WriteConfigAs(filename)
+}
 
 // AuthHandler describes a handler that can be called on a request to inject
 // auth information and is agnostic to the type of auth.
@@ -242,9 +261,11 @@ func UseAuth(typeName string, handler AuthHandler) {
 	// Set up the add-profile command.
 	keys := handler.ProfileKeys()
 
+	// Key values are OPTIONAL: a secret passed on the command line leaks into shell
+	// history and `ps`, so the default is to prompt for it.
 	use := " [flags] <name>"
 	for _, name := range keys {
-		use += " <" + strings.Replace(name, "_", "-", -1) + ">"
+		use += " [<" + strings.Replace(name, "_", "-", -1) + ">]"
 	}
 
 	run := func(cmd *cobra.Command, args []string) {
@@ -252,9 +273,15 @@ func UseAuth(typeName string, handler AuthHandler) {
 		Creds.Set("profiles."+name+".type", typeName)
 
 		for i, key := range keys {
+			label := strings.Replace(key, "_", "-", -1)
+			value, ok := resolveProfileValue(key, label, args, i)
+			if !ok {
+				exitFunc(ExitUsage)
+				return
+			}
 			// Replace periods in the name since Viper will create nested structures
 			// in the config and this isn't what we want!
-			Creds.Set("profiles."+name+"."+strings.Replace(key, "-", "_", -1), args[i+1])
+			Creds.Set("profiles."+name+"."+strings.Replace(key, "-", "_", -1), value)
 		}
 
 		if server := explicitServer(cmd); server != "" {
@@ -262,7 +289,7 @@ func UseAuth(typeName string, handler AuthHandler) {
 		}
 
 		filename := path.Join(viper.GetString("config-directory"), "credentials.json")
-		if err := Creds.WriteConfigAs(filename); err != nil {
+		if err := writeCredentials(filename); err != nil {
 			panic(err)
 		}
 	}
@@ -278,14 +305,14 @@ func UseAuth(typeName string, handler AuthHandler) {
 
 		authAddCommand.Use = "add-profile" + use
 		authAddCommand.Short = "Add a new named authentication profile"
-		authAddCommand.Args = cobra.ExactArgs(1 + len(keys))
+		authAddCommand.Args = cobra.RangeArgs(1, 1+len(keys))
 		authAddCommand.Run = run
 	} else {
 		// Add a new type-specific `add-profile` subcommand.
 		authAddCommand.AddCommand(&cobra.Command{
 			Use:   typeName + use,
 			Short: "Add a new named " + typeName + " authentication profile",
-			Args:  cobra.ExactArgs(1 + len(keys)),
+			Args:  cobra.RangeArgs(1, 1+len(keys)),
 			Run:   run,
 		})
 	}
@@ -396,7 +423,30 @@ func pickAuthHandler(preferredType string) (string, AuthHandler, error) {
 	return resolved, AuthHandlers[resolved], nil
 }
 
-func promptProfileValue(key string) (string, error) {
+// resolveProfileValue returns one profile key's value: the positional argument if given,
+// else a prompt. ok is false when there is neither, and the caller exits ExitUsage.
+func resolveProfileValue(key, label string, args []string, i int) (value string, ok bool) {
+	if i+1 < len(args) {
+		// Backward-compat: positional value (discouraged for secrets).
+		return args[i+1], true
+	}
+	// Check for a terminal before prompting rather than after: survey reads stdin
+	// directly, so an open-but-idle pipe (a CI runner, `subprocess.Popen`) blocks
+	// forever instead of returning the error this used to rely on.
+	if !isInteractive() {
+		fmt.Fprintf(os.Stderr, "no %s provided; pass it as an argument or run in an interactive terminal\n", label)
+		return "", false
+	}
+	v, err := promptProfileValue(key)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "no %s provided; pass it as an argument or run in an interactive terminal\n", label)
+		return "", false
+	}
+	return v, true
+}
+
+// promptProfileValue is a var so tests can replace the prompt, like isInteractive below.
+var promptProfileValue = func(key string) (string, error) {
 	message := strings.ReplaceAll(key, "_", " ")
 	message = strings.Title(message)
 	if strings.Contains(message, "Api ") {
@@ -419,9 +469,20 @@ func promptProfileValue(key string) (string, error) {
 	return value, nil
 }
 
+// looksSensitiveKey reports whether a field name holds a credential. It is the one
+// definition of "secret" in the package: it decides whether add-profile prompts without
+// echo, whether `auth list-profiles` masks the stored value, and (through
+// looksSensitiveHeader) whether `--verbose` redacts a header or query parameter.
+// Substring matching over-redacts by design — a benign field is worth masking to keep a
+// key out of a log.
 func looksSensitiveKey(key string) bool {
 	lower := strings.ToLower(key)
-	return strings.Contains(lower, "key") || strings.Contains(lower, "token") || strings.Contains(lower, "secret") || strings.Contains(lower, "password")
+	for _, hint := range []string{"key", "token", "secret", "password", "passphrase", "credential", "signature"} {
+		if strings.Contains(lower, hint) {
+			return true
+		}
+	}
+	return false
 }
 
 func sanitizeProfileName(value string) string {
@@ -443,16 +504,56 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 	}
 
 	filename := path.Join(viper.GetString("config-directory"), "credentials.json")
-	return Creds.WriteConfigAs(filename)
+	return writeCredentials(filename)
 }
 
 func hasInteractiveInput() bool {
-	info, err := os.Stdin.Stat()
-	if err != nil {
-		return false
+	// term.IsTerminal, not os.ModeCharDevice: /dev/null is a character device, so
+	// ModeCharDevice read as interactive under docker without -i, systemd and cron.
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
+// isInteractive and askConfirm are vars so ConfirmDestructive is testable without a TTY.
+var isInteractive = hasInteractiveInput
+
+var askConfirm = func(action string) (bool, error) {
+	proceed := false
+	err := survey.AskOne(&survey.Confirm{
+		Message: fmt.Sprintf("This will run %q and cannot be undone. Continue?", action),
+		Default: false,
+	}, &proceed)
+	return proceed, err
+}
+
+// exitFunc is a var so the refusal exit can be tested without ending the test process.
+var exitFunc = os.Exit
+
+// ConfirmDestructive gates a destructive command behind a confirmation: --force
+// proceeds, a non-interactive shell without it refuses and exits ExitUsage so a script
+// cannot read a skipped delete as a success, otherwise it prompts and defaults to No.
+// args are the command's positional arguments, so the prompt names the target being
+// deleted rather than the command's usage template.
+func ConfirmDestructive(cmd *cobra.Command, args []string) bool {
+	if force, err := cmd.Flags().GetBool("force"); err == nil && force {
+		return true
 	}
 
-	return (info.Mode() & os.ModeCharDevice) != 0
+	action := strings.TrimSpace(cmd.CommandPath() + " " + strings.Join(args, " "))
+
+	if !isInteractive() {
+		fmt.Fprintf(os.Stderr, "Refusing to run %q without --force in a non-interactive shell.\n", action)
+		exitFunc(ExitUsage)
+		return false // unreachable: exitFunc does not return
+	}
+	proceed, err := askConfirm(action)
+	if err != nil {
+		// The prompt itself broke. Refusing silently would exit 0 and read as a
+		// completed delete, so fail like any other runtime error.
+		fmt.Fprintf(os.Stderr, "Could not read a confirmation for %q: %v\n", action, err)
+		exitFunc(ExitError)
+		return false // unreachable: exitFunc does not return
+	}
+	return proceed
 }
 
 // CredentialsFile holds credential-related information.

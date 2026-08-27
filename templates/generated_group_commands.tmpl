@@ -124,6 +124,12 @@ func register{{ $group.GoName }}Commands(root *cobra.Command) {
 					}
 					{{- end }}
 
+					{{- if eq .Method "Delete" }}
+					if !bartolocli.ConfirmDestructive(cmd, args) {
+						return
+					}
+					{{- end }}
+
 					{{ if .NeedsResponse }}resp{{ else }}_{{ end }}, decoded, err := {{ $apiPublic }}{{ .GoName }}({{ range $x, $param := .RequiredParams }}args[{{ $x }}], {{ end }}params{{ if .CanHaveBody }}, body{{ end }})
 					if err != nil {
 						log.Fatal().Err(err).Msg("error calling operation")
@@ -173,6 +179,10 @@ func register{{ $group.GoName }}Commands(root *cobra.Command) {
 				},
 			}
 			{{ $group.GoName }}Cmd.AddCommand(cmd)
+
+			{{- if eq .Method "Delete" }}
+			bartolocli.AddForceFlag(cmd)
+			{{- end }}
 
 			{{- if .CanHaveBody }}
 			bartolocli.AddBodyFlags(cmd)

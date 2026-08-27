@@ -30,3 +30,25 @@ paths:
             application/json:
               example:
                 hello: world
+  /widgets/{id}:
+    delete:
+      operationId: deleteWidget
+      description: >-
+        Delete a widget. Present so `make smoke` exercises the destructive-command
+        confirm gate, the --force flag, and the flag-name reservation: the query
+        parameter below is itself named `force`, so the generator must rename it
+        rather than collide with the generated --force flag.
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: force
+        in: query
+        description: Spec field named force; must be renamed (e.g. --param-force).
+        schema:
+          type: boolean
+      responses:
+        204:
+          description: Deleted

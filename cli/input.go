@@ -46,8 +46,8 @@ type BodyField struct {
 }
 
 // flagName returns the name this body field is actually registered under. A
-// field whose name collides with a global flag (`raw`, `profile`, ...) is
-// exposed as `--body-<name>` so the global keeps working on the command. The
+// field whose name collides with a reserved flag (`raw`, `profile`, `force`, ...) is
+// exposed as `--body-<name>` so the reserved one keeps working on the command. The
 // generator already emits the resolved name; this repeats it so CLIs generated
 // before the fix are corrected by a dependency bump alone.
 func (f BodyField) flagName() string {
@@ -107,7 +107,7 @@ func AddBodyFieldFlags(cmd *cobra.Command, fields []BodyField) {
 		}
 		name := field.flagName()
 		if name != field.FlagName {
-			description += fmt.Sprintf(" (body field %q, renamed to keep the global --%s flag available)", field.Name, field.FlagName)
+			description += fmt.Sprintf(" (body field %q, renamed to keep the reserved --%s flag available)", field.Name, field.FlagName)
 		}
 		switch field.Type {
 		case "bool":

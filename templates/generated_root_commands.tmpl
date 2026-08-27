@@ -137,6 +137,12 @@ func registerRootCommands(root *cobra.Command) {
 					}
 					{{- end }}
 
+					{{- if eq .Method "Delete" }}
+					if !bartolocli.ConfirmDestructive(cmd, args) {
+						return
+					}
+					{{- end }}
+
 					{{ if .NeedsResponse }}resp{{ else }}_{{ end }}, decoded, err := {{ $apiPublic }}{{ .GoName }}({{ range $x, $param := .RequiredParams }}args[{{ $x }}], {{ end }}params{{ if .CanHaveBody }}, body{{ end }})
 					if err != nil {
 						log.Fatal().Err(err).Msg("error calling operation")
@@ -189,6 +195,10 @@ func registerRootCommands(root *cobra.Command) {
 			bartolocli.HelpSection(root, cmd, "{{ .HelpSection | escapeStr }}")
 			{{- end }}
 			root.AddCommand(cmd)
+
+			{{- if eq .Method "Delete" }}
+			bartolocli.AddForceFlag(cmd)
+			{{- end }}
 
 			{{- if .CanHaveBody }}
 			bartolocli.AddBodyFlags(cmd)

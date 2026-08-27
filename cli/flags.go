@@ -21,6 +21,13 @@ import (
 //
 // The JMESPath filter is deliberately called `jmespath` rather than `query`, so
 // the many endpoints with a `query` field can keep the obvious flag name.
+//
+// The list applies to every generated command, whatever its HTTP method. `force` is
+// only registered on Delete commands, so a `force` parameter on a GET is renamed
+// without anything to collide with — that is deliberate. One name resolves to one flag
+// across the whole CLI, so `--param-force` means the same thing on every command, and
+// the generator and the runtime (which redoes this resolution for CLIs generated before
+// a fix) cannot disagree about a name without knowing each command's method.
 var reservedFlagNames = map[string]string{
 	// Global flags, registered by Init and InitCredentialsFile.
 	"jmespath":      "global flag",
@@ -39,6 +46,24 @@ var reservedFlagNames = map[string]string{
 	"example":   "request-body flag",
 	"from-file": "request-body flag",
 	"stdin":     "request-body flag",
+
+	// Registered on Delete commands by the templates; a colliding spec field would
+	// register `--force` twice and panic pflag at startup.
+	"force": "reserved flag name",
+}
+
+// AddForceFlag registers the `--force` flag that ConfirmDestructive reads on a
+// destructive command. The `-f` shorthand is only attached when it is free: a
+// consumer can claim it first through cli.AddFlag or a global, and pflag panics on a
+// duplicate shorthand — before `--help` gets a chance to render.
+func AddForceFlag(cmd *cobra.Command) {
+	const description = "Skip the confirmation prompt for this destructive command"
+
+	short := "f"
+	if cmd.Flags().ShorthandLookup(short) != nil || cmd.Root().PersistentFlags().ShorthandLookup(short) != nil {
+		short = ""
+	}
+	cmd.Flags().BoolP("force", short, false, description)
 }
 
 // ReservedFlagName reports whether name is reserved for a global or built-in
