@@ -356,7 +356,7 @@ func TestListProfilesMasksSecretsAndHonorsJSON(t *testing.T) {
 
 func TestAuthUseSetsActiveProfile(t *testing.T) {
 	serverFixture(t, "")
-	viper.Set("profile", "default")
+	viper.Set("profile", "")
 
 	execute("auth use acme")
 
@@ -381,12 +381,9 @@ func TestExplicitProfileBeatsAuthUse(t *testing.T) {
 
 func TestAuthUseRejectsUnknownProfile(t *testing.T) {
 	serverFixture(t, "")
-	viper.Set("profile", "default")
 
 	assert.Contains(t, execute("auth use nope"), `unknown profile "nope"`)
-	assert.Equal(t, "default", ActiveProfileName())
-	_, err := os.Stat(filepath.Join(viper.GetString("config-directory"), "config.json"))
-	assert.True(t, os.IsNotExist(err), "rejected profile must not write config.json")
+	assert.Equal(t, "acme", ActiveProfileName(), "a rejected profile must not change the selection")
 }
 
 func TestActiveProfileNameAndListingAreCaseInsensitive(t *testing.T) {
@@ -399,12 +396,12 @@ func TestActiveProfileNameAndListingAreCaseInsensitive(t *testing.T) {
 
 func TestAuthProfileClearDropsPersistedSelection(t *testing.T) {
 	serverFixture(t, "")
-	viper.Set("profile", "default")
+	viper.Set("profile", "")
 	execute("auth profile use acme")
 
 	execute("auth profile clear")
 
-	assert.Equal(t, "default", ActiveProfileName())
+	assert.Empty(t, ActiveProfileName())
 	assert.False(t, ProfileSelected())
 }
 
@@ -427,4 +424,34 @@ func TestAddProfileRejectsEmptyKey(t *testing.T) {
 
 	assert.ErrorContains(t, err, "api-key cannot be empty")
 	assert.False(t, ProfileExists("acme"))
+}
+
+// An install that predates the removal of the implicit `default` profile keeps
+// resolving it, without the name being special at resolution time.
+func TestLegacyDefaultProfileIsAdoptedOnce(t *testing.T) {
+	home := resetAuthState(t)
+	dir := filepath.Join(home, ".test-auth")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"profiles":{"default":{"type":"","api_key":"secret"}}}`
+	if err := os.WriteFile(filepath.Join(dir, "credentials.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	assert.Equal(t, "default", ActiveProfileName())
+	assert.Equal(t, "secret", GetProfile()["api_key"])
+}
+
+func TestFirstProfileBecomesActive(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	execute("auth profile add acme secret")
+
+	assert.Equal(t, "acme", ActiveProfileName())
 }

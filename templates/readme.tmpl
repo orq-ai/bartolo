@@ -65,7 +65,7 @@ Bind a profile to its own API base URL with `--server` when adding it, so you do
 not have to repeat the flag on every call:
 
 ```sh
-{{ .CommandName }} auth add-profile --server https://api.staging.example.com staging
+{{ .CommandName }} auth profile add --server https://api.staging.example.com staging
 ```
 
 `{{ .CommandName }} auth setup` takes the same flag.
@@ -81,18 +81,22 @@ Pick the profile every command uses, so `--profile` does not have to be repeated
 {{ .CommandName }} auth profile clear         # go back to no profile
 ```
 
-A profile pins a server and a key together, so a chosen profile outranks the
-environment variables above for both: `--profile staging` cannot end up sending
-a key or reaching a host that came from the environment. The environment is
-only read when no profile supplies the value. A profile that was chosen but
-cannot supply a key is an error rather than a silent fallback, and `--profile ""`
-turns profiles off for one command.
+There is no implicit profile. Until one is named or chosen, credentials come
+from the environment variables above, which is the usual shape in CI. The first
+profile you add is selected for you.
 
-Server resolution order, most specific first: an explicit `--server` flag or
-`<PREFIX>_SERVER` environment variable (same prefix as the variables above),
-then the profile's bound server, then a persisted `server set` default, then
-the generated server default. `auth list-profiles` shows the server bound to
-each profile, and `doctor` shows the one the active profile resolves to.
+Once a profile is in force it pins a server and a key together and outranks
+those variables for both, so `--profile staging` cannot end up sending a key or
+reaching a host that came from the environment. The environment is read only
+for what the profile does not supply. A profile that cannot supply a key is an
+error rather than a silent fallback, and `--profile ""` turns profiles off for
+one command.
+
+Server resolution order, most specific first: an explicit `--server` flag, the
+profile's bound server, the `<PREFIX>_SERVER` environment variable (same prefix
+as the variables above), a persisted `server set` default, then the generated
+server default. `auth profile list` shows the server bound to each profile, and
+`doctor` shows the one the active profile resolves to.
 {{- else }}
 
 {{ .AuthDoc.Summary }}

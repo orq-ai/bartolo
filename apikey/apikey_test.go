@@ -4,8 +4,18 @@ import (
 	"testing"
 
 	"github.com/orq-ai/bartolo/cli"
+	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 )
+
+// resetCLI isolates a test from the profile, config and credentials another
+// test in this package left behind in viper's global state.
+func resetCLI(t *testing.T) {
+	t.Helper()
+
+	viper.Reset()
+	t.Setenv("HOME", t.TempDir())
+}
 
 func ExampleInit_header() {
 	// Use a custom header for authentication.
@@ -18,12 +28,14 @@ func ExampleInit_query() {
 }
 
 func TestHeaderAuth(t *testing.T) {
+	resetCLI(t)
 	cli.Init(&cli.Config{
 		AppName:   "test",
 		EnvPrefix: "TEST",
 	})
 	Init("x-auth", LocationHeader)
 	cli.Creds.Set("profiles.default.api_key", "test")
+	cli.SelectProfile("default")
 
 	r := cli.Client.Get()
 	r.Do()
@@ -32,12 +44,14 @@ func TestHeaderAuth(t *testing.T) {
 }
 
 func TestQueryAuth(t *testing.T) {
+	resetCLI(t)
 	cli.Init(&cli.Config{
 		AppName:   "test",
 		EnvPrefix: "TEST",
 	})
 	Init("key", LocationQuery)
 	cli.Creds.Set("profiles.default.api_key", "test")
+	cli.SelectProfile("default")
 
 	r := cli.Client.Get()
 	r.Do()
@@ -46,12 +60,14 @@ func TestQueryAuth(t *testing.T) {
 }
 
 func TestCookieAuth(t *testing.T) {
+	resetCLI(t)
 	cli.Init(&cli.Config{
 		AppName:   "test",
 		EnvPrefix: "TEST",
 	})
 	Init("key", LocationCookie)
 	cli.Creds.Set("profiles.default.api_key", "test")
+	cli.SelectProfile("default")
 
 	r := cli.Client.Get()
 	r.Do()
@@ -62,6 +78,7 @@ func TestCookieAuth(t *testing.T) {
 }
 
 func TestBearerAuthFromEnv(t *testing.T) {
+	resetCLI(t)
 	t.Setenv("TEST_TOKEN", "secret-token")
 
 	cli.Init(&cli.Config{
@@ -77,6 +94,7 @@ func TestBearerAuthFromEnv(t *testing.T) {
 }
 
 func TestCustomAPIKeyEnvVarTakesPrecedence(t *testing.T) {
+	resetCLI(t)
 	t.Setenv("CUSTOM_ORQ_KEY", "custom-secret")
 
 	cli.Init(&cli.Config{
@@ -93,7 +111,7 @@ func TestCustomAPIKeyEnvVarTakesPrecedence(t *testing.T) {
 }
 
 func TestSelectedProfileBeatsEnvKey(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	resetCLI(t)
 	cli.Init(&cli.Config{
 		AppName:   "test",
 		EnvPrefix: "TEST",
@@ -113,13 +131,14 @@ func TestSelectedProfileBeatsEnvKey(t *testing.T) {
 }
 
 func TestProfileKeyUsedWhenNoEnvVarIsSet(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	resetCLI(t)
 	cli.Init(&cli.Config{
 		AppName:   "test",
 		EnvPrefix: "TEST",
 	})
 	Init("x-auth", LocationHeader)
 	cli.Creds.Set("profiles.default.api_key", "from-profile")
+	cli.SelectProfile("default")
 
 	r := cli.Client.Get()
 	r.Do()
@@ -128,7 +147,7 @@ func TestProfileKeyUsedWhenNoEnvVarIsSet(t *testing.T) {
 }
 
 func TestSelectedProfileWithoutKeyIsAnError(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	resetCLI(t)
 	cli.Init(&cli.Config{
 		AppName:   "test",
 		EnvPrefix: "TEST",
@@ -146,7 +165,7 @@ func TestSelectedProfileWithoutKeyIsAnError(t *testing.T) {
 }
 
 func TestUnknownProfileIsAnError(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	resetCLI(t)
 	cli.Init(&cli.Config{
 		AppName:   "test",
 		EnvPrefix: "TEST",

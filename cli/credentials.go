@@ -653,7 +653,17 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 	}
 
 	filename := filepath.Join(viper.GetString("config-directory"), "credentials.json")
-	return Creds.Save(filename)
+	if err := Creds.Save(filename); err != nil {
+		return err
+	}
+
+	// A first profile nobody has chosen yet would otherwise sit unused until the
+	// next `auth profile use`.
+	if !ProfileSelected() {
+		return saveJSONConfig(map[string]interface{}{"profile-default": profileName})
+	}
+
+	return nil
 }
 
 func hasInteractiveInput() bool {
@@ -761,41 +771,39 @@ func ProfileExists(name string) bool {
 	return Creds != nil && name != "" && Creds.IsSet("profiles."+name)
 }
 
-// ActiveProfileName returns the profile in force, or "" when profiles are
-// switched off with `--profile ""`.
+// ActiveProfileName ranks the profile sources, most specific first:
+// `--profile`, then `<PREFIX>_PROFILE` or viper.Set, then the profile chosen
+// with `auth profile use`. That last one is kept off the flag's viper key — as
+// `server-default` is kept off `server` — because viper ranks a persisted
+// override above a bound flag.
+//
+// It returns "" when no profile has been chosen. There is no fallback profile
+// name: a CLI with credentials only in the environment has no profile in force,
+// and `--profile ""` puts it back in that state for one command.
 func ActiveProfileName() string {
-	name, _ := resolveProfile()
-	return name
-}
-
-// ProfileSelected reports whether the active profile was chosen — by
-// `--profile`, `<PREFIX>_PROFILE`, viper.Set or `auth profile use` — rather
-// than being the built-in fallback. A chosen profile is authoritative: its
-// credentials and server outrank the environment, and it is an error rather
-// than a silent fallback when it cannot supply them.
-func ProfileSelected() bool {
-	_, selected := resolveProfile()
-	return selected
-}
-
-// resolveProfile ranks the profile sources, most specific first: `--profile`,
-// then `<PREFIX>_PROFILE` or viper.Set, then the `auth profile use` default.
-// That default is kept off the flag's viper key — as `server-default` is kept
-// off `server` — because viper ranks a persisted override above a bound flag.
-func resolveProfile() (string, bool) {
 	if FlagChanged(Root, "profile") {
-		return sanitizeProfileName(Root.Flag("profile").Value.String()), true
+		return sanitizeProfileName(Root.Flag("profile").Value.String())
 	}
 
-	if name := sanitizeProfileName(viper.GetString("profile")); name != "" && name != "default" {
-		return name, true
+	if name := sanitizeProfileName(viper.GetString("profile")); name != "" {
+		return name
 	}
 
-	if persisted := sanitizeProfileName(viper.GetString("profile-default")); persisted != "" {
-		return persisted, true
-	}
+	return sanitizeProfileName(viper.GetString("profile-default"))
+}
 
-	return "default", false
+// SelectProfile puts a profile in force for this process, as `--profile` does
+// for one command. It is the supported way for an embedding CLI to switch
+// profiles without going through the flag.
+func SelectProfile(name string) {
+	viper.Set("profile", sanitizeProfileName(name))
+}
+
+// ProfileSelected reports whether a profile is in force. Such a profile is
+// authoritative: its credentials and server outrank the environment, and it is
+// an error rather than a silent fallback when it cannot supply them.
+func ProfileSelected() bool {
+	return ActiveProfileName() != ""
 }
 
 // InitCredentialsFile sets up the creds file and `profile` global parameter.
@@ -808,6 +816,22 @@ func InitCredentialsFile() {
 	Creds.AddConfigPath("$HOME/." + viper.GetString("app-name") + "/")
 	Creds.ReadInConfig()
 
-	// Register a new `--profile` flag.
-	AddGlobalFlag("profile", "", "Credentials profile to use for authentication", "default")
+	// Register a new `--profile` flag. It defaults to empty: no profile is in
+	// force until one is named or chosen with `auth profile use`.
+	AddGlobalFlag("profile", "", "Credentials profile to use for authentication", "")
+
+	adoptLegacyDefaultProfile()
+}
+
+// adoptLegacyDefaultProfile records a profile named `default` as the chosen one
+// on first run. Older versions resolved that name implicitly whenever nothing
+// else was set; now that nothing is implicit, the selection has to be written
+// down once or an existing install would come up with no profile at all.
+func adoptLegacyDefaultProfile() {
+	if !Creds.IsSet("profiles.default") || viper.GetString("profile-default") != "" {
+		return
+	}
+
+	// A failure here leaves the CLI usable with an explicit `--profile`.
+	_ = saveJSONConfig(map[string]interface{}{"profile-default": "default"})
 }
