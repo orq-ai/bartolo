@@ -2,36 +2,40 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"os"
-	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 
 	survey "github.com/AlecAivazis/survey/v2"
+	isatty "github.com/mattn/go-isatty"
 	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"golang.org/x/term"
 	"gopkg.in/h2non/gentleman.v2/context"
 )
 
-// writeCredentials persists the credentials file at 0600, so the long-lived API keys
-// it holds are never world-readable (viper.WriteConfigAs would create it 0644).
+// writeCredentials persists the credentials file atomically at 0600. os.CreateTemp
+// creates the temp file at 0600 from birth (no world-readable window), then viper
+// writes into it, then rename replaces the target. An interrupted write leaves the
+// existing file intact.
 func writeCredentials(filename string) error {
-	// Writes nothing: sets the mode before viper writes the key, so the secret is never
-	// world-readable even briefly. The chmod narrows a file an older build left 0644.
-	f, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY, 0o600)
+	dir := filepath.Dir(filename)
+	ext := filepath.Ext(filename)
+	base := strings.TrimSuffix(filepath.Base(filename), ext)
+	f, err := os.CreateTemp(dir, base+"-*"+ext)
 	if err != nil {
 		return err
 	}
-	if err := f.Close(); err != nil {
+	tmp := f.Name()
+	f.Close()
+	if err := Creds.viper.WriteConfigAs(tmp); err != nil {
+		os.Remove(tmp)
 		return err
 	}
-	if err := os.Chmod(filename, 0o600); err != nil {
-		return err
-	}
-	return Creds.WriteConfigAs(filename)
+	return os.Rename(tmp, filename)
 }
 
 // AuthHandler describes a handler that can be called on a request to inject
@@ -268,19 +272,15 @@ func UseAuth(typeName string, handler AuthHandler) {
 		use += " [<" + strings.Replace(name, "_", "-", -1) + ">]"
 	}
 
-	run := func(cmd *cobra.Command, args []string) {
+	run := func(cmd *cobra.Command, args []string) error {
 		name := strings.Replace(args[0], ".", "-", -1)
 		Creds.Set("profiles."+name+".type", typeName)
 
 		for i, key := range keys {
-			label := strings.Replace(key, "_", "-", -1)
-			value, ok := resolveProfileValue(key, label, args, i)
-			if !ok {
-				exitFunc(ExitUsage)
-				return
+			value, err := resolveProfileValue(cmd, key, args, i)
+			if err != nil {
+				return err
 			}
-			// Replace periods in the name since Viper will create nested structures
-			// in the config and this isn't what we want!
 			Creds.Set("profiles."+name+"."+strings.Replace(key, "-", "_", -1), value)
 		}
 
@@ -288,16 +288,21 @@ func UseAuth(typeName string, handler AuthHandler) {
 			Creds.Set("profiles."+name+".server", server)
 		}
 
-		filename := path.Join(viper.GetString("config-directory"), "credentials.json")
-		if err := writeCredentials(filename); err != nil {
-			panic(err)
+		filename := filepath.Join(viper.GetString("config-directory"), "credentials.json")
+		return writeCredentials(filename)
+	}
+
+	addKeyFileFlags := func(cmd *cobra.Command) {
+		for _, key := range keys {
+			label := strings.Replace(key, "_", "-", -1)
+			cmd.Flags().String(label+"-file", "", fmt.Sprintf("Read %s from a file (use - for stdin)", label))
 		}
 	}
 
 	if typeName == "" {
 		// Backward-compatibility use-case without an explicit type. Set up the
 		// `add-profile` command as the only way to authenticate.
-		if authAddCommand.Run != nil {
+		if authAddCommand.RunE != nil {
 			// This fallback code path was already used, so we must be registering
 			// a *second* anonymous auth type, which is not allowed.
 			panic("register auth type names to use multi-auth")
@@ -306,15 +311,18 @@ func UseAuth(typeName string, handler AuthHandler) {
 		authAddCommand.Use = "add-profile" + use
 		authAddCommand.Short = "Add a new named authentication profile"
 		authAddCommand.Args = cobra.RangeArgs(1, 1+len(keys))
-		authAddCommand.Run = run
+		authAddCommand.RunE = run
+		addKeyFileFlags(authAddCommand)
 	} else {
 		// Add a new type-specific `add-profile` subcommand.
-		authAddCommand.AddCommand(&cobra.Command{
+		cmd := &cobra.Command{
 			Use:   typeName + use,
 			Short: "Add a new named " + typeName + " authentication profile",
 			Args:  cobra.RangeArgs(1, 1+len(keys)),
-			Run:   run,
-		})
+			RunE:  run,
+		}
+		addKeyFileFlags(cmd)
+		authAddCommand.AddCommand(cmd)
 	}
 }
 
@@ -411,7 +419,7 @@ func pickAuthHandler(preferredType string) (string, AuthHandler, error) {
 		Message: "Auth type:",
 		Options: names,
 		Default: selected,
-	}, &selected); err != nil {
+	}, &selected, surveyStderr()); err != nil {
 		return "", nil, err
 	}
 
@@ -423,29 +431,57 @@ func pickAuthHandler(preferredType string) (string, AuthHandler, error) {
 	return resolved, AuthHandlers[resolved], nil
 }
 
-// resolveProfileValue returns one profile key's value: the positional argument if given,
-// else a prompt. ok is false when there is neither, and the caller exits ExitUsage.
-func resolveProfileValue(key, label string, args []string, i int) (value string, ok bool) {
-	if i+1 < len(args) {
-		// Backward-compat: positional value (discouraged for secrets).
-		return args[i+1], true
+// resolveProfileValue returns one profile key's value, tried in order:
+//  1. --<label>-file <path> (pass "-" for stdin)
+//  2. positional argument (warns on stderr for secrets)
+//  3. interactive prompt
+func resolveProfileValue(cmd *cobra.Command, key string, args []string, i int) (string, error) {
+	label := strings.Replace(key, "_", "-", -1)
+
+	// 1. --<label>-file flag
+	flagName := label + "-file"
+	if path, _ := cmd.Flags().GetString(flagName); path != "" {
+		return readKeyFile(path)
 	}
-	// Check for a terminal before prompting rather than after: survey reads stdin
-	// directly, so an open-but-idle pipe (a CI runner, `subprocess.Popen`) blocks
-	// forever instead of returning the error this used to rely on.
+
+	// 2. positional
+	if i+1 < len(args) {
+		if looksSensitiveKey(key) {
+			fmt.Fprintf(Stderr, "warning: %s passed on the command line; prefer --%s-file or the interactive prompt to keep it out of shell history\n", label, label)
+		}
+		return args[i+1], nil
+	}
+
+	// 3. prompt
 	if !isInteractive() {
-		fmt.Fprintf(os.Stderr, "no %s provided; pass it as an argument or run in an interactive terminal\n", label)
-		return "", false
+		return "", NewUsageError(fmt.Errorf("no %s provided; use --%s-file <path> or run in an interactive terminal", label, label))
 	}
 	v, err := promptProfileValue(key)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "no %s provided; pass it as an argument or run in an interactive terminal\n", label)
-		return "", false
+		return "", fmt.Errorf("could not read %s: %w", label, err)
 	}
-	return v, true
+	return v, nil
 }
 
-// promptProfileValue is a var so tests can replace the prompt, like isInteractive below.
+func readKeyFile(path string) (string, error) {
+	var data []byte
+	var err error
+	if path == "-" {
+		data, err = io.ReadAll(os.Stdin)
+	} else {
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading key file: %w", err)
+	}
+	v := strings.TrimSpace(string(data))
+	if v == "" {
+		return "", fmt.Errorf("key file %q is empty", path)
+	}
+	return v, nil
+}
+
+// promptProfileValue is a var so tests can replace the prompt.
 var promptProfileValue = func(key string) (string, error) {
 	message := strings.ReplaceAll(key, "_", " ")
 	message = strings.Title(message)
@@ -453,17 +489,18 @@ var promptProfileValue = func(key string) (string, error) {
 		message = strings.ReplaceAll(message, "Api ", "API ")
 	}
 
-	prompt := &survey.Input{Message: message + ":"}
+	opts := []survey.AskOpt{surveyStderr(), survey.WithValidator(survey.Required)}
+
 	if looksSensitiveKey(key) {
 		password := ""
-		if err := survey.AskOne(&survey.Password{Message: message + ":"}, &password); err != nil {
+		if err := survey.AskOne(&survey.Password{Message: message + ":"}, &password, opts...); err != nil {
 			return "", err
 		}
 		return password, nil
 	}
 
 	value := ""
-	if err := survey.AskOne(prompt, &value); err != nil {
+	if err := survey.AskOne(&survey.Input{Message: message + ":"}, &value, opts...); err != nil {
 		return "", err
 	}
 	return value, nil
@@ -503,17 +540,20 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 		Creds.Set("profiles."+profileName+".server", server)
 	}
 
-	filename := path.Join(viper.GetString("config-directory"), "credentials.json")
+	filename := filepath.Join(viper.GetString("config-directory"), "credentials.json")
 	return writeCredentials(filename)
 }
 
 func hasInteractiveInput() bool {
-	// term.IsTerminal, not os.ModeCharDevice: /dev/null is a character device, so
-	// ModeCharDevice read as interactive under docker without -i, systemd and cron.
-	return term.IsTerminal(int(os.Stdin.Fd()))
+	return isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
 }
 
-// isInteractive and askConfirm are vars so ConfirmDestructive is testable without a TTY.
+// surveyStderr routes survey prompts to stderr so they never corrupt piped stdout.
+func surveyStderr() survey.AskOpt {
+	return survey.WithStdio(os.Stdin, os.Stderr, os.Stderr)
+}
+
+// isInteractive is a var so ConfirmDestructive is testable without a TTY.
 var isInteractive = hasInteractiveInput
 
 var askConfirm = func(action string) (bool, error) {
@@ -521,45 +561,53 @@ var askConfirm = func(action string) (bool, error) {
 	err := survey.AskOne(&survey.Confirm{
 		Message: fmt.Sprintf("This will run %q and cannot be undone. Continue?", action),
 		Default: false,
-	}, &proceed)
+	}, &proceed, surveyStderr())
 	return proceed, err
 }
 
-// exitFunc is a var so the refusal exit can be tested without ending the test process.
-var exitFunc = os.Exit
+// ErrDestructiveRefused is returned when the user declines a destructive confirmation.
+var ErrDestructiveRefused = fmt.Errorf("operation cancelled")
 
-// ConfirmDestructive gates a destructive command behind a confirmation: --force
-// proceeds, a non-interactive shell without it refuses and exits ExitUsage so a script
-// cannot read a skipped delete as a success, otherwise it prompts and defaults to No.
-// args are the command's positional arguments, so the prompt names the target being
-// deleted rather than the command's usage template.
-func ConfirmDestructive(cmd *cobra.Command, args []string) bool {
+// ConfirmDestructive gates a destructive command behind a confirmation. Returns nil
+// to proceed, a *UsageError when a non-interactive shell lacks --force, or an error
+// when the prompt fails or the user declines. Every refusal flows through
+// ExecuteContext/ExitCodeFor, so no failure path can report exit 0.
+func ConfirmDestructive(cmd *cobra.Command, args []string) error {
 	if force, err := cmd.Flags().GetBool("force"); err == nil && force {
-		return true
+		return nil
 	}
 
 	action := strings.TrimSpace(cmd.CommandPath() + " " + strings.Join(args, " "))
 
 	if !isInteractive() {
-		fmt.Fprintf(os.Stderr, "Refusing to run %q without --force in a non-interactive shell.\n", action)
-		exitFunc(ExitUsage)
-		return false // unreachable: exitFunc does not return
+		return NewUsageError(fmt.Errorf("refusing to run %q without --force in a non-interactive shell", action))
 	}
 	proceed, err := askConfirm(action)
 	if err != nil {
-		// The prompt itself broke. Refusing silently would exit 0 and read as a
-		// completed delete, so fail like any other runtime error.
-		fmt.Fprintf(os.Stderr, "Could not read a confirmation for %q: %v\n", action, err)
-		exitFunc(ExitError)
-		return false // unreachable: exitFunc does not return
+		return fmt.Errorf("could not read a confirmation for %q: %w", action, err)
 	}
-	return proceed
+	if !proceed {
+		return ErrDestructiveRefused
+	}
+	return nil
 }
 
-// CredentialsFile holds credential-related information.
+// CredentialsFile holds credential-related information. The viper instance is
+// unexported so callers cannot bypass writeCredentials and create a 0644 file.
 type CredentialsFile struct {
-	*viper.Viper
+	viper *viper.Viper
 }
+
+func (c *CredentialsFile) Set(key string, value interface{}) { c.viper.Set(key, value) }
+func (c *CredentialsFile) GetStringMap(key string) map[string]interface{} {
+	return c.viper.GetStringMap(key)
+}
+func (c *CredentialsFile) GetStringMapString(key string) map[string]string {
+	return c.viper.GetStringMapString(key)
+}
+func (c *CredentialsFile) SetConfigName(name string) { c.viper.SetConfigName(name) }
+func (c *CredentialsFile) AddConfigPath(path string) { c.viper.AddConfigPath(path) }
+func (c *CredentialsFile) ReadInConfig() error       { return c.viper.ReadInConfig() }
 
 // Creds represents a configuration file storing credential-related
 // information. Use this only after `InitCredentialsFile` has been called.
@@ -574,7 +622,7 @@ func GetProfile() map[string]string {
 func InitCredentialsFile() {
 	// Setup a credentials file, kept separate from configuration which might
 	// get checked into source control.
-	Creds = &CredentialsFile{viper.New()}
+	Creds = &CredentialsFile{viper: viper.New()}
 
 	Creds.SetConfigName("credentials")
 	Creds.AddConfigPath("$HOME/." + viper.GetString("app-name") + "/")

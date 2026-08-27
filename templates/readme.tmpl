@@ -70,8 +70,9 @@ not have to repeat the flag on every call:
 
 `{{ .CommandName }} auth setup` takes the same flag.
 
-Each secret is prompted for without echo. A key can still be passed as a positional
-argument, but that leaves it in shell history and in `ps` output, so prefer the prompt.
+Each secret is prompted for without echo. In CI or automation, use `--<key>-file <path>`
+(or `--<key>-file -` for stdin) to supply secrets without putting them on the command line.
+Positional arguments still work but print a warning for sensitive keys.
 
 Resolution order, most specific first: an explicit `--server` flag or
 `<PREFIX>_SERVER` environment variable (same prefix as the variables above),

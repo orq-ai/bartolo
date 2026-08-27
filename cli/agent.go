@@ -169,6 +169,12 @@ func newRequestCommand() *cobra.Command {
 			method := strings.ToUpper(args[0])
 			target := args[1]
 
+			if method == "DELETE" {
+				if err := ConfirmDestructive(cmd, args); err != nil {
+					return err
+				}
+			}
+
 			url := target
 			if !strings.Contains(target, "://") {
 				server := ResolveServer()
@@ -218,6 +224,7 @@ func newRequestCommand() *cobra.Command {
 
 	cmd.Flags().StringSlice("header", nil, "Additional request header in 'Name: Value' form")
 	cmd.Flags().String("content-type", "application/json", "Content type to use when sending a request body")
+	AddForceFlag(cmd)
 	AddBodyFlags(cmd)
 
 	if cmd.Flags().HasFlags() {

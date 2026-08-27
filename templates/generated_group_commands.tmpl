@@ -111,11 +111,15 @@ func register{{ $group.GoName }}Commands(root *cobra.Command) {
 				{{- end }}
 				Example: examples,
 				Args:    cobra.MinimumNArgs({{ len .RequiredParams }}),
+				{{- if eq .Method "Delete" }}
+				RunE: func(cmd *cobra.Command, args []string) error {
+				{{- else }}
 				Run: func(cmd *cobra.Command, args []string) {
+				{{- end }}
 					{{- if .CanHaveBody }}
 					{{- if .BodyExample }}
 					if bartolocli.PrintBodyExample(params, "{{ .BodyExample | escapeStr }}") {
-						return
+						return{{ if eq .Method "Delete" }} nil{{ end }}
 					}
 					{{- end }}
 					body, err := bartolocli.GetBodyWithFlags(cmd, "{{ .MediaType | escapeStr }}", args[{{ len .RequiredParams }}:], params, {{ template "bodyFields" . }})
@@ -125,8 +129,8 @@ func register{{ $group.GoName }}Commands(root *cobra.Command) {
 					{{- end }}
 
 					{{- if eq .Method "Delete" }}
-					if !bartolocli.ConfirmDestructive(cmd, args) {
-						return
+					if err := bartolocli.ConfirmDestructive(cmd, args); err != nil {
+						return err
 					}
 					{{- end }}
 
@@ -175,6 +179,9 @@ func register{{ $group.GoName }}Commands(root *cobra.Command) {
 								log.Fatal().Err(err).Msg("waiter error")
 							}
 						}
+					{{- end }}
+					{{- if eq .Method "Delete" }}
+					return nil
 					{{- end }}
 				},
 			}

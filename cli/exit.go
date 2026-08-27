@@ -59,7 +59,13 @@ func ExecuteContext(ctx context.Context) int {
 	// failed does not need its own usage repeated back.
 	Root.SilenceUsage = true
 
+	Root.SilenceErrors = true
+
 	cmd, err := Root.ExecuteContextC(ctx)
+
+	if err != nil && !errors.Is(err, ErrDestructiveRefused) {
+		fmt.Fprintln(Stderr, "Error:", err)
+	}
 
 	var usage *UsageError
 	if errors.As(err, &usage) && cmd != nil {
@@ -72,6 +78,10 @@ func ExecuteContext(ctx context.Context) int {
 // ExitCodeFor maps an error returned by Root.Execute to a process exit code.
 func ExitCodeFor(err error) int {
 	if err == nil {
+		return ExitOK
+	}
+
+	if errors.Is(err, ErrDestructiveRefused) {
 		return ExitOK
 	}
 
