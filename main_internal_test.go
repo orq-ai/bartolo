@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1330,19 +1331,96 @@ paths:
 		t.Errorf("nullable enum values should be carried through escaped, got:\n%s", rendered)
 	}
 
-	// x-cli-no-validate opts a parameter out entirely.
-	if strings.Contains(rendered, "opaque-cursor") && strings.Contains(rendered, `ValidateParam("--opaque-cursor"`) {
+	// x-cli-no-validate opts a parameter out entirely. Asserting the flag exists
+	// first matters: without it the check below passes for a param that simply
+	// was not rendered.
+	if !strings.Contains(rendered, "opaque-cursor") {
+		t.Fatalf("the opted-out param should still be a flag, got:\n%s", rendered)
+	}
+	if strings.Contains(rendered, `ValidateParam("--opaque-cursor"`) {
 		t.Error("x-cli-no-validate should suppress the check")
 	}
 }
 
+// x-cli-no-validate is read as a boolean, not as mere presence, so writing the
+// documented `: true` is what disables the check — and `: false` re-enables it.
+func TestNoValidateExtensionReadsItsValue(t *testing.T) {
+	spec := `
+openapi: 3.0.3
+info:
+  title: Ext API
+  version: "1"
+paths:
+  /things:
+    get:
+      operationId: ListThings
+      parameters:
+        - in: query
+          name: cursor
+          x-cli-no-validate: %s
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: ok
+`
+
+	if rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(spec, "false")))); !strings.Contains(rendered, `ValidateParam("--cursor"`) {
+		t.Errorf("x-cli-no-validate: false should leave the check in place, got:\n%s", rendered)
+	}
+
+	if rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(spec, "true")))); strings.Contains(rendered, `ValidateParam("--cursor"`) {
+		t.Errorf("x-cli-no-validate: true should suppress the check, got:\n%s", rendered)
+	}
+}
+
 func TestGeneratedRootCommandsReturnErrors(t *testing.T) {
-	doc := loadTestSpec(t, `
+	// The path has no group to infer, so the operation stays ungrouped and the
+	// root template actually renders it. `/v2/agents` would not: inferGroupFromPath
+	// skips the version segment and groups it under `agents`, leaving the root
+	// render empty and every assertion below satisfied by the group render.
+	root, group := renderRootAndGroup(t, `
 openapi: 3.0.3
 info:
   title: Error API
   version: "1"
 paths:
+  /{id}:
+    get:
+      operationId: GetThing
+      summary: Get a thing
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: detailed
+          in: query
+          schema: {type: boolean}
+      responses:
+        "200":
+          description: ok
+    post:
+      operationId: CreateThing
+      summary: Create a thing
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum: [active, archived]
+      responses:
+        "200":
+          description: ok
   /v2/agents:
     get:
       operationId: ListAgents
@@ -1352,29 +1430,57 @@ paths:
           description: ok
 `)
 
-	api := ProcessAPI("example", doc)
+	if !strings.Contains(root, `Use: "get-thing id"`) {
+		t.Fatalf("fixture must render an ungrouped operation into the root template, got:\n%s", root)
+	}
 
-	rendered := renderCommandTemplate("templates/generated_root_commands.tmpl", &CommandsTemplateData{
+	for name, rendered := range map[string]string{"root": root, "group": group} {
+		// Commands must return their errors so cli/exit.go can tell a usage error
+		// (exit 2) from an operation failure (exit 1). log.Fatal bypasses that.
+		if !strings.Contains(rendered, "RunE: func(cmd *cobra.Command, args []string) error {") {
+			t.Errorf("%s: generated commands should use RunE", name)
+		}
+		if strings.Contains(rendered, "log.Fatal") {
+			t.Errorf("%s: generated commands should not call log.Fatal", name)
+		}
+	}
+
+	// The two blocks below were the copy-paste divergences that motivated
+	// templates/command_partials.tmpl: both were correct in the group template
+	// and silently wrong or missing in the root one.
+	if !strings.Contains(root, `Enum: []string{`) || !strings.Contains(root, `"archived",`) {
+		t.Errorf("root: body-field enums should be wired up, got:\n%s", root)
+	}
+	if !strings.Contains(root, `cmd.Flags().Bool("detailed"`) {
+		t.Errorf("root: an optional boolean parameter should register a Bool flag, got:\n%s", root)
+	}
+}
+
+// renderRootAndGroup renders a spec through both command templates and returns
+// the two outputs separately. Concatenating them lets an assertion meant for one
+// template pass on the other's output, which is exactly the drift these tests
+// exist to catch.
+func renderRootAndGroup(t *testing.T, spec string) (string, string) {
+	t.Helper()
+
+	api := ProcessAPI("example", loadTestSpec(t, spec))
+
+	root := renderCommandTemplate("templates/generated_root_commands.tmpl", &CommandsTemplateData{
 		API:        api,
 		Operations: api.Operations,
 		Waiters:    api.Waiters,
 		NeedsFmt:   commandFileNeedsFmt(api.Operations),
 	})
-	for _, group := range api.Groups {
-		rendered += renderCommandTemplate("templates/generated_group_commands.tmpl", &CommandsTemplateData{
+
+	var group string
+	for _, g := range api.Groups {
+		group += renderCommandTemplate("templates/generated_group_commands.tmpl", &CommandsTemplateData{
 			API:        api,
-			Group:      group,
-			Operations: group.Operations,
-			NeedsFmt:   commandFileNeedsFmt(group.Operations),
+			Group:      g,
+			Operations: g.Operations,
+			NeedsFmt:   commandFileNeedsFmt(g.Operations),
 		})
 	}
 
-	// Commands must return their errors so cli/exit.go can tell a usage error
-	// (exit 2) from an operation failure (exit 1). log.Fatal bypasses that.
-	if !strings.Contains(rendered, "RunE: func(cmd *cobra.Command, args []string) error {") {
-		t.Error("generated commands should use RunE")
-	}
-	if strings.Contains(rendered, "log.Fatal") {
-		t.Error("generated commands should not call log.Fatal")
-	}
+	return root, group
 }

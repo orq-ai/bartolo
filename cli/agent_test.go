@@ -91,7 +91,6 @@ func TestNormalizeServerURL(t *testing.T) {
 	unchanged := []string{
 		"https://api.example.com",
 		"http://localhost:8080",
-		"https://api.example.com/v2/",
 		"https://user:pass@api.example.com",
 	}
 	for _, in := range unchanged {
@@ -109,10 +108,14 @@ func TestNormalizeServerURL(t *testing.T) {
 		"api.example.com:8443/v2": "https://api.example.com:8443/v2",
 		"//api.example.com":       "https://api.example.com",
 	}
+	// A trailing slash is dropped: the generated client builds request URLs as
+	// server+path, so keeping it would produce `https://host//things` and would
+	// also break the string-equality comparison in `server list`.
+	rewritten["https://api.example.com/v2/"] = "https://api.example.com/v2"
 	for in, want := range rewritten {
-		got, added, err := NormalizeServerURL(in)
-		if err != nil || !added || got != want {
-			t.Errorf("NormalizeServerURL(%q) = (%q, %v, %v), want (%q, true, nil)", in, got, added, err, want)
+		got, _, err := NormalizeServerURL(in)
+		if err != nil || got != want {
+			t.Errorf("NormalizeServerURL(%q) = (%q, _, %v), want (%q, _, nil)", in, got, err, want)
 		}
 	}
 
@@ -140,12 +143,53 @@ func TestNormalizeServerURL(t *testing.T) {
 		"localhost",
 		"127.0.0.1:8080",
 		"dev.localhost:3000",
+		// Protocol-relative values reach the same loopback rule as bare hosts.
+		"//localhost:8080",
+		// A mistyped scheme is not a host: without this it would be read as one
+		// and become `https://https:/api.example.com`.
+		"https:/api.example.com",
+		"https:api.example.com",
 		// A bare host with a local part would silently become URL credentials.
 		"user@api.example.com",
+		// server+path concatenation puts a query or fragment mid-URL.
+		"https://api.example.com/v2?token=abc",
+		"https://api.example.com/v2#frag",
 	}
 	for _, in := range invalid {
 		if got, _, err := NormalizeServerURL(in); err == nil {
 			t.Errorf("NormalizeServerURL(%q) = (%q, _, nil), want error", in, got)
 		}
+	}
+}
+
+// ResolveServer normalizes on the read path, not only where a value is written:
+// a config or credentials file can be written by an older bartolo, edited by
+// hand, or come from <PREFIX>_SERVER_DEFAULT, none of which pass through a
+// write-time check.
+func TestResolveServerNormalizesPersistedValues(t *testing.T) {
+	cases := map[string]string{
+		"api.example.com":          "https://api.example.com",
+		"HTTPS://API.example.com":  "https://api.example.com",
+		"https://api.example.com/": "https://api.example.com",
+	}
+
+	for raw, want := range cases {
+		viper.Reset()
+		Init(&Config{AppName: "test"})
+		viper.Set("server-default", raw)
+
+		if got := ResolveServer(); got != want {
+			t.Errorf("ResolveServer() with server-default %q = %q, want %q", raw, got, want)
+		}
+	}
+
+	// An unusable value is returned as-is rather than swallowed: this is the
+	// request path, and a transport error naming the bad URL beats an empty one.
+	viper.Reset()
+	Init(&Config{AppName: "test"})
+	viper.Set("server-default", "ftp://api.example.com")
+
+	if got := ResolveServer(); got != "ftp://api.example.com" {
+		t.Errorf("ResolveServer() with an unusable default = %q, want it returned unchanged", got)
 	}
 }

@@ -9,9 +9,10 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// Mirrors openapi3.FormatOfStringForUUIDOfRFC4122. Copied rather than imported
-// so generated binaries do not link kin-openapi for one constant.
-var uuidPattern = regexp.MustCompile(`^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000)$`)
+// Deliberately looser than openapi3.FormatOfStringForUUIDOfRFC4122, which pins
+// the version nibble to 1-5 and would warn on a UUIDv7 — a common choice for
+// new APIs. For a check that only warns, the shape is the part worth asserting.
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
 // ValidateEnum reports whether value is one of allowed. An empty allowed list
 // means the schema did not constrain the value.
@@ -61,10 +62,11 @@ func ValidateParam(label, value, format string, allowed []string) error {
 	return ValidateFormat(label, value, format)
 }
 
-// WarnIfInvalid reports a parameter the schema says the API will reject, and
-// sends the request anyway. An OpenAPI `enum` or `format` is often aspirational
-// — `format: uuid` on an API that issues prefixed IDs, an enum list that lags
-// the deployed server — so the server, not the schema, decides what is valid.
+// WarnIfInvalid logs a schema-validation failure as a warning instead of
+// returning it. Generated commands send the request anyway: an OpenAPI `enum`
+// or `format` is often aspirational — `format: uuid` on an API that issues
+// prefixed IDs, an enum list that lags the deployed server — so the server, not
+// the schema, decides what is valid.
 func WarnIfInvalid(err error) {
 	if err != nil {
 		log.Warn().Msg(err.Error())

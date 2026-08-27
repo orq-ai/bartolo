@@ -109,7 +109,14 @@ func Init(config *Config) {
 			if server := strings.TrimSpace(viper.GetString("server")); server != "" {
 				normalized, err := normalizeServerURLWarn(server)
 				if err != nil {
-					return NewUsageError(fmt.Errorf("--server: %w", err))
+					// Naming --server unconditionally would send a user who set
+					// <PREFIX>_SERVER off to fix a flag they never passed.
+					label := "server URL"
+					if flag := cmd.Flags().Lookup("server"); flag != nil && flag.Changed {
+						label = "--server"
+					}
+
+					return NewUsageError(fmt.Errorf("%s: %w", label, err))
 				}
 				viper.Set("server", normalized)
 			}

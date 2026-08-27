@@ -155,3 +155,40 @@ func TestGroupWithoutArgsShowsHelp(t *testing.T) {
 	assert.Equal(t, ExitOK, code)
 	assert.Contains(t, stdout, "leaf")
 }
+
+// A bad body-flag value is the user's mistake, so it exits 2 (usage) like any
+// other bad input, not 1 (operation failure). Generated commands reach this
+// through GetBodyWithFlags, which is where the classification lives.
+func TestBodyFlagErrorIsUsageError(t *testing.T) {
+	viper.Reset()
+	Init(&Config{AppName: "test"})
+
+	fields := []BodyField{{
+		Name:     "status",
+		FlagName: "status",
+		Type:     "enum-string",
+		Enum:     []string{"active", "archived"},
+	}}
+
+	cmd := &cobra.Command{
+		Use: "create",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			params := viper.New()
+			_, err := GetBodyWithFlags(cmd, "application/json", args, params, fields)
+			if err != nil {
+				// The generated template wraps rather than classifies.
+				return fmt.Errorf("unable to get body: %w", err)
+			}
+
+			return nil
+		},
+	}
+	AddBodyFieldFlags(cmd, fields)
+	Root.AddCommand(cmd)
+	defer Root.RemoveCommand(cmd)
+
+	_, stderr, code := executeForExit("create --status bogus")
+
+	assert.Equal(t, ExitUsage, code, "stderr: %s", stderr)
+	assert.Contains(t, stderr, "is not one of")
+}

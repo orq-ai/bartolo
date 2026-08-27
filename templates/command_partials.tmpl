@@ -1,10 +1,15 @@
 {{/*
-Template blocks shared by every command template. They live here because the
-same blocks used to be copy-pasted into generated_client.tmpl,
-generated_root_commands.tmpl and generated_group_commands.tmpl, and the copies
-drifted: body-field enums were wired up in the group template and silently
-missing from the root one, so enum validation never ran for ungrouped
-operations.
+Template blocks shared between the command templates, each named with its
+consumers:
+
+  params, bodyFields, operationRun  -> generated_root_commands.tmpl,
+                                       generated_group_commands.tmpl
+  operationFunc, checkParams        -> generated_client.tmpl
+
+They live here because the same blocks used to be copy-pasted between those
+files (and twice within generated_client.tmpl), and the copies drifted:
+body-field enums were wired up in the group template and silently missing from
+the root one, so enum validation never ran for ungrouped operations.
 
 A `define` cannot see variables from the file that calls it, so anything these
 blocks need is a field on the operation itself (see Operation.PublicPrefix).
@@ -60,7 +65,10 @@ blocks need is a field on the operation itself (see Operation.PublicPrefix).
 {{ end }}
 
 {{/*
-checkParams warns about parameter values the schema says the API will reject.
+checkParams warns about *required* parameter values the schema says the API
+will reject. Optional parameters are checked inline in operationFunc, since
+there the check only applies when the flag was actually set.
+
 It only warns: an OpenAPI `enum` or `format` is frequently aspirational or
 stale, so the server stays the authority on what it accepts.
 */}}
@@ -84,7 +92,7 @@ stale, so the server stays the authority on what it accepts.
 		{{- range $param := .RequiredParams }}
 			{{- if eq $param.In "path" }}
 				if {{ $param.GoName }} == "" {
-					return nil, nil, errors.Errorf("path parameter {{ $param.Name }} cannot be empty")
+					return nil, nil, bartolocli.NewUsageError(errors.Errorf("path parameter {{ $param.Name }} cannot be empty"))
 				}
 			{{- end }}
 		{{- end }}
@@ -111,7 +119,11 @@ stale, so the server stays the authority on what it accepts.
 			{{ .GoName }} := params.Get{{ .Type | title }}("{{ .CLIName | escapeStr }}")
 			if {{ .GoName }} != {{ .TypeNil }} {
 				{{- if or .Enum .Format }}
-					bartolocli.WarnIfInvalid(bartolocli.ValidateParam("--{{ .CLIName | escapeStr }}", fmt.Sprintf("%v", {{ .GoName }}), "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} }))
+					{{- /* Enum and Format are only resolved for string params (see
+					getParams), so the value needs no fmt.Sprintf — which matters,
+					because Imports.Fmt is set from the param's `in`, not from this
+					block. */}}
+					bartolocli.WarnIfInvalid(bartolocli.ValidateParam("--{{ .CLIName | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} }))
 				{{- end }}
 				{{- if eq .In "query" }}
 					req = req.AddQuery("{{ .Name | escapeStr }}", fmt.Sprintf("%v", {{ .GoName }}))

@@ -180,12 +180,24 @@ func HelpSection(parent *cobra.Command, cmd *cobra.Command, title string) {
 }
 
 // sweepIntoOtherHelpSection puts every remaining ungrouped command under
-// HelpSectionOther, so a CLI that uses sections at all does not also show
-// cobra's "Additional Commands" block. It runs at execute time because that is
-// the first point where every command is registered, including the ones a
-// consuming CLI adds after Register.
+// HelpSectionOther, so a command tree that uses sections at all does not also
+// show cobra's "Additional Commands" block. It runs at execute time because
+// that is the first point where every command is registered, including the ones
+// a consuming CLI adds after Register.
+//
+// It recurses because operations inside a generated group get their sections
+// from the same x-cli-help-section extension as top-level ones, so a group can
+// hold a mix of sectioned and unsectioned subcommands.
 func sweepIntoOtherHelpSection(root *cobra.Command) {
-	if root == nil || len(root.Groups()) == 0 {
+	if root == nil {
+		return
+	}
+
+	for _, cmd := range root.Commands() {
+		sweepIntoOtherHelpSection(cmd)
+	}
+
+	if len(root.Groups()) == 0 {
 		return
 	}
 

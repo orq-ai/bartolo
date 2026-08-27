@@ -660,6 +660,22 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 	return result
 }
 
+// extBool returns the boolean value of an OpenAPI extension. A missing
+// extension is false; so is any non-boolean value, so `x-cli-no-validate:
+// false` means what it says rather than being read as mere presence.
+func extBool(i interface{}) bool {
+	if b, ok := i.(bool); ok {
+		return b
+	}
+
+	var decoded bool
+	if raw, ok := i.(json.RawMessage); ok && json.Unmarshal(raw, &decoded) == nil {
+		return decoded
+	}
+
+	return false
+}
+
 // extStr returns the string value of an OpenAPI extension stored as a JSON
 // raw message.
 func extStr(i interface{}) (decoded string) {
@@ -1207,7 +1223,7 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 			// time so there is nothing to skip further down.
 			var enum []string
 			var format string
-			if t == "string" && p.Value.Extensions[ExtNoValidate] == nil && p.Value.Schema != nil {
+			if t == "string" && !extBool(p.Value.Extensions[ExtNoValidate]) && p.Value.Schema != nil {
 				enum = enumStrings(p.Value.Schema.Value)
 				if effective, _ := effectiveBodySchema(p.Value.Schema.Value); effective != nil {
 					format = effective.Format

@@ -167,6 +167,19 @@ func GetBody(mediaType string, args []string, params *viper.Viper) (string, erro
 // satisfied before it decides to read stdin, which is what keeps a command
 // from blocking on an idle pipe. See loadBaseBody for the stdin rules.
 func GetBodyWithFlags(cmd *cobra.Command, mediaType string, args []string, params *viper.Viper, fields []BodyField) (string, error) {
+	body, err := getBodyWithFlags(cmd, mediaType, args, params, fields)
+	if err != nil {
+		// Everything this can fail on is the user's own input — a flag value, a
+		// shorthand expression, a --from-file path, malformed JSON — so it is a
+		// usage error and exits 2, not an operation failure. Classifying it here
+		// rather than at each return keeps the generated caller a plain wrap.
+		return "", NewUsageError(err)
+	}
+
+	return body, nil
+}
+
+func getBodyWithFlags(cmd *cobra.Command, mediaType string, args []string, params *viper.Viper, fields []BodyField) (string, error) {
 	body, err := loadBaseBody(params, bodySuppliedElsewhere(cmd, params, args, fields))
 	if err != nil {
 		return "", err
