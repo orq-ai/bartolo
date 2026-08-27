@@ -131,6 +131,12 @@ jobs:
       - name: Refuse an unconfirmed major
         # A major bump needs a human. Fail rather than skip: a blocked release
         # must not look like a docs-only push.
+        #
+        # Dormant while `.svu.yml` sets `v0: true` — under v0 svu caps a breaking
+        # change at a minor, so `svu next` can never cross a major boundary, and
+        # the only path that can (`svu major`) is the one this condition exempts.
+        # `v0: true` is the guard that is actually load-bearing today; this step
+        # is what takes over the day that is dropped, per .svu.yml's own note.
         if: steps.version.outputs.major_bump == 'true' && github.event.inputs.force_level != 'major'
         run: |
           echo "::error::Refusing an automatic major bump ${{ steps.version.outputs.current }} -> ${{ steps.version.outputs.next }}. Re-run this workflow via workflow_dispatch with force_level=major to confirm, or force_level=minor/patch to ship the breaking changes at a lower level."

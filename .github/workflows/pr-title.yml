@@ -12,9 +12,10 @@ on:
     types: [opened, edited, synchronize, reopened]
 
 permissions:
-  # write, not read: the action explains a rejected title in a PR comment, and a
-  # red check with no reason is how a contributor learns nothing.
-  pull-requests: write
+  # Read is all the action needs: it reads the PR title and the commit list, and
+  # reports a rejected title in the check log. It posts no comment of its own —
+  # upstream's commenting example bolts on a separate sticky-comment action.
+  pull-requests: read
 
 jobs:
   pr-title:

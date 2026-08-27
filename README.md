@@ -195,21 +195,26 @@ from the conventional-commit subjects since the last tag, that tag is pushed,
 and a GitHub Release is published. Merges are squashed, so the PR title is what
 counts, and CI rejects a title that is not a conventional commit:
 
-| Title prefix | Result |
+| Subject contains | Result |
 | --- | --- |
 | `feat:` | minor release |
-| `fix:`, `perf:` | patch release |
-| `!` after the type, or a `BREAKING CHANGE:` footer | minor release while Bartolo is 0.x (see below) |
-| `docs:`, `chore:`, `ci:`, `refactor:`, `test:`, `style:`, `build:`, `revert:` | ships in the next release, triggers none |
+| `fix:` | patch release |
+| `!:` after the type, or a `BREAKING CHANGE:` line anywhere in the body | minor release while Bartolo is 0.x (see below) |
+| `perf:`, `docs:`, `chore:`, `ci:`, `refactor:`, `test:`, `style:`, `build:`, `revert:` | ships in the next release, triggers none |
 
-`revert:` is release-neutral to svu, so reverting a released fix does not by
-itself cut the release that undoes it — force one, or land the revert with a
-`fix:` title.
+The column is "contains", not "starts with", on purpose: svu matches `feat:` and
+`fix:` case-insensitively *anywhere* in the subject, not just as a prefix. So
+`Revert "fix: ..."` — GitHub's own revert-button subject — cuts a patch release,
+and a subject that quotes another commit inherits that commit's bump. `perf:` is
+release-neutral because svu recognises only `feat` and `fix`; title user-visible
+performance work `fix:` if it should ship.
 
 There is no version constant to bump. `bartolo version` reports the module
 version recorded in the binary's build info, so a binary installed with
-`go install github.com/orq-ai/bartolo@v0.4.7` reports `0.4.7` and one built from
-a checkout reports `devel+<commit>`. The tag is the only source of truth.
+`go install github.com/orq-ai/bartolo@vX.Y.Z` reports `X.Y.Z`, and one built from
+a checkout reports `devel`, or `devel+<commit>` when Go stamped the build with a
+VCS revision (it does not in a git worktree, or under `-buildvcs=false`). The tag
+is the only source of truth.
 
 The arithmetic is [svu](https://github.com/caarlos0/svu)'s. `.svu.yml` sets
 `v0: true`, which means a breaking change bumps the minor rather than cutting
@@ -233,9 +238,11 @@ Release notes are generated on the GitHub Release from the merged PRs.
 `CHANGELOG.md` is frozen at the last hand-written entry and covers only the
 versions that predate automation.
 
-Preview what a merge would produce with `svu next`
-(`go install github.com/caarlos0/svu/v3@latest`), which prints the next tag, or
-the current one when nothing warrants a release.
+Preview what a merge would produce with `svu next`, which prints the next tag, or
+the current one when nothing warrants a release. Install the same version the
+release workflow pins — `go install github.com/caarlos0/svu/v3@v3.4.1`, matching
+`SVU_VERSION` in `.github/workflows/release.yml` — so the preview and the
+decision come from one binary.
 
 ## Positioning
 

@@ -40,8 +40,9 @@ const projectConfigFilename = ".bartolo.json"
 // v0.4.4, reported 0.4.3).
 var bartoloVersion = resolveVersion()
 
-// devel is what a binary built straight from a checkout reports: `go build` has
-// no module version to record, so there is no honest number to print.
+// devel is the sentinel for a binary with no recorded module version: `go build`
+// has none to record, so there is no honest number to print. resolveVersionFrom
+// appends the VCS revision when the build carried one.
 const devel = "devel"
 
 func resolveVersion() string {

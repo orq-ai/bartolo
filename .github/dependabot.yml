@@ -11,7 +11,11 @@ updates:
     # so there is no subset of these bumps that a release could skip — and
     # dependabot cannot vary the prefix per update type anyway. Version churn is
     # capped instead by the group below: one grouped PR per week, so at most one
-    # patch release a week comes from dependency updates.
+    # release a week comes from dependency updates. Not necessarily a *patch*
+    # release: squash merges carry the PR body into the commit body, and svu
+    # reads `BREAKING CHANGE:` anywhere in a body, so a bump whose upstream
+    # release notes contain that phrase cuts a minor. `.svu.yml`'s `v0: true`
+    # is what keeps it from cutting a major.
     commit-message:
       prefix: "fix"
       include: "scope"
