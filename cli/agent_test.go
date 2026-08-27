@@ -86,3 +86,66 @@ func TestServerUseCommand(t *testing.T) {
 	assert.EqualValues(t, 1, decoded["index"])
 	assert.Equal(t, "https://staging.example.com", ResolveServer())
 }
+
+func TestNormalizeServerURL(t *testing.T) {
+	unchanged := []string{
+		"https://api.example.com",
+		"http://localhost:8080",
+		"https://api.example.com/v2/",
+		"https://user:pass@api.example.com",
+	}
+	for _, in := range unchanged {
+		got, added, err := NormalizeServerURL(in)
+		if err != nil || added || got != in {
+			t.Errorf("NormalizeServerURL(%q) = (%q, %v, %v), want (%q, false, nil)", in, got, added, err, in)
+		}
+	}
+
+	rewritten := map[string]string{
+		// Scheme guessed for a remote host, with or without port and path.
+		"api.example.com":         "https://api.example.com",
+		"api.example.com/v2":      "https://api.example.com/v2",
+		"api.example.com:8443":    "https://api.example.com:8443",
+		"api.example.com:8443/v2": "https://api.example.com:8443/v2",
+		"//api.example.com":       "https://api.example.com",
+	}
+	for in, want := range rewritten {
+		got, added, err := NormalizeServerURL(in)
+		if err != nil || !added || got != want {
+			t.Errorf("NormalizeServerURL(%q) = (%q, %v, %v), want (%q, true, nil)", in, got, added, err, want)
+		}
+	}
+
+	// Scheme and host are case-insensitive, so they are lowered to keep server
+	// URLs comparable by string equality.
+	canonicalized := map[string]string{
+		"HTTPS://API.example.com":    "https://api.example.com",
+		"https://API.example.com/V2": "https://api.example.com/V2",
+	}
+	for in, want := range canonicalized {
+		got, _, err := NormalizeServerURL(in)
+		if err != nil || got != want {
+			t.Errorf("NormalizeServerURL(%q) = (%q, _, %v), want (%q, _, nil)", in, got, err, want)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"  ",
+		"ftp://api.example.com",
+		"https://",
+		"://x",
+		// Loopback must name its scheme; http is as likely as https.
+		"localhost:8080",
+		"localhost",
+		"127.0.0.1:8080",
+		"dev.localhost:3000",
+		// A bare host with a local part would silently become URL credentials.
+		"user@api.example.com",
+	}
+	for _, in := range invalid {
+		if got, _, err := NormalizeServerURL(in); err == nil {
+			t.Errorf("NormalizeServerURL(%q) = (%q, _, nil), want error", in, got)
+		}
+	}
+}

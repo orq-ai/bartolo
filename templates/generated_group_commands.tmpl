@@ -9,54 +9,10 @@ import (
 	{{- end }}
 
 	bartolocli "github.com/orq-ai/bartolo/cli"
-	"github.com/rs/zerolog/log"
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
-
-{{ define "params" }}
-	{{- range .OptionalParams }}
-		{{- if eq .Type "boolean" }}
-			cmd.Flags().Bool("{{ .CLIName | escapeStr }}", false, "{{ .Description | escapeStr }}")
-		{{- else if eq .Type "int64" }}
-			cmd.Flags().Int64("{{ .CLIName | escapeStr }}", 0, "{{ .Description | escapeStr }}")
-		{{- else if eq .Type "float64" }}
-			cmd.Flags().Float64("{{ .CLIName | escapeStr }}", 0.0, "{{ .Description | escapeStr }}")
-		{{- else }}
-			cmd.Flags().String("{{ .CLIName | escapeStr }}", "", "{{ .Description | escapeStr }}")
-		{{- end }}
-	{{- end }}
-
-	{{- range .Waiters }}
-		cmd.Flags().Bool("wait-{{ .Waiter.CLIName | escapeStr }}", false, "{{ .Waiter.Short | escapeStr }}")
-	{{- end }}
-
-	bartolocli.SetCustomFlags(cmd)
-
-	if cmd.Flags().HasFlags() {
-		params.BindPFlags(cmd.Flags())
-	}
-{{ end }}
-
-{{ define "bodyFields" }}
-	[]bartolocli.BodyField{
-		{{- range .BodyFields }}
-		{
-			Name: "{{ .Name | escapeStr }}",
-			FlagName: "{{ .CLIName | escapeStr }}",
-			Type: "{{ .Type | escapeStr }}",
-			Description: "{{ .Description | escapeStr }}",
-			{{- if .Enum }}
-			Enum: []string{
-				{{- range .Enum }}
-				"{{ . | escapeStr }}",
-				{{- end }}
-			},
-			{{- end }}
-		},
-		{{- end }}
-	},
-{{ end }}
 
 {{ $apiPublic := .API.PublicGoName }}
 {{ $group := .Group }}
@@ -111,78 +67,8 @@ func register{{ $group.GoName }}Commands(root *cobra.Command) {
 				{{- end }}
 				Example: examples,
 				Args:    cobra.MinimumNArgs({{ len .RequiredParams }}),
-				{{- if eq .Method "Delete" }}
 				RunE: func(cmd *cobra.Command, args []string) error {
-				{{- else }}
-				Run: func(cmd *cobra.Command, args []string) {
-				{{- end }}
-					{{- if .CanHaveBody }}
-					{{- if .BodyExample }}
-					if bartolocli.PrintBodyExample(params, "{{ .BodyExample | escapeStr }}") {
-						return{{ if eq .Method "Delete" }} nil{{ end }}
-					}
-					{{- end }}
-					body, err := bartolocli.GetBodyWithFlags(cmd, "{{ .MediaType | escapeStr }}", args[{{ len .RequiredParams }}:], params, {{ template "bodyFields" . }})
-					if err != nil {
-						log.Fatal().Err(err).Msg("unable to get body")
-					}
-					{{- end }}
-
-					{{- if eq .Method "Delete" }}
-					if err := bartolocli.ConfirmDestructive(cmd, args); err != nil {
-						return err
-					}
-					{{- end }}
-
-					{{ if .NeedsResponse }}resp{{ else }}_{{ end }}, decoded, err := {{ $apiPublic }}{{ .GoName }}({{ range $x, $param := .RequiredParams }}args[{{ $x }}], {{ end }}params{{ if .CanHaveBody }}, body{{ end }})
-					if err != nil {
-						log.Fatal().Err(err).Msg("error calling operation")
-					}
-
-					if err := bartolocli.{{ if .IsList }}FormatList{{ else }}Formatter.Format{{ end }}(decoded{{ if .IsList }}{{ range .ListFields }}, "{{ . | escapeStr }}"{{ end }}{{ end }}); err != nil {
-						log.Fatal().Err(err).Msg("formatting failed")
-					}
-
-					{{ if .Waiters }}
-						reqParams := params.AllSettings()
-
-						{{ range $i, $param := $operation.RequiredParams }}
-							reqParams["{{ $param.Name }}"] = args[{{ $i }}]
-						{{ end }}
-
-						var actual interface{}
-					{{- end }}
-
-					{{- range .Waiters }}
-						if params.GetBool("wait-{{ .Waiter.CLIName | escapeStr }}") {
-							wparams := viper.New()
-
-							{{- range $x, $selector := .Args }}
-								actual, err = bartolocli.GetMatchValue(resp.Context, "{{ $selector | escapeStr }}", reqParams, decoded)
-								if err != nil {
-									log.Fatal().Err(err).Msg("could not get matcher value")
-								}
-
-								arg{{ $x }} := fmt.Sprintf("%v", actual)
-							{{- end }}
-
-							{{- range $id, $selector := .Params }}
-								actual, err = bartolocli.GetMatchValue(resp.Context, "{{ $selector }}", reqParams, decoded)
-								if err != nil {
-									log.Fatal().Err(err).Msg("could not get matcher value")
-								}
-
-								wparams.Set("{{ $id | escapeStr }}", actual)
-							{{- end }}
-
-							if err := {{ $apiPublic }}{{ .Waiter.GoName }}({{ range $x, $selector := .Args }}arg{{ $x }}, {{ end }}wparams); err != nil {
-								log.Fatal().Err(err).Msg("waiter error")
-							}
-						}
-					{{- end }}
-					{{- if eq .Method "Delete" }}
-					return nil
-					{{- end }}
+					{{ template "operationRun" . }}
 				},
 			}
 			{{ $group.GoName }}Cmd.AddCommand(cmd)

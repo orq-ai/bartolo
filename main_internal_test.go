@@ -1033,7 +1033,7 @@ paths:
 		t.Fatal("expected Imports.Url to be true when path params are present")
 	}
 
-	rendered := renderTemplate("templates/generated_client.tmpl", commandTemplateFuncs(), api)
+	rendered := renderCommandTemplate("templates/generated_client.tmpl", api)
 
 	if !strings.Contains(rendered, "neturl \"net/url\"") {
 		t.Fatal("generated client should import net/url when path params are present")
@@ -1279,5 +1279,102 @@ func TestResolveVersionFrom(t *testing.T) {
 				t.Errorf("resolveVersionFrom() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestGeneratedClientChecksParamEnumAndFormat(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Param Validation API
+  version: "1"
+paths:
+  /v2/agents/{agent_id}:
+    get:
+      operationId: GetAgent
+      summary: Get agent
+      parameters:
+        - in: path
+          name: agent_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: status
+          schema:
+            anyOf:
+              - type: string
+                enum: [active, "archi\"ved"]
+              - type: "null"
+        - in: query
+          name: opaque_cursor
+          x-cli-no-validate: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: ok
+`)
+
+	rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", doc))
+
+	if !strings.Contains(rendered, `bartolocli.ValidateParam("argument agent-id", paramAgentId, "uuid"`) {
+		t.Error("required path param with format: uuid should be checked")
+	}
+
+	// The enum sits behind an anyOf/null wrapper, which must be resolved, and
+	// its values are embedded as Go literals so quotes have to be escaped.
+	if !strings.Contains(rendered, `"active", "archi\"ved",`) {
+		t.Errorf("nullable enum values should be carried through escaped, got:\n%s", rendered)
+	}
+
+	// x-cli-no-validate opts a parameter out entirely.
+	if strings.Contains(rendered, "opaque-cursor") && strings.Contains(rendered, `ValidateParam("--opaque-cursor"`) {
+		t.Error("x-cli-no-validate should suppress the check")
+	}
+}
+
+func TestGeneratedRootCommandsReturnErrors(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Error API
+  version: "1"
+paths:
+  /v2/agents:
+    get:
+      operationId: ListAgents
+      summary: List agents
+      responses:
+        "200":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+
+	rendered := renderCommandTemplate("templates/generated_root_commands.tmpl", &CommandsTemplateData{
+		API:        api,
+		Operations: api.Operations,
+		Waiters:    api.Waiters,
+		NeedsFmt:   commandFileNeedsFmt(api.Operations),
+	})
+	for _, group := range api.Groups {
+		rendered += renderCommandTemplate("templates/generated_group_commands.tmpl", &CommandsTemplateData{
+			API:        api,
+			Group:      group,
+			Operations: group.Operations,
+			NeedsFmt:   commandFileNeedsFmt(group.Operations),
+		})
+	}
+
+	// Commands must return their errors so cli/exit.go can tell a usage error
+	// (exit 2) from an operation failure (exit 1). log.Fatal bypasses that.
+	if !strings.Contains(rendered, "RunE: func(cmd *cobra.Command, args []string) error {") {
+		t.Error("generated commands should use RunE")
+	}
+	if strings.Contains(rendered, "log.Fatal") {
+		t.Error("generated commands should not call log.Fatal")
 	}
 }

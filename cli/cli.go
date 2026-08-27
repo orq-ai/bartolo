@@ -104,6 +104,16 @@ func Init(config *Config) {
 			}
 			viper.Set("output-format", normalized)
 
+			// Same reasoning as above: an unusable `--server`, `<PREFIX>_SERVER`
+			// or config value should fail here rather than as a transport error.
+			if server := strings.TrimSpace(viper.GetString("server")); server != "" {
+				normalized, err := normalizeServerURLWarn(server)
+				if err != nil {
+					return NewUsageError(fmt.Errorf("--server: %w", err))
+				}
+				viper.Set("server", normalized)
+			}
+
 			if viper.GetBool("json") {
 				viper.Set("output-format", "json")
 			}

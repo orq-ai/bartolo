@@ -137,6 +137,9 @@ func AddBodyFieldFlags(cmd *cobra.Command, fields []BodyField) {
 		case "json-or-string":
 			cmd.Flags().String(name, "", description+" (plain string, or JSON for objects/arrays, e.g. '{\"k\":1}')")
 		case "enum-string":
+			if len(field.Enum) > 0 {
+				description += fmt.Sprintf(" (one of: %s)", strings.Join(field.Enum, ", "))
+			}
 			cmd.Flags().String(name, "", description)
 			if len(field.Enum) > 0 {
 				values := append([]string{}, field.Enum...)
@@ -332,17 +335,8 @@ func ApplyBodyFlags(cmd *cobra.Command, params *viper.Viper, mediaType string, b
 			}
 		case "enum-string":
 			value := params.GetString(name)
-			if len(field.Enum) > 0 {
-				allowed := false
-				for _, candidate := range field.Enum {
-					if candidate == value {
-						allowed = true
-						break
-					}
-				}
-				if !allowed {
-					return "", fmt.Errorf("--%s: %q is not one of [%s]", name, value, strings.Join(field.Enum, ", "))
-				}
+			if err := ValidateEnum("--"+name, value, field.Enum); err != nil {
+				return "", err
 			}
 			overrides[field.Name] = value
 		default:

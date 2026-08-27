@@ -102,6 +102,7 @@ const (
 	ExtListFields  = "x-cli-list-fields"
 	ExtName        = "x-cli-name"
 	ExtHelpSection = "x-cli-help-section"
+	ExtNoValidate  = "x-cli-no-validate"
 	ExtWaiters     = "x-cli-waiters"
 )
 
@@ -117,12 +118,18 @@ type Param struct {
 	TypeNil     string
 	Style       string
 	Explode     bool
+	Enum        []string
+	Format      string
 }
 
 // Operation describes an OpenAPI operation (GET/POST/PUT/PATCH/DELETE)
 type Operation struct {
-	HandlerName    string
-	GoName         string
+	HandlerName string
+	GoName      string
+	// PublicPrefix is the API-level Go prefix on this operation's generated
+	// function. It lives here so shared template blocks can name the function
+	// without a file-scoped variable, which a `define` cannot see.
+	PublicPrefix   string
 	Use            string
 	Aliases        []string
 	Short          string
@@ -527,6 +534,7 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 			o := &Operation{
 				HandlerName:    commandPath,
 				GoName:         goName,
+				PublicPrefix:   result.PublicGoName,
 				Use:            use,
 				Aliases:        aliases,
 				Short:          short,
@@ -1177,7 +1185,7 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 	total = append(total, operation.Parameters...)
 
 	for _, p := range total {
-		if p.Value != nil && p.Value.Extensions["x-cli-ignore"] == nil {
+		if p.Value != nil && p.Value.Extensions[ExtIgnore] == nil {
 			t := "string"
 			tn := "\"\""
 			if p.Value.Schema != nil && p.Value.Schema.Value != nil && p.Value.Schema.Value.Type != nil {
@@ -1190,6 +1198,19 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 				} else if p.Value.Schema.Value.Type.Is("number") {
 					t = "float64"
 					tn = "0.0"
+				}
+			}
+
+			// The schema's `enum` and `format` only describe a string flag, and
+			// `x-cli-no-validate` opts a parameter out when the schema says more
+			// than the API actually enforces. Resolved here rather than at render
+			// time so there is nothing to skip further down.
+			var enum []string
+			var format string
+			if t == "string" && p.Value.Extensions[ExtNoValidate] == nil && p.Value.Schema != nil {
+				enum = enumStrings(p.Value.Schema.Value)
+				if effective, _ := effectiveBodySchema(p.Value.Schema.Value); effective != nil {
+					format = effective.Format
 				}
 			}
 
@@ -1212,6 +1233,8 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 				Required:    p.Value.Required,
 				Type:        t,
 				TypeNil:     tn,
+				Enum:        enum,
+				Format:      format,
 			})
 		}
 	}
@@ -1773,16 +1796,27 @@ func bodyFieldEnum(schema *openapi3.Schema, fieldType string) []string {
 	if fieldType != "enum-string" {
 		return nil
 	}
+
+	return enumStrings(schema)
+}
+
+// enumStrings returns a schema's string enum values, resolving the nullability
+// wrappers first so `anyOf: [{enum: [...]}, {type: null}]` is not mistaken for
+// an unconstrained value. Non-string members are dropped: the generated flags
+// they would constrain are strings.
+func enumStrings(schema *openapi3.Schema) []string {
 	effective, _ := effectiveBodySchema(schema)
 	if effective == nil || len(effective.Enum) == 0 {
 		return nil
 	}
+
 	values := make([]string, 0, len(effective.Enum))
 	for _, raw := range effective.Enum {
 		if s, ok := raw.(string); ok {
 			values = append(values, s)
 		}
 	}
+
 	return values
 }
 
@@ -2098,11 +2132,19 @@ func loadTemplate(name string) []byte {
 	return data
 }
 
-func renderTemplate(name string, funcs template.FuncMap, data interface{}) string {
+func renderTemplate(name string, funcs template.FuncMap, data interface{}, partials ...string) string {
 	templateData := loadTemplate(name)
 	tmpl := template.New(filepath.Base(name))
 	if funcs != nil {
 		tmpl = tmpl.Funcs(funcs)
+	}
+
+	// Partials are parsed into the same namespace so their `define` blocks are
+	// callable from the named template.
+	for _, partial := range partials {
+		if _, err := tmpl.Parse(string(loadTemplate(partial))); err != nil {
+			panic(err)
+		}
 	}
 
 	parsed, err := tmpl.Parse(string(templateData))
@@ -2948,11 +2990,21 @@ func resetGeneratedPackage() {
 	}
 }
 
+// commandPartials holds the template blocks every command template shares.
+const commandPartials = "templates/command_partials.tmpl"
+
+// renderCommandTemplate renders a command template with the shared partials in
+// scope.
+func renderCommandTemplate(name string, data interface{}) string {
+	return renderTemplate(name, commandTemplateFuncs(), data, commandPartials)
+}
+
 func commandTemplateFuncs() template.FuncMap {
 	return template.FuncMap{
 		"escapeStr": escapeString,
 		"slug":      slug,
 		"title":     strings.Title,
+		"joinComma": func(values []string) string { return strings.Join(values, ", ") },
 	}
 }
 
@@ -2971,11 +3023,11 @@ func writeGeneratedCommandFiles(api *OpenAPI, shortName string) {
 
 	writeFormattedFile(
 		filepath.Join("cli", "generated", shortName+"_client.go"),
-		[]byte(renderTemplate("templates/generated_client.tmpl", commandTemplateFuncs(), api)),
+		[]byte(renderCommandTemplate("templates/generated_client.tmpl", api)),
 	)
 	writeFormattedFile(
 		filepath.Join("cli", "generated", "register.go"),
-		[]byte(renderTemplate("templates/generated_register.tmpl", commandTemplateFuncs(), api)),
+		[]byte(renderCommandTemplate("templates/generated_register.tmpl", api)),
 	)
 
 	rootCommands := &CommandsTemplateData{
@@ -2986,7 +3038,7 @@ func writeGeneratedCommandFiles(api *OpenAPI, shortName string) {
 	}
 	writeFormattedFile(
 		filepath.Join("cli", "generated", "root_commands.go"),
-		[]byte(renderTemplate("templates/generated_root_commands.tmpl", commandTemplateFuncs(), rootCommands)),
+		[]byte(renderCommandTemplate("templates/generated_root_commands.tmpl", rootCommands)),
 	)
 
 	for _, group := range api.Groups {
@@ -2999,7 +3051,7 @@ func writeGeneratedCommandFiles(api *OpenAPI, shortName string) {
 		filename := filepath.Join("cli", "generated", slug(group.CLIName)+"_commands.go")
 		writeFormattedFile(
 			filename,
-			[]byte(renderTemplate("templates/generated_group_commands.tmpl", commandTemplateFuncs(), groupData)),
+			[]byte(renderCommandTemplate("templates/generated_group_commands.tmpl", groupData)),
 		)
 	}
 }

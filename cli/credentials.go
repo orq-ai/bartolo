@@ -347,7 +347,10 @@ func explicitServer(cmd *cobra.Command) string {
 		return ""
 	}
 
-	return strings.TrimSpace(flag.Value.String())
+	// Read through viper rather than the flag: the root PersistentPreRunE has
+	// already normalized the value there, so this cannot disagree with what the
+	// request will actually use.
+	return strings.TrimSpace(viper.GetString("server"))
 }
 
 func newAuthSetupCommand() *cobra.Command {

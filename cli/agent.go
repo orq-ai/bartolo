@@ -2,10 +2,14 @@ package cli
 
 import (
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"regexp"
 	"sort"
 	"strings"
 
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	gentleman "gopkg.in/h2non/gentleman.v2"
@@ -39,6 +43,108 @@ func GetServers() []map[string]string {
 	}
 
 	return servers
+}
+
+// NormalizeServerURL turns a user-supplied server value into a usable API base
+// URL, or explains why it cannot be one. Without it a typo like `htp://x` is
+// persisted happily and only surfaces later as an opaque transport error.
+//
+// A value with no scheme gets `https://`, since that is what a remote API base
+// URL almost always is. Loopback hosts are the exception and must say which
+// scheme they mean: a local dev server on `localhost:8080` is usually plain
+// HTTP, so guessing https there would be wrong more often than right.
+//
+// The bool reports whether a scheme was added, so callers can say so.
+func NormalizeServerURL(raw string) (string, bool, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", false, fmt.Errorf("server URL cannot be empty")
+	}
+
+	candidate, added, err := withScheme(trimmed)
+	if err != nil {
+		return "", false, err
+	}
+
+	parsed, err := url.Parse(candidate)
+	if err != nil {
+		return "", false, fmt.Errorf("server URL %q is not a valid URL: %w", trimmed, err)
+	}
+
+	switch {
+	case !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https"):
+		return "", false, fmt.Errorf("server URL %q must start with http:// or https://", trimmed)
+	case parsed.Hostname() == "":
+		return "", false, fmt.Errorf("server URL %q is missing a host", trimmed)
+	case added && parsed.User != nil:
+		// `user@host.com` reads as a bare host, and prepending a scheme would
+		// silently turn the local part into URL credentials.
+		return "", false, fmt.Errorf("server URL %q is ambiguous: write it as https://%s", trimmed, trimmed)
+	}
+
+	// Scheme and host are case-insensitive, but `server list` and ResolveServer
+	// compare URLs as plain strings, so an uppercase value would never match the
+	// server it names.
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+
+	return parsed.String(), added, nil
+}
+
+var schemePrefix = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.\-]*://`)
+
+// withScheme prepends `https://` to a value that has none, and refuses to guess
+// for loopback hosts. Testing for the `scheme://` prefix rather than asking
+// url.Parse is deliberate: RFC 3986 reads `localhost:8080` as scheme
+// `localhost` with opaque part `8080`, so url.Parse cannot tell a scheme-less
+// `host:port` from a real opaque URI like `mailto:someone`.
+func withScheme(trimmed string) (string, bool, error) {
+	switch {
+	case schemePrefix.MatchString(trimmed):
+		return trimmed, false, nil
+	case strings.HasPrefix(trimmed, "//"):
+		// Protocol-relative, e.g. `//api.example.com`.
+		return "https:" + trimmed, true, nil
+	}
+
+	if host, _, _ := strings.Cut(trimmed, "/"); isLoopback(host) {
+		return "", false, fmt.Errorf("server URL %q is ambiguous: write it as http://%s or https://%s", trimmed, trimmed, trimmed)
+	}
+
+	return "https://" + trimmed, true, nil
+}
+
+// isLoopback reports whether a scheme-less authority points at this machine,
+// where http is at least as likely as https.
+func isLoopback(authority string) bool {
+	host := authority
+	if h, _, err := net.SplitHostPort(authority); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.Trim(host, "[]"))
+
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+
+	ip := net.ParseIP(host)
+
+	return ip != nil && ip.IsLoopback()
+}
+
+// normalizeServerURLWarn is NormalizeServerURL plus the one place the
+// scheme-was-guessed warning is worded.
+func normalizeServerURLWarn(raw string) (string, error) {
+	normalized, added, err := NormalizeServerURL(raw)
+	if err != nil {
+		return "", err
+	}
+
+	if added {
+		log.Warn().Msgf("No scheme detected in %q, using %s", strings.TrimSpace(raw), normalized)
+	}
+
+	return normalized, nil
 }
 
 // ResolveServer returns the active server URL, most specific source first:
