@@ -185,13 +185,13 @@ func TestAddForceFlagNoShorthand(t *testing.T) {
 
 // The credentials file holds long-lived API keys: a new one must be 0600 and
 // the write must be atomic (temp+rename).
-func TestWriteCredentialsIsNotWorldReadable(t *testing.T) {
+func TestCredentialsSaveIsNotWorldReadable(t *testing.T) {
 	write := func(t *testing.T, filename string) {
 		Creds = &CredentialsFile{viper: viper.New()}
 		Creds.SetConfigName("credentials")
 		Creds.Set("profiles.test.type", "apikey")
-		if err := Creds.save(filename); err != nil {
-			t.Fatalf("save: %v", err)
+		if err := Creds.Save(filename); err != nil {
+			t.Fatalf("Save: %v", err)
 		}
 		info, err := os.Stat(filename)
 		if err != nil {
@@ -223,8 +223,8 @@ func TestWriteCredentialsIsNotWorldReadable(t *testing.T) {
 		}
 		Creds = &CredentialsFile{viper: viper.New()}
 		Creds.Set("profiles.test.type", "apikey")
-		if err := Creds.save(filename); err == nil {
-			t.Fatal("writeCredentials: want an error from WriteConfigAs on an unknown extension")
+		if err := Creds.Save(filename); err == nil {
+			t.Fatal("Save: want an error from WriteConfigAs on an unknown extension")
 		}
 		data, err := os.ReadFile(filename)
 		if err != nil {
@@ -343,9 +343,12 @@ func TestVerboseConfigMaskesAllSensitiveKeys(t *testing.T) {
 }
 
 func TestCredentialsSaveRoundTripsAndStays0600(t *testing.T) {
-	write := func(t *testing.T, filename string) {
-		c := NewCredentialsFile()
-		c.SetConfigName("credentials")
+	write := func(t *testing.T, dir string) {
+		filename := filepath.Join(dir, "credentials.json")
+		c, err := NewCredentialsFile(dir)
+		if err != nil {
+			t.Fatalf("NewCredentialsFile: %v", err)
+		}
 		c.Set("profiles.test.type", "apikey")
 		c.Set("profiles.test.gateway_key", "sk-test-VALUE")
 		if err := c.Save(filename); err != nil {
@@ -358,10 +361,8 @@ func TestCredentialsSaveRoundTripsAndStays0600(t *testing.T) {
 		if perm := info.Mode().Perm(); perm&0o077 != 0 {
 			t.Errorf("credentials file mode = %o, want no group/other bits on a key file", perm)
 		}
-		back := NewCredentialsFile()
-		back.SetConfigName("credentials")
-		back.AddConfigPath(filepath.Dir(filename))
-		if err := back.ReadInConfig(); err != nil {
+		back, err := NewCredentialsFile(dir)
+		if err != nil {
 			t.Fatalf("read back: %v", err)
 		}
 		if got := back.GetString("profiles.test.gateway_key"); got != "sk-test-VALUE" {
@@ -370,14 +371,41 @@ func TestCredentialsSaveRoundTripsAndStays0600(t *testing.T) {
 	}
 
 	t.Run("new_file", func(t *testing.T) {
-		write(t, filepath.Join(t.TempDir(), "credentials.json"))
+		write(t, t.TempDir())
 	})
 
+	// The seed is chmodded rather than trusted to os.WriteFile, whose mode the
+	// runner's umask narrows. Under umask 077 an unhardened in-place write would
+	// otherwise inherit 0600 and the subtest would pass without testing anything.
 	t.Run("existing_0644_narrowed", func(t *testing.T) {
-		filename := filepath.Join(t.TempDir(), "credentials.json")
+		dir := t.TempDir()
+		filename := filepath.Join(dir, "credentials.json")
 		if err := os.WriteFile(filename, []byte("{}"), 0o644); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if err := os.Chmod(filename, 0o644); err != nil {
 			t.Fatalf("seed 0644: %v", err)
 		}
-		write(t, filename)
+		write(t, dir)
+	})
+
+	// Save writes the whole in-memory tree, so an instance that never read the
+	// file would replace it. NewCredentialsFile loads it first; without that,
+	// storing one field silently deletes every other profile.
+	t.Run("keeps_profiles_it_did_not_set", func(t *testing.T) {
+		dir := t.TempDir()
+		filename := filepath.Join(dir, "credentials.json")
+		if err := os.WriteFile(filename, []byte(`{"profiles":{"other":{"api_key":"KEEP-ME"}}}`), 0o600); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		write(t, dir)
+
+		back, err := NewCredentialsFile(dir)
+		if err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if got := back.GetString("profiles.other.api_key"); got != "KEEP-ME" {
+			t.Errorf("Save dropped a profile it did not set: %q", got)
+		}
 	})
 }

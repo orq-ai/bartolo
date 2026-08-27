@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,11 +18,19 @@ import (
 	"gopkg.in/h2non/gentleman.v2/context"
 )
 
-// save persists the credentials file atomically at 0600. os.CreateTemp
+// Save persists the credentials file atomically at 0600. os.CreateTemp
 // creates the temp file at 0600 from birth (no world-readable window), then viper
 // writes into it, then rename replaces the target. An interrupted write leaves the
 // existing file intact.
-func (c *CredentialsFile) save(filename string) error {
+//
+// The whole in-memory tree is written, so Save replaces the target rather than
+// merging into it. Build through NewCredentialsFile, which loads what is
+// already on disk; saving an instance that never read it drops every profile
+// the caller did not set.
+func (c *CredentialsFile) Save(filename string) error {
+	if c == nil || c.viper == nil {
+		return fmt.Errorf("credentials file is not initialized")
+	}
 	dir := filepath.Dir(filename)
 	ext := filepath.Ext(filename)
 	base := strings.TrimSuffix(filepath.Base(filename), ext)
@@ -35,15 +44,12 @@ func (c *CredentialsFile) save(filename string) error {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, filename)
+	if err := os.Rename(tmp, filename); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
-
-// Save persists the credentials file through the hardened write: atomic
-// temp-file-and-rename, 0600 from birth. It exists for downstream CLIs that
-// store their own fields in the credentials profile and would otherwise have
-// to reimplement this write themselves. The raw viper write stays unexported:
-// viper creates files 0644, which is the bypass the private field closed.
-func (c *CredentialsFile) Save(filename string) error { return c.save(filename) }
 
 // AuthHandler describes a handler that can be called on a request to inject
 // auth information and is agnostic to the type of auth.
@@ -296,7 +302,7 @@ func UseAuth(typeName string, handler AuthHandler) {
 		}
 
 		filename := filepath.Join(viper.GetString("config-directory"), "credentials.json")
-		return Creds.save(filename)
+		return Creds.Save(filename)
 	}
 
 	addKeyFileFlags := func(cmd *cobra.Command) {
@@ -548,7 +554,7 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 	}
 
 	filename := filepath.Join(viper.GetString("config-directory"), "credentials.json")
-	return Creds.save(filename)
+	return Creds.Save(filename)
 }
 
 func hasInteractiveInput() bool {
@@ -600,7 +606,8 @@ func ConfirmDestructive(cmd *cobra.Command, args []string) error {
 }
 
 // CredentialsFile holds credential-related information. The viper instance is
-// unexported so callers cannot bypass the hardened save and create a 0644 file.
+// unexported so callers cannot reach viper's own WriteConfigAs, which creates
+// the file 0644; Save is the only write.
 type CredentialsFile struct {
 	viper *viper.Viper
 }
@@ -617,11 +624,22 @@ func (c *CredentialsFile) SetConfigName(name string) { c.viper.SetConfigName(nam
 func (c *CredentialsFile) AddConfigPath(path string) { c.viper.AddConfigPath(path) }
 func (c *CredentialsFile) ReadInConfig() error       { return c.viper.ReadInConfig() }
 
-// NewCredentialsFile returns an empty, in-memory credentials file. It exists
-// so tests and downstream harnesses can construct one without reaching the
-// private viper instance; the process-wide file is still InitCredentialsFile.
-func NewCredentialsFile() *CredentialsFile {
-	return &CredentialsFile{viper: viper.New()}
+// NewCredentialsFile opens the credentials file in dir, loading whatever is
+// already stored there so that a later Save does not drop the profiles this
+// caller never set. A missing file is not an error; the first Save creates it.
+//
+// dir is taken rather than defaulted because a caller that does not own the
+// process-wide file (a test, or a CLI with its own config root) must be able to
+// say where it writes. InitCredentialsFile remains the process-wide setup.
+func NewCredentialsFile(dir string) (*CredentialsFile, error) {
+	c := &CredentialsFile{viper: viper.New()}
+	c.SetConfigName("credentials")
+	c.AddConfigPath(dir)
+	var notFound viper.ConfigFileNotFoundError
+	if err := c.ReadInConfig(); err != nil && !errors.As(err, &notFound) {
+		return nil, err
+	}
+	return c, nil
 }
 
 // Creds represents a configuration file storing credential-related
