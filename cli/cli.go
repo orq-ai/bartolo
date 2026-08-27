@@ -113,9 +113,8 @@ func Init(config *Config) {
 
 				settings := viper.AllSettings()
 
-				// Hide any secret values
 				for k := range settings {
-					if strings.Contains(k, "secret") || strings.Contains(k, "password") || strings.Contains(k, "token") {
+					if looksSensitiveKey(k) {
 						settings[k] = "**HIDDEN**"
 					}
 				}

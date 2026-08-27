@@ -107,7 +107,11 @@ func AddBodyFieldFlags(cmd *cobra.Command, fields []BodyField) {
 		}
 		name := field.flagName()
 		if name != field.FlagName {
-			description += fmt.Sprintf(" (body field %q, renamed to keep the reserved --%s flag available)", field.Name, field.FlagName)
+			kind, _ := ReservedFlagName(field.FlagName)
+			if kind == "" {
+				kind = "reserved flag"
+			}
+			description += fmt.Sprintf(" (body field %q, renamed to keep the %s --%s available)", field.Name, kind, field.FlagName)
 		}
 		switch field.Type {
 		case "bool":

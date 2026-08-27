@@ -64,8 +64,9 @@ func UserAgentMiddleware() {
 }
 
 // redactHeaderValue masks the value of a sensitive header so `--verbose` never
-// prints an API key, bearer token, or cookie. Matches on the lowercased name, so
-// `Authorization`/`AUTHORIZATION` and any header hinting at a secret are covered.
+// prints an API key, bearer token, or cookie. See looksSensitiveHeader for the
+// full rule: the four fixed transport names plus any name matching looksSensitiveKey
+// or containing "auth"/"session".
 func redactHeaderValue(key, val string) string {
 	if looksSensitiveHeader(key) {
 		return "[REDACTED]"
@@ -74,9 +75,9 @@ func redactHeaderValue(key, val string) string {
 }
 
 // looksSensitiveHeader reports whether a header or query-parameter name carries a
-// credential. It extends looksSensitiveKey with names that only appear on the wire, and
-// would over-redact as profile fields: the auth handler is consumer-supplied, so the
-// names it sends (`X-Auth`, `X-Session`) cannot be enumerated here.
+// credential. It combines three sources: fixed transport header names (authorization,
+// proxy-authorization, cookie, set-cookie), looksSensitiveKey (key/token/secret/password/
+// passphrase/credential/signature), and wire-only hints (auth, session).
 func looksSensitiveHeader(name string) bool {
 	n := strings.ToLower(name)
 	switch n {

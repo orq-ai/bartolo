@@ -33,11 +33,9 @@ paths:
   /widgets/{id}:
     delete:
       operationId: deleteWidget
-      description: >-
-        Delete a widget. Present so `make smoke` exercises the destructive-command
-        confirm gate, the --force flag, and the flag-name reservation: the query
-        parameter below is itself named `force`, so the generator must rename it
-        rather than collide with the generated --force flag.
+      # Exercises the destructive-command confirm gate, --force flag, and the
+      # flag-name reservation (the `force` query parameter collides with --force).
+      description: Delete a widget by ID.
       parameters:
       - name: id
         in: path
@@ -46,7 +44,8 @@ paths:
           type: string
       - name: force
         in: query
-        description: Spec field named force; must be renamed (e.g. --param-force).
+        # Collides with the generated --force; renamed to --param-force.
+        description: Force-delete even if the widget has dependents.
         schema:
           type: boolean
       responses:
