@@ -5,7 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -17,19 +17,21 @@ import (
 	"gopkg.in/h2non/gentleman.v2/context"
 )
 
-// writeCredentials persists the credentials file atomically at 0600. It writes to a
-// temporary file in the same directory, chmods it to 0600, then renames over the
-// target. An ENOSPC/EIO mid-write leaves the existing file intact.
+// writeCredentials persists the credentials file atomically at 0600. os.CreateTemp
+// creates the temp file at 0600 from birth (no world-readable window), then viper
+// writes into it, then rename replaces the target. An interrupted write leaves the
+// existing file intact.
 func writeCredentials(filename string) error {
-	dir := path.Dir(filename)
-	ext := path.Ext(filename)
-	base := strings.TrimSuffix(path.Base(filename), ext)
-	tmp := path.Join(dir, base+"-tmp"+ext)
-	if err := Creds.viper.WriteConfigAs(tmp); err != nil {
-		os.Remove(tmp)
+	dir := filepath.Dir(filename)
+	ext := filepath.Ext(filename)
+	base := strings.TrimSuffix(filepath.Base(filename), ext)
+	f, err := os.CreateTemp(dir, base+"-*"+ext)
+	if err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
+	tmp := f.Name()
+	f.Close()
+	if err := Creds.viper.WriteConfigAs(tmp); err != nil {
 		os.Remove(tmp)
 		return err
 	}
@@ -286,7 +288,7 @@ func UseAuth(typeName string, handler AuthHandler) {
 			Creds.Set("profiles."+name+".server", server)
 		}
 
-		filename := path.Join(viper.GetString("config-directory"), "credentials.json")
+		filename := filepath.Join(viper.GetString("config-directory"), "credentials.json")
 		return writeCredentials(filename)
 	}
 
@@ -538,7 +540,7 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 		Creds.Set("profiles."+profileName+".server", server)
 	}
 
-	filename := path.Join(viper.GetString("config-directory"), "credentials.json")
+	filename := filepath.Join(viper.GetString("config-directory"), "credentials.json")
 	return writeCredentials(filename)
 }
 
@@ -596,16 +598,16 @@ type CredentialsFile struct {
 	viper *viper.Viper
 }
 
-func (c *CredentialsFile) Set(key string, value interface{})       { c.viper.Set(key, value) }
+func (c *CredentialsFile) Set(key string, value interface{}) { c.viper.Set(key, value) }
 func (c *CredentialsFile) GetStringMap(key string) map[string]interface{} {
 	return c.viper.GetStringMap(key)
 }
 func (c *CredentialsFile) GetStringMapString(key string) map[string]string {
 	return c.viper.GetStringMapString(key)
 }
-func (c *CredentialsFile) SetConfigName(name string)  { c.viper.SetConfigName(name) }
-func (c *CredentialsFile) AddConfigPath(path string)  { c.viper.AddConfigPath(path) }
-func (c *CredentialsFile) ReadInConfig() error        { return c.viper.ReadInConfig() }
+func (c *CredentialsFile) SetConfigName(name string) { c.viper.SetConfigName(name) }
+func (c *CredentialsFile) AddConfigPath(path string) { c.viper.AddConfigPath(path) }
+func (c *CredentialsFile) ReadInConfig() error       { return c.viper.ReadInConfig() }
 
 // Creds represents a configuration file storing credential-related
 // information. Use this only after `InitCredentialsFile` has been called.
