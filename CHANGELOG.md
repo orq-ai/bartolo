@@ -1,12 +1,18 @@
 # Changelog
 
-All notable changes to Bartolo will be documented in this file.
+Notable changes to Bartolo up to the switch to automatic releases.
 
 The project was restarted on 2026-04-09 as a new public release stream under the Bartolo name.
 
-## 2026-08-26 (v0.4.8)
+This file is frozen. From the first automatic release onward, notes live on the
+[GitHub Releases](https://github.com/orq-ai/bartolo/releases) page, generated
+from the merged pull requests. The entries below cover the versions that predate
+that, including the two that were bumped in the source but never tagged.
 
-- Bumped Bartolo to v0.4.8.
+## 2026-08-26 (v0.4.8, never tagged)
+
+- **Never tagged.** See the v0.4.7 note below: neither bump was ever tagged, and
+  both sections ship in the first automatic release.
 - `auth list-profiles` no longer prints stored credentials. Any profile field whose name looks like a credential is now shown with its first and last four characters around a fixed-width `********` middle (`sk-o********mnop`), so keys no longer leak into terminal scrollback, CI logs, screen recordings and support transcripts. Which fields count is decided by the same predicate that decides whether `auth setup` prompts for a field without echo.
 - `auth list-profiles` now goes through the response formatter instead of writing a table straight to stdout, so `--json` and `-o yaml` return the profile list in the requested format like every other command.
 - Added interactive tables for generated collection commands. Use the
@@ -54,9 +60,12 @@ The project was restarted on 2026-04-09 as a new public release stream under the
 - **`AddForceFlag` no longer registers the `-f` shorthand.** Consumer code claiming `-f` through `cli.AddFlag` no longer panics pflag at startup.
 - **`resolveProfileValue` takes a `*cobra.Command` and returns `(string, error)`.** The old `(value, ok)` signature hid errors and used `exitFunc` to exit mid-handler.
 
-## 2026-08-26 (v0.4.7)
+## 2026-08-26 (v0.4.7, never tagged)
 
-- Bumped Bartolo to v0.4.7.
+- **Never tagged.** The constant was bumped for v0.4.7 and again for v0.4.8, but
+  no tag exists for either, so `go install ...@latest` never saw them. Both
+  sections ship in the first automatic release instead. This is the drift the
+  automatic releases exist to prevent.
 - Added per-profile servers. `auth add-profile --server <url>` and `auth setup --server <url>` bind an API base URL to the profile, and generated commands resolve it automatically, so staging, self-hosted and localhost profiles no longer need the flag on every call. Only an explicit `--server` on that invocation binds one — an environment variable or a persisted default is never silently baked into a new profile. Profiles saved without a server keep using the generated default.
 - Reordered server resolution so a more specific source always wins: an explicit `--server` flag, `<PREFIX>_SERVER` environment variable or programmatic override, then the active profile's bound server, then the `server set` default, then `server-index` and the generated default. Previously a `server set` from months earlier silently outranked every profile.
 

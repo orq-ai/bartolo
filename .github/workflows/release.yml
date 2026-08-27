@@ -1,0 +1,256 @@
+name: release
+
+# Tag-driven release. When CI passes on main, derive the next version from the
+# conventional-commit subjects since the last tag, push that tag, and publish a
+# GitHub Release. There is nothing to build or upload: bartolo ships through
+# `go install`, and the proxy serves whatever the tag points at.
+#
+# The tag is the only place a version is recorded — `bartolo version` reports
+# the module version from its build info — so nothing here can drift out of sync
+# with the code the way the hand-cut tags did (v0.4.4 shipped reporting 0.4.3).
+#
+# The version arithmetic is svu's, not ours; see .svu.yml for the one setting
+# that matters. The steps are idempotent, so a run that dies between pushing the
+# tag and publishing the release is repaired by the next one instead of leaving
+# a tag the module proxy serves with no release to explain it.
+#
+# Only a tag is pushed, never a commit to main, so the plain GITHUB_TOKEN is
+# enough and main's protection stays untouched.
+on:
+  # Not `push: main` — a release must not overtake the CI run that would have
+  # stopped it. This fires only after ci concludes, and only publishes the
+  # commit ci actually verified.
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      force_level:
+        description: "auto = derive from commits. Anything else forces that bump; a major must be forced."
+        required: false
+        default: auto
+        type: choice
+        options: [auto, major, minor, patch]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write # push the tag + create the GitHub Release
+
+env:
+  # Pinned: this decides every version bartolo ever ships.
+  SVU_VERSION: v3.4.1
+
+jobs:
+  release:
+    name: tag + release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main')
+    steps:
+      # workflow_dispatch can be aimed at any branch. Fail rather than skip: a
+      # release fired at a feature branch must not report success having done
+      # nothing.
+      - name: Refuse to release anything but main
+        if: github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Releases are cut from main only; this run targets ${{ github.ref }}."
+          exit 1
+
+      - uses: actions/checkout@v6
+        with:
+          # The commit ci verified, not whatever main has drifted to since.
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          fetch-depth: 0 # full history + tags for version derivation
+          persist-credentials: true # the tag push below reuses this credential
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install svu
+        run: go install github.com/caarlos0/svu/v3@${{ env.SVU_VERSION }}
+
+      - name: Decide the release
+        id: version
+        env:
+          FORCE_LEVEL: ${{ github.event.inputs.force_level }}
+        run: |
+          set -euo pipefail
+
+          # workflow_run events arrive in ci-completion order, not merge order,
+          # so a slow ci run for an older commit can reach this job after a newer
+          # one already released. Releasing then would point a new version at
+          # superseded code.
+          #
+          # This is a green no-op, not a failure. Two PRs merging inside one ci
+          # cycle is routine and nothing is lost: the run for the newer commit
+          # releases everything up to it, this commit included. A red release run
+          # has to keep meaning "a release that should have happened did not", or
+          # nobody reads them.
+          git fetch --quiet origin main
+          head="$(git rev-parse HEAD)"
+          tip="$(git rev-parse origin/main)"
+          if [ "$head" != "$tip" ]; then
+            if git merge-base --is-ancestor "$head" "$tip"; then
+              echo "::notice::$head is already on main, which has advanced to $tip. The run for $tip cuts this release."
+              printf 'superseded=true\nreleased=false\ntag=\n' | tee -a "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # Not an ancestor: this commit is not on main at all, which should be
+            # impossible. That stays a failure.
+            echo "::error::HEAD is $head, which origin/main ($tip) does not contain. Refusing to release a commit that is not on main."
+            exit 1
+          fi
+
+          current="$(svu current)"
+          forced=false
+          if [ -n "$FORCE_LEVEL" ] && [ "$FORCE_LEVEL" != auto ]; then
+            forced=true
+            next="$(svu "$FORCE_LEVEL")"
+          else
+            # svu prints the current version when nothing warrants a release.
+            next="$(svu next)"
+          fi
+
+          released=false
+          if [ "$next" != "$current" ]; then released=true; fi
+
+          # svu releases on feat and fix only, but a dependency bump is compiled
+          # into the binary a consumer installs, so it always has to reach a tag
+          # — a patched dependency that never gets released is the failure
+          # govulncheck exists to catch. Dependabot titles its PRs with the
+          # conventional `chore(deps):` scope, so promote a deps-scoped subject
+          # to a patch instead of making dependabot lie about the type. `ci(deps)`
+          # is excluded: an action bump changes nothing a consumer installs, and
+          # `ci` is release-neutral in the backlog check below, so those merges
+          # stay green without cutting a version. Skipped when a human forced a
+          # level: their choice wins.
+          if [ "$released" = false ] && [ "$forced" = false ] && \
+             git rev-parse -q --verify "refs/tags/$current" >/dev/null && \
+             git log --no-merges --format=%s "$current..HEAD" \
+               | grep -qE '^(chore|build|fix|feat)\(deps[^)]*\)!?: '; then
+            next="$(svu patch)"
+            released=true
+            echo "A dependency bump is sitting unreleased since $current; cutting a patch."
+          fi
+
+          # tag is the ref a release must exist for: the one about to be cut, or
+          # the last one, so a release that failed after its tag was pushed is
+          # created on the next run instead of staying missing forever. Empty
+          # when the last tag does not exist (a repo with no tags at all), since
+          # there is then nothing to backfill a release for.
+          if [ "$released" = true ]; then
+            tag="$next"
+          elif git rev-parse -q --verify "refs/tags/$current" >/dev/null; then
+            tag="$current"
+          else
+            tag=""
+          fi
+
+          major_bump=false
+          if [ "${next%%.*}" != "${current%%.*}" ]; then major_bump=true; fi
+
+          {
+            echo "superseded=false"
+            echo "released=$released"
+            echo "current=$current"
+            echo "next=$next"
+            echo "tag=$tag"
+            echo "major_bump=$major_bump"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Refuse an unconfirmed major
+        # A major bump needs a human. Fail rather than skip: a blocked release
+        # must not look like a docs-only push.
+        #
+        # Dormant while `.svu.yml` sets `v0: true` — under v0 svu caps a breaking
+        # change at a minor, so `svu next` can never cross a major boundary, and
+        # the only path that can (`svu major`) is the one this condition exempts.
+        # `v0: true` is the guard that is actually load-bearing today; this step
+        # is what takes over the day that is dropped, per .svu.yml's own note.
+        if: steps.version.outputs.major_bump == 'true' && github.event.inputs.force_level != 'major'
+        run: |
+          echo "::error::Refusing an automatic major bump ${{ steps.version.outputs.current }} -> ${{ steps.version.outputs.next }}. Re-run this workflow via workflow_dispatch with force_level=major to confirm, or force_level=minor/patch to ship the breaking changes at a lower level."
+          exit 1
+
+      - name: Push the tag
+        if: steps.version.outputs.released == 'true'
+        env:
+          TAG: ${{ steps.version.outputs.next }}
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          if existing="$(git rev-parse -q --verify "refs/tags/$TAG^{commit}")"; then
+            # Re-running over a tag we already cut is fine. Finding it on other
+            # code is not: publishing it would ship a commit nobody chose.
+            if [ "$existing" = "$head" ]; then
+              echo "$TAG already points at $head."
+              exit 0
+            fi
+            echo "::error::$TAG already exists and points at $existing, not $head. Refusing to publish. Delete the stray tag or cut a different version."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG" "$head"
+          git push origin "$TAG"
+
+      - name: Ensure the release exists
+        # Covers the tag just pushed and, when there is nothing new to release,
+        # the last tag — so a release that failed to publish after its tag went
+        # out is backfilled here rather than staying missing forever.
+        if: steps.version.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already published."
+            exit 0
+          fi
+          gh release create "$TAG" --title "$TAG" --generate-notes --verify-tag
+
+      - name: Refuse an unreleasable backlog
+        # "Nothing to release" is only trustworthy when every commit since the
+        # last tag is one whose type is release-neutral *by intent*. The earlier
+        # version of this check tested the conventional-commit shape instead,
+        # which let anything svu happens not to act on through: `perf:` and a
+        # bare `revert:` are well-formed, ship user-visible change, and bump
+        # nothing. Release-neutral by accident is how the BACK-2115 fix sat on
+        # main untagged for days, so the list below is an allow-list, not a
+        # pattern. Fail so the merge that could not release looks different from
+        # the one that chose not to.
+        #
+        # Deps-scoped subjects never reach here: the version step promotes them
+        # to a patch. Subjects containing feat:/fix: never reach here either —
+        # svu matches those anywhere in the subject, so `Revert "fix: ..."`
+        # releases rather than landing in this list.
+        if: steps.version.outputs.released != 'true' && steps.version.outputs.superseded != 'true'
+        env:
+          CURRENT: ${{ steps.version.outputs.current }}
+        run: |
+          set -euo pipefail
+          if ! git rev-parse -q --verify "refs/tags/$CURRENT" >/dev/null; then
+            # No baseline tag, so there is no backlog to be unreleasable against.
+            # Scanning all history here would flag every subject predating the
+            # conventional-commit rule and fail forever.
+            echo "No tag $CURRENT to measure a backlog against."
+            exit 0
+          fi
+          unreleasable="$(git log --no-merges --format=%s "$CURRENT..HEAD" | grep -vE '^(docs|style|test|ci|chore|build|refactor)(\([^)]*\))?: ' || true)"
+          if [ -n "$unreleasable" ]; then
+            echo "::error::Nothing was released, but these subjects since $CURRENT are not a release-neutral type, so none of them could have triggered a release:"
+            printf '%s\n' "$unreleasable"
+            echo "Re-run this workflow with a force_level to ship them, or land them under a type that releases (feat/fix)."
+            exit 1
+          fi
+          echo "Nothing to release: every commit since $CURRENT is deliberately release-neutral."

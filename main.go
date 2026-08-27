@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,7 +32,65 @@ import (
 var templateFS embed.FS
 
 const projectConfigFilename = ".bartolo.json"
-const bartoloVersion = "0.4.8"
+
+// bartoloVersion is the module version this binary was installed with, not a
+// constant anyone has to remember to bump. `go install ...@vX.Y.Z` records the
+// version in the build info, so the git tag is the single source of truth and
+// the reported version cannot drift away from it the way v0.4.4 did (tagged
+// v0.4.4, reported 0.4.3).
+var bartoloVersion = resolveVersion()
+
+// devel is the sentinel for a binary with no recorded module version: `go build`
+// has none to record, so there is no honest number to print. resolveVersionFrom
+// appends the VCS revision when the build carried one.
+const devel = "devel"
+
+func resolveVersion() string {
+	return resolveVersionFrom(debug.ReadBuildInfo())
+}
+
+// resolveVersionFrom is resolveVersion with the one untestable call lifted out,
+// so the branching below is covered by tests rather than by the build method
+// that happens to produce the binary running them.
+func resolveVersionFrom(info *debug.BuildInfo, ok bool) string {
+	if !ok {
+		return devel
+	}
+	version := normalizeVersion(info.Main.Version)
+	if version != devel {
+		return version
+	}
+	// A dev build has no version, but it does have a commit, and this string is
+	// written into every generated .bartolo.json. "devel" alone cannot tell you
+	// which checkout produced a project; "devel+1a2b3c4" can.
+	return devel + buildRevision(info.Settings)
+}
+
+// normalizeVersion turns a module version recorded in the build info into the
+// string bartolo reports. Go writes "(devel)" for a plain `go build`, and an
+// empty string when the binary was not built as a module at all.
+func normalizeVersion(raw string) string {
+	if raw == "" || raw == "(devel)" {
+		return devel
+	}
+	return strings.TrimPrefix(raw, "v")
+}
+
+// buildRevision returns "+<short sha>", or "" when the build carried no VCS
+// stamp — `go build` outside a repository, or with -buildvcs=false.
+func buildRevision(settings []debug.BuildSetting) string {
+	for _, setting := range settings {
+		if setting.Key != "vcs.revision" || setting.Value == "" {
+			continue
+		}
+		revision := setting.Value
+		if len(revision) > 7 {
+			revision = revision[:7]
+		}
+		return "+" + revision
+	}
+	return ""
+}
 
 // OpenAPI Extensions
 const (

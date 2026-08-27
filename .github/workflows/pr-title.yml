@@ -1,0 +1,33 @@
+name: pr title
+
+# Merges are squashed, so the PR title becomes the commit subject the release
+# workflow derives the next version from. A title that is not a conventional
+# commit is silently release-neutral, so check it here rather than discover it
+# as a release that never happened.
+#
+# Separate from ci.yml because this is the one check that must re-run when the
+# title changes, and `types` cannot be set per job.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  # Read is all the action needs: it reads the PR title and the commit list, and
+  # reports a rejected title in the check log. It posts no comment of its own —
+  # upstream's commenting example bolts on a separate sticky-comment action.
+  pull-requests: read
+
+jobs:
+  pr-title:
+    name: pr title
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # On a one-commit PR, GitHub offers that commit's subject as the
+          # squash message instead of the title, so a validated title can be
+          # dropped at the merge button. Validate both, and require they agree.
+          validateSingleCommit: true
+          validateSingleCommitMatchesPrTitle: true

@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
 	"strings"
 	"testing"
 
@@ -1195,5 +1196,88 @@ paths:
 	}
 	if sections["ping"] != "Utilities" {
 		t.Fatalf("expected path-inferred group to carry section, got %q", sections["ping"])
+	}
+}
+
+// TestBuildRevision covers the suffix a dev build carries. Go omits the VCS
+// stamp entirely in a git worktree and under -buildvcs=false, so the empty case
+// is the one that actually shows up, not a theoretical one.
+func TestBuildRevision(t *testing.T) {
+	cases := []struct {
+		name     string
+		settings []debug.BuildSetting
+		want     string
+	}{
+		{"full sha is shortened", []debug.BuildSetting{{Key: "vcs.revision", Value: "1a2b3c4d5e6f7890"}}, "+1a2b3c4"},
+		{"short sha is left alone", []debug.BuildSetting{{Key: "vcs.revision", Value: "1a2b3c"}}, "+1a2b3c"},
+		{"other settings are skipped", []debug.BuildSetting{{Key: "vcs", Value: "git"}, {Key: "vcs.revision", Value: "abcdefgh"}}, "+abcdefg"},
+		{"no stamp", []debug.BuildSetting{{Key: "vcs.modified", Value: "false"}}, ""},
+		{"empty revision", []debug.BuildSetting{{Key: "vcs.revision", Value: ""}}, ""},
+		{"no settings", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := buildRevision(tc.settings); got != tc.want {
+				t.Errorf("buildRevision() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeVersion(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"tagged version loses its v", "v0.4.7", "0.4.7"},
+		{"prerelease is kept whole", "v1.2.3-rc.1", "1.2.3-rc.1"},
+		{"version without a v is left alone", "0.4.7", "0.4.7"},
+		{"go build reports devel", "(devel)", devel},
+		{"no module version at all", "", devel},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeVersion(tc.raw); got != tc.want {
+				t.Errorf("normalizeVersion(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveVersionFrom(t *testing.T) {
+	revision := []debug.BuildSetting{{Key: "vcs.revision", Value: "1a2b3c4d5e6f"}}
+	cases := []struct {
+		name string
+		info *debug.BuildInfo
+		ok   bool
+		want string
+	}{
+		{"no build info", nil, false, devel},
+		{
+			"installed version wins over the revision",
+			&debug.BuildInfo{Main: debug.Module{Version: "v0.5.0"}, Settings: revision},
+			true,
+			"0.5.0",
+		},
+		{
+			"dev build carries the revision",
+			&debug.BuildInfo{Main: debug.Module{Version: "(devel)"}, Settings: revision},
+			true,
+			"devel+1a2b3c4",
+		},
+		{
+			"dev build without a stamp is bare devel",
+			&debug.BuildInfo{Main: debug.Module{Version: "(devel)"}},
+			true,
+			devel,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveVersionFrom(tc.info, tc.ok); got != tc.want {
+				t.Errorf("resolveVersionFrom() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

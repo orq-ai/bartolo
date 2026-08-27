@@ -4,6 +4,16 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # `chore(deps)`, the conventional type for a dependency bump. svu releases
+    # on feat/fix only, so on its own that would be release-neutral — the
+    # release workflow promotes any `(deps)`-scoped subject to a patch instead,
+    # because every Go dependency is compiled into the binary a consumer
+    # installs and a patched dependency that never reaches a tag is the failure
+    # govulncheck exists to catch. The type stays honest and the release still
+    # happens. Churn is capped by the group below: one grouped PR per week.
+    commit-message:
+      prefix: "chore"
+      include: "scope"
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
@@ -17,6 +27,13 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    # Release-neutral: an action bump changes nothing a consumer installs. `ci`
+    # is on the release workflow's release-neutral allow-list and is the one
+    # `(deps)` scope it does not promote to a patch, so these merge green
+    # without cutting a version.
+    commit-message:
+      prefix: "ci"
+      include: "scope"
     open-pull-requests-limit: 10
     labels:
       - "dependencies"
