@@ -190,8 +190,8 @@ func TestWriteCredentialsIsNotWorldReadable(t *testing.T) {
 		Creds = &CredentialsFile{viper: viper.New()}
 		Creds.SetConfigName("credentials")
 		Creds.Set("profiles.test.type", "apikey")
-		if err := writeCredentials(filename); err != nil {
-			t.Fatalf("writeCredentials: %v", err)
+		if err := Creds.save(filename); err != nil {
+			t.Fatalf("save: %v", err)
 		}
 		info, err := os.Stat(filename)
 		if err != nil {
@@ -223,7 +223,7 @@ func TestWriteCredentialsIsNotWorldReadable(t *testing.T) {
 		}
 		Creds = &CredentialsFile{viper: viper.New()}
 		Creds.Set("profiles.test.type", "apikey")
-		if err := writeCredentials(filename); err == nil {
+		if err := Creds.save(filename); err == nil {
 			t.Fatal("writeCredentials: want an error from WriteConfigAs on an unknown extension")
 		}
 		data, err := os.ReadFile(filename)
@@ -340,4 +340,44 @@ func TestVerboseConfigMaskesAllSensitiveKeys(t *testing.T) {
 	if !looksSensitiveKey("api-key") {
 		t.Fatal("looksSensitiveKey must match api-key")
 	}
+}
+
+func TestCredentialsSaveRoundTripsAndStays0600(t *testing.T) {
+	write := func(t *testing.T, filename string) {
+		c := NewCredentialsFile()
+		c.SetConfigName("credentials")
+		c.Set("profiles.test.type", "apikey")
+		c.Set("profiles.test.gateway_key", "sk-test-VALUE")
+		if err := c.Save(filename); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		info, err := os.Stat(filename)
+		if err != nil {
+			t.Fatalf("stat: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm&0o077 != 0 {
+			t.Errorf("credentials file mode = %o, want no group/other bits on a key file", perm)
+		}
+		back := NewCredentialsFile()
+		back.SetConfigName("credentials")
+		back.AddConfigPath(filepath.Dir(filename))
+		if err := back.ReadInConfig(); err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if got := back.GetString("profiles.test.gateway_key"); got != "sk-test-VALUE" {
+			t.Errorf("round trip lost the value: %q", got)
+		}
+	}
+
+	t.Run("new_file", func(t *testing.T) {
+		write(t, filepath.Join(t.TempDir(), "credentials.json"))
+	})
+
+	t.Run("existing_0644_narrowed", func(t *testing.T) {
+		filename := filepath.Join(t.TempDir(), "credentials.json")
+		if err := os.WriteFile(filename, []byte("{}"), 0o644); err != nil {
+			t.Fatalf("seed 0644: %v", err)
+		}
+		write(t, filename)
+	})
 }

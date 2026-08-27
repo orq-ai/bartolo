@@ -17,11 +17,11 @@ import (
 	"gopkg.in/h2non/gentleman.v2/context"
 )
 
-// writeCredentials persists the credentials file atomically at 0600. os.CreateTemp
+// save persists the credentials file atomically at 0600. os.CreateTemp
 // creates the temp file at 0600 from birth (no world-readable window), then viper
 // writes into it, then rename replaces the target. An interrupted write leaves the
 // existing file intact.
-func writeCredentials(filename string) error {
+func (c *CredentialsFile) save(filename string) error {
 	dir := filepath.Dir(filename)
 	ext := filepath.Ext(filename)
 	base := strings.TrimSuffix(filepath.Base(filename), ext)
@@ -31,12 +31,19 @@ func writeCredentials(filename string) error {
 	}
 	tmp := f.Name()
 	f.Close()
-	if err := Creds.viper.WriteConfigAs(tmp); err != nil {
+	if err := c.viper.WriteConfigAs(tmp); err != nil {
 		os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, filename)
 }
+
+// Save persists the credentials file through the hardened write: atomic
+// temp-file-and-rename, 0600 from birth. It exists for downstream CLIs that
+// store their own fields in the credentials profile and would otherwise have
+// to reimplement this write themselves. The raw viper write stays unexported:
+// viper creates files 0644, which is the bypass the private field closed.
+func (c *CredentialsFile) Save(filename string) error { return c.save(filename) }
 
 // AuthHandler describes a handler that can be called on a request to inject
 // auth information and is agnostic to the type of auth.
@@ -289,7 +296,7 @@ func UseAuth(typeName string, handler AuthHandler) {
 		}
 
 		filename := filepath.Join(viper.GetString("config-directory"), "credentials.json")
-		return writeCredentials(filename)
+		return Creds.save(filename)
 	}
 
 	addKeyFileFlags := func(cmd *cobra.Command) {
@@ -541,7 +548,7 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 	}
 
 	filename := filepath.Join(viper.GetString("config-directory"), "credentials.json")
-	return writeCredentials(filename)
+	return Creds.save(filename)
 }
 
 func hasInteractiveInput() bool {
@@ -593,12 +600,13 @@ func ConfirmDestructive(cmd *cobra.Command, args []string) error {
 }
 
 // CredentialsFile holds credential-related information. The viper instance is
-// unexported so callers cannot bypass writeCredentials and create a 0644 file.
+// unexported so callers cannot bypass the hardened save and create a 0644 file.
 type CredentialsFile struct {
 	viper *viper.Viper
 }
 
 func (c *CredentialsFile) Set(key string, value interface{}) { c.viper.Set(key, value) }
+func (c *CredentialsFile) GetString(key string) string       { return c.viper.GetString(key) }
 func (c *CredentialsFile) GetStringMap(key string) map[string]interface{} {
 	return c.viper.GetStringMap(key)
 }
@@ -608,6 +616,13 @@ func (c *CredentialsFile) GetStringMapString(key string) map[string]string {
 func (c *CredentialsFile) SetConfigName(name string) { c.viper.SetConfigName(name) }
 func (c *CredentialsFile) AddConfigPath(path string) { c.viper.AddConfigPath(path) }
 func (c *CredentialsFile) ReadInConfig() error       { return c.viper.ReadInConfig() }
+
+// NewCredentialsFile returns an empty, in-memory credentials file. It exists
+// so tests and downstream harnesses can construct one without reaching the
+// private viper instance; the process-wide file is still InitCredentialsFile.
+func NewCredentialsFile() *CredentialsFile {
+	return &CredentialsFile{viper: viper.New()}
+}
 
 // Creds represents a configuration file storing credential-related
 // information. Use this only after `InitCredentialsFile` has been called.
