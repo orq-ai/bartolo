@@ -712,3 +712,160 @@ func TestSaveJSONConfigRejectsMalformedExistingFile(t *testing.T) {
 	}
 	assert.Equal(t, malformed, string(data), "a malformed config.json must be left untouched")
 }
+
+// `auth setup` used to default its `--profile` flag to the literal string
+// "default", reinventing the implicit profile this branch removed.
+func TestAuthSetupProfileFlagDefaultsEmpty(t *testing.T) {
+	cmd := newAuthSetupCommand()
+	flag := cmd.Flags().Lookup("profile")
+	if flag == nil {
+		t.Fatal("expected a --profile flag")
+	}
+	assert.Equal(t, "", flag.DefValue)
+}
+
+// withFakeInteractiveSetup swaps isInteractive and promptProfileValue for the
+// duration of the test so RunAuthSetup can be exercised without a TTY.
+func withFakeInteractiveSetup(t *testing.T, prompt func(key string) (string, error)) {
+	t.Helper()
+	origInteractive, origPrompt := isInteractive, promptProfileValue
+	t.Cleanup(func() { isInteractive, promptProfileValue = origInteractive, origPrompt })
+	isInteractive = func() bool { return true }
+	promptProfileValue = prompt
+}
+
+// A user who ran `auth profile use staging` and then `auth setup` to rotate
+// the key must have `staging` updated, not a freshly-invented `default`.
+func TestRunAuthSetupTargetsActiveProfileNotDefault(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	withFakeInteractiveSetup(t, func(key string) (string, error) {
+		return "rotated-secret", nil
+	})
+
+	viper.Set("profile", "staging")
+
+	if err := RunAuthSetup("", "", ""); err != nil {
+		t.Fatalf("RunAuthSetup: %v", err)
+	}
+
+	viper.Set("profile", "staging")
+	if got := GetProfile()["api_key"]; got != "rotated-secret" {
+		t.Fatalf("expected staging profile updated, got %q", got)
+	}
+	if ProfileExists("default") {
+		t.Fatal("expected no `default` profile to be invented")
+	}
+}
+
+// With no profile in force and no --profile given, RunAuthSetup must prompt
+// for a name instead of falling back to "default".
+func TestRunAuthSetupPromptsForNameWhenNoneActive(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	var prompted []string
+	withFakeInteractiveSetup(t, func(key string) (string, error) {
+		prompted = append(prompted, key)
+		if key == "profile_name" {
+			return "acme", nil
+		}
+		return "secret", nil
+	})
+
+	if err := RunAuthSetup("", "", ""); err != nil {
+		t.Fatalf("RunAuthSetup: %v", err)
+	}
+
+	if !ProfileExists("acme") {
+		t.Fatal("expected the prompted profile name to be used")
+	}
+	if ProfileExists("default") {
+		t.Fatal("expected no `default` profile to be invented")
+	}
+	if len(prompted) == 0 || prompted[0] != "profile_name" {
+		t.Fatalf("expected the profile name prompt first, got %v", prompted)
+	}
+}
+
+// An empty answer to the profile-name prompt must be rejected rather than
+// silently producing a profile named "".
+func TestRunAuthSetupRejectsEmptyProfileNamePrompt(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	withFakeInteractiveSetup(t, func(key string) (string, error) {
+		if key == "profile_name" {
+			return "   ", nil
+		}
+		return "secret", nil
+	})
+
+	if err := RunAuthSetup("", "", ""); err == nil {
+		t.Fatal("expected an error for an empty profile name")
+	}
+	if ProfileExists("") {
+		t.Fatal("expected no profile to be created for an empty name")
+	}
+}
+
+// `auth profile current` with nothing in force reports the "none" rung.
+func TestAuthProfileCurrentNoneInForce(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	out := execute("auth profile current --json")
+
+	var decoded map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("unmarshal: %v, out=%s", err, out)
+	}
+	assert.Equal(t, "", decoded["profile"])
+	assert.Equal(t, "none", decoded["source"])
+	assert.Equal(t, false, decoded["exists"])
+}
+
+// A profile named via --profile reports the "flag" rung, and one that does
+// not exist reports exists:false rather than erroring.
+func TestAuthProfileCurrentFromFlagReportsMissing(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	out := execute("--profile ghost auth profile current --json")
+
+	var decoded map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("unmarshal: %v, out=%s", err, out)
+	}
+	assert.Equal(t, "ghost", decoded["profile"])
+	assert.Equal(t, "flag", decoded["source"])
+	assert.Equal(t, false, decoded["exists"])
+}
+
+// A profile chosen with `auth profile use` reports the "selected" rung.
+func TestAuthProfileCurrentFromPersistedSelection(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, ""); err != nil {
+		t.Fatalf("saveAuthProfile: %v", err)
+	}
+	execute("auth profile use acme")
+
+	out := execute("auth profile current --json")
+
+	var decoded map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("unmarshal: %v, out=%s", err, out)
+	}
+	assert.Equal(t, "acme", decoded["profile"])
+	assert.Equal(t, "selected", decoded["source"])
+	assert.Equal(t, true, decoded["exists"])
+}

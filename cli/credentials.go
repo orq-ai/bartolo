@@ -114,6 +114,7 @@ func initAuth() {
 	authAddCommands[1].Aliases = []string{"add"}
 
 	profileCommand.AddCommand(newProfileListCommand("list", ""))
+	profileCommand.AddCommand(newProfileCurrentCommand())
 	profileCommand.AddCommand(newProfileUseCommand("use"))
 	profileCommand.AddCommand(newProfileClearCommand())
 
@@ -232,6 +233,29 @@ func newProfileUseCommand(use string) *cobra.Command {
 			}
 
 			return Formatter.Format(map[string]interface{}{"active_profile": name, "persisted": true})
+		},
+	}
+}
+
+// newProfileCurrentCommand is the read-side counterpart to `use`/`clear`: it
+// surfaces a profile in force that is otherwise invisible, such as a
+// `--profile ghost` or a persisted selection whose profile was later removed
+// from credentials.json — both resolve to a name, but neither shows up in
+// `auth profile list`.
+func newProfileCurrentCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "current",
+		Short: "Show the currently active authentication profile",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name, source := activeProfileNameWithSource()
+
+			return Formatter.Format(map[string]interface{}{
+				"profile":        name,
+				"source":         source,
+				"exists":         ProfileExists(name),
+				"profile_server": ProfileServer(),
+			})
 		},
 	}
 }
@@ -474,15 +498,19 @@ func newAuthSetupCommand() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&profileName, "profile", "default", "Profile name to create or update")
+	cmd.Flags().StringVar(&profileName, "profile", "", "Profile name to create or update (defaults to the active profile)")
 	cmd.Flags().StringVar(&typeName, "type", "", "Authentication type to configure when multiple handlers exist")
 	return cmd
 }
 
 // RunAuthSetup interactively prompts for authentication details and persists
-// them to the credentials profile store.
+// them to the credentials profile store. When profileName is empty, it targets
+// whichever profile is already in force (ActiveProfileName) so that rotating a
+// key never silently writes a different profile than the one every other
+// command is using. When no profile is in force either, it prompts for a name
+// rather than inventing one: there is no implicit `default` profile anymore.
 func RunAuthSetup(profileName string, preferredType string, server string) error {
-	if !hasInteractiveInput() {
+	if !isInteractive() {
 		return fmt.Errorf("auth setup requires an interactive terminal")
 	}
 
@@ -493,7 +521,17 @@ func RunAuthSetup(profileName string, preferredType string, server string) error
 
 	profileName = sanitizeProfileName(profileName)
 	if profileName == "" {
-		profileName = "default"
+		profileName = ActiveProfileName()
+	}
+	if profileName == "" {
+		name, err := promptProfileValue("profile_name")
+		if err != nil {
+			return err
+		}
+		profileName = sanitizeProfileName(name)
+		if profileName == "" {
+			return fmt.Errorf("profile name is required")
+		}
 	}
 
 	answers := make([]string, 0, len(handler.ProfileKeys()))
@@ -800,15 +838,28 @@ func ProfileExists(name string) bool {
 // name: a CLI with credentials only in the environment has no profile in force,
 // and `--profile ""` puts it back in that state for one command.
 func ActiveProfileName() string {
+	name, _ := activeProfileNameWithSource()
+	return name
+}
+
+// activeProfileNameWithSource is the one precedence chain behind
+// ActiveProfileName. `auth profile current` reports its result directly so
+// there is never a second copy of this ranking to drift from the first.
+// source is one of "flag", "env", "selected", or "none".
+func activeProfileNameWithSource() (name string, source string) {
 	if FlagChanged(Root, "profile") {
-		return sanitizeProfileName(Root.Flag("profile").Value.String())
+		return sanitizeProfileName(Root.Flag("profile").Value.String()), "flag"
 	}
 
 	if name := sanitizeProfileName(viper.GetString("profile")); name != "" {
-		return name
+		return name, "env"
 	}
 
-	return sanitizeProfileName(viper.GetString("profile-selected"))
+	if name := sanitizeProfileName(viper.GetString("profile-selected")); name != "" {
+		return name, "selected"
+	}
+
+	return "", "none"
 }
 
 // SelectProfile puts a profile in force for this process, as `--profile` does
