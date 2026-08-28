@@ -554,7 +554,8 @@ func TestSaveAuthProfileAllowsOptionalKeyEmpty(t *testing.T) {
 	assert.NoError(t, err)
 	profile := Creds.GetStringMapString("profiles.acme")
 	assert.Equal(t, "secret", profile["api_key"])
-	assert.Equal(t, "", profile["region"], "expected optional region to stay unset")
+	_, hasRegion := profile["region"]
+	assert.False(t, hasRegion, "expected omitted optional region to be absent from the profile, not stored as \"\"")
 }
 
 // The same handler still rejects an empty credential even though it narrows
@@ -608,7 +609,8 @@ func TestAuthProfileAddOptionalKeyThroughRealCommandPath(t *testing.T) {
 	_ = stdout
 	profile := Creds.GetStringMapString("profiles.acme")
 	assert.Equal(t, "secret", profile["api_key"])
-	assert.Equal(t, "", profile["region"], "expected optional region left unset via empty positional arg")
+	_, hasRegion := profile["region"]
+	assert.False(t, hasRegion, "expected optional region left out of the profile via empty positional arg")
 }
 
 // End-to-end: the required key still fails through the real command path
@@ -826,7 +828,7 @@ func TestAuthSetupProfileFlagDefaultsEmpty(t *testing.T) {
 
 // withFakeInteractiveSetup swaps isInteractive and promptProfileValue for the
 // duration of the test so RunAuthSetup can be exercised without a TTY.
-func withFakeInteractiveSetup(t *testing.T, prompt func(key string) (string, error)) {
+func withFakeInteractiveSetup(t *testing.T, prompt func(key string, required bool) (string, error)) {
 	t.Helper()
 	origInteractive, origPrompt := isInteractive, promptProfileValue
 	t.Cleanup(func() { isInteractive, promptProfileValue = origInteractive, origPrompt })
@@ -841,7 +843,7 @@ func TestRunAuthSetupTargetsActiveProfileNotDefault(t *testing.T) {
 	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
 	UseAuth("", stubAuthHandler{})
 
-	withFakeInteractiveSetup(t, func(key string) (string, error) {
+	withFakeInteractiveSetup(t, func(key string, required bool) (string, error) {
 		return "rotated-secret", nil
 	})
 
@@ -868,7 +870,7 @@ func TestRunAuthSetupPromptsForNameWhenNoneActive(t *testing.T) {
 	UseAuth("", stubAuthHandler{})
 
 	var prompted []string
-	withFakeInteractiveSetup(t, func(key string) (string, error) {
+	withFakeInteractiveSetup(t, func(key string, required bool) (string, error) {
 		prompted = append(prompted, key)
 		if key == "profile_name" {
 			return "acme", nil
@@ -898,7 +900,7 @@ func TestRunAuthSetupRejectsEmptyProfileNamePrompt(t *testing.T) {
 	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
 	UseAuth("", stubAuthHandler{})
 
-	withFakeInteractiveSetup(t, func(key string) (string, error) {
+	withFakeInteractiveSetup(t, func(key string, required bool) (string, error) {
 		if key == "profile_name" {
 			return "   ", nil
 		}
@@ -911,6 +913,150 @@ func TestRunAuthSetupRejectsEmptyProfileNamePrompt(t *testing.T) {
 	if ProfileExists("") {
 		t.Fatal("expected no profile to be created for an empty name")
 	}
+}
+
+// `auth setup` has no file or positional route: it always goes through
+// promptProfileValue. Pressing Enter on the optional `region` field must
+// succeed and the field must be left out of the saved profile, while the
+// same empty answer to the required `api-key` field must still fail. This is
+// the headline scenario a reviewer found broken: promptProfileValue used to
+// apply survey.Required unconditionally, so RunAuthSetup could never save a
+// handler with an optional field via the interactive route.
+func TestRunAuthSetupPromptSkipsOptionalKey(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("optional", stubOptionalKeyHandler{})
+
+	var sawRequired = map[string]bool{}
+	withFakeInteractiveSetup(t, func(key string, required bool) (string, error) {
+		sawRequired[key] = required
+		switch key {
+		case "profile_name":
+			return "acme", nil
+		case "api-key":
+			return "secret", nil
+		case "region":
+			return "", nil
+		default:
+			t.Fatalf("unexpected prompt for %q", key)
+			return "", nil
+		}
+	})
+
+	if err := RunAuthSetup("", "optional", ""); err != nil {
+		t.Fatalf("RunAuthSetup: %v", err)
+	}
+
+	if !sawRequired["api-key"] {
+		t.Error("expected api-key to be threaded through as required")
+	}
+	if sawRequired["region"] {
+		t.Error("expected region to be threaded through as optional")
+	}
+
+	profile := Creds.GetStringMapString("profiles.acme")
+	assert.Equal(t, "secret", profile["api_key"])
+	_, hasRegion := profile["region"]
+	assert.False(t, hasRegion, "expected optional region left out of the profile")
+}
+
+// The credential field must still be rejected through the same prompt route
+// that now lets the optional field through.
+func TestRunAuthSetupPromptRejectsEmptyCredential(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("optional", stubOptionalKeyHandler{})
+
+	withFakeInteractiveSetup(t, func(key string, required bool) (string, error) {
+		switch key {
+		case "profile_name":
+			return "acme", nil
+		case "api-key":
+			return "", nil
+		case "region":
+			return "eu-west", nil
+		default:
+			t.Fatalf("unexpected prompt for %q", key)
+			return "", nil
+		}
+	})
+
+	err := RunAuthSetup("", "optional", "")
+
+	assert.ErrorContains(t, err, "api-key cannot be empty")
+	assert.False(t, ProfileExists("acme"))
+}
+
+// `auth profile add`'s prompt fallback (resolveProfileValue's third route,
+// used when neither --<key>-file nor a positional argument supplies a key)
+// must also let the optional field through and still reject the credential.
+func TestAuthProfileAddPromptSkipsOptionalKey(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("optional", stubOptionalKeyHandler{})
+
+	origPrompt, origInteractive := promptProfileValue, isInteractive
+	t.Cleanup(func() { promptProfileValue, isInteractive = origPrompt, origInteractive })
+	isInteractive = func() bool { return true }
+
+	var sawRequired = map[string]bool{}
+	promptProfileValue = func(key string, required bool) (string, error) {
+		sawRequired[key] = required
+		switch key {
+		case "api-key":
+			return "secret", nil
+		case "region":
+			return "", nil
+		default:
+			t.Fatalf("unexpected prompt for %q", key)
+			return "", nil
+		}
+	}
+
+	// Only the profile name is given positionally; both declared keys fall
+	// through to the prompt route.
+	_, stderr := executeStreams("auth profile add optional acme")
+
+	assert.Empty(t, stderr)
+	if !sawRequired["api-key"] {
+		t.Error("expected api-key to be threaded through as required")
+	}
+	if sawRequired["region"] {
+		t.Error("expected region to be threaded through as optional")
+	}
+
+	profile := Creds.GetStringMapString("profiles.acme")
+	assert.Equal(t, "secret", profile["api_key"])
+	_, hasRegion := profile["region"]
+	assert.False(t, hasRegion, "expected optional region left out of the profile")
+}
+
+// The same prompt fallback still rejects an empty credential.
+func TestAuthProfileAddPromptRejectsEmptyCredential(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("optional", stubOptionalKeyHandler{})
+
+	origPrompt, origInteractive := promptProfileValue, isInteractive
+	t.Cleanup(func() { promptProfileValue, isInteractive = origPrompt, origInteractive })
+	isInteractive = func() bool { return true }
+
+	promptProfileValue = func(key string, required bool) (string, error) {
+		switch key {
+		case "api-key":
+			return "", nil
+		case "region":
+			return "eu-west", nil
+		default:
+			t.Fatalf("unexpected prompt for %q", key)
+			return "", nil
+		}
+	}
+
+	_, stderr := executeStreams("auth profile add optional acme")
+
+	assert.Contains(t, stderr, "api-key cannot be empty")
+	assert.False(t, ProfileExists("acme"))
 }
 
 // `auth profile current` with nothing in force reports the "none" rung.

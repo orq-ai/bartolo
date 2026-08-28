@@ -409,7 +409,7 @@ func UseAuth(typeName string, handler AuthHandler) {
 	run := func(cmd *cobra.Command, args []string) error {
 		values := make([]string, 0, len(keys))
 		for i, key := range keys {
-			value, err := resolveProfileValue(cmd, key, args, i)
+			value, err := resolveProfileValue(cmd, key, args, i, isKeyRequired(handler, keys, key))
 			if err != nil {
 				return err
 			}
@@ -465,10 +465,7 @@ func UseAuth(typeName string, handler AuthHandler) {
 // authoritative, so a missing key surfaces as an error rather than silently
 // falling back to whatever credential is in the environment.
 func requireProfileValues(handler AuthHandler, keys []string, values []string) error {
-	required := keys
-	if narrower, ok := handler.(RequiredKeysHandler); ok {
-		required = narrower.RequiredProfileKeys()
-	}
+	required := requiredProfileKeys(handler, keys)
 
 	for i, key := range keys {
 		if !slices.Contains(required, key) {
@@ -480,6 +477,22 @@ func requireProfileValues(handler AuthHandler, keys []string, values []string) e
 	}
 
 	return nil
+}
+
+// requiredProfileKeys narrows a handler's declared profile keys to those that
+// must be non-empty, consulting RequiredKeysHandler when the handler
+// implements it and requiring every declared key otherwise.
+func requiredProfileKeys(handler AuthHandler, keys []string) []string {
+	if narrower, ok := handler.(RequiredKeysHandler); ok {
+		return narrower.RequiredProfileKeys()
+	}
+	return keys
+}
+
+// isKeyRequired reports whether a single profile key must be non-empty for
+// the given handler, per requiredProfileKeys.
+func isKeyRequired(handler AuthHandler, keys []string, key string) bool {
+	return slices.Contains(requiredProfileKeys(handler, keys), key)
 }
 
 // explicitServer returns `--server` only when passed on this invocation, so an
@@ -544,7 +557,7 @@ func RunAuthSetup(profileName string, preferredType string, server string) error
 		profileName = ActiveProfileName()
 	}
 	if profileName == "" {
-		name, err := promptProfileValue("profile_name")
+		name, err := promptProfileValue("profile_name", true)
 		if err != nil {
 			return err
 		}
@@ -554,16 +567,17 @@ func RunAuthSetup(profileName string, preferredType string, server string) error
 		}
 	}
 
-	answers := make([]string, 0, len(handler.ProfileKeys()))
-	for _, key := range handler.ProfileKeys() {
-		value, err := promptProfileValue(key)
+	keys := handler.ProfileKeys()
+	answers := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value, err := promptProfileValue(key, isKeyRequired(handler, keys, key))
 		if err != nil {
 			return err
 		}
 		answers = append(answers, value)
 	}
 
-	return saveAuthProfile(typeName, profileName, handler.ProfileKeys(), answers, server)
+	return saveAuthProfile(typeName, profileName, keys, answers, server)
 }
 
 func pickAuthHandler(preferredType string) (string, AuthHandler, error) {
@@ -616,7 +630,11 @@ func pickAuthHandler(preferredType string) (string, AuthHandler, error) {
 //  1. --<label>-file <path> (pass "-" for stdin)
 //  2. positional argument (warns on stderr for secrets)
 //  3. interactive prompt
-func resolveProfileValue(cmd *cobra.Command, key string, args []string, i int) (string, error) {
+//
+// required reports whether key must end up non-empty; it is threaded through
+// to the prompt so pressing Enter on an optional field (e.g. a generator-
+// supplied region) succeeds instead of being rejected by survey.Required.
+func resolveProfileValue(cmd *cobra.Command, key string, args []string, i int, required bool) (string, error) {
 	label := strings.Replace(key, "_", "-", -1)
 
 	// 1. --<label>-file flag
@@ -637,7 +655,7 @@ func resolveProfileValue(cmd *cobra.Command, key string, args []string, i int) (
 	if !isInteractive() {
 		return "", NewUsageError(fmt.Errorf("no %s provided; use --%s-file <path> or run in an interactive terminal", label, label))
 	}
-	v, err := promptProfileValue(key)
+	v, err := promptProfileValue(key, required)
 	if err != nil {
 		return "", fmt.Errorf("could not read %s: %w", label, err)
 	}
@@ -662,15 +680,22 @@ func readKeyFile(path string) (string, error) {
 	return v, nil
 }
 
-// promptProfileValue is a var so tests can replace the prompt.
-var promptProfileValue = func(key string) (string, error) {
+// promptProfileValue is a var so tests can replace the prompt. required
+// decides whether the prompt rejects an empty answer: survey.Required must
+// only apply to a key the handler in play actually requires, or an optional
+// field (e.g. a generator-supplied region) could never be skipped by
+// pressing Enter.
+var promptProfileValue = func(key string, required bool) (string, error) {
 	message := strings.ReplaceAll(key, "_", " ")
 	message = strings.Title(message)
 	if strings.Contains(message, "Api ") {
 		message = strings.ReplaceAll(message, "Api ", "API ")
 	}
 
-	opts := []survey.AskOpt{surveyStderr(), survey.WithValidator(survey.Required)}
+	opts := []survey.AskOpt{surveyStderr()}
+	if required {
+		opts = append(opts, survey.WithValidator(survey.Required))
+	}
 
 	if looksSensitiveKey(key) {
 		password := ""
@@ -716,12 +741,19 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 		return fmt.Errorf("profile values do not match keys")
 	}
 
-	if err := requireProfileValues(AuthHandlers[typeName], keys, values); err != nil {
+	handler := AuthHandlers[typeName]
+	if err := requireProfileValues(handler, keys, values); err != nil {
 		return err
 	}
 
+	required := requiredProfileKeys(handler, keys)
 	Creds.Set("profiles."+profileName+".type", typeName)
 	for i, key := range keys {
+		if strings.TrimSpace(values[i]) == "" && !slices.Contains(required, key) {
+			// An omitted optional field (e.g. a generator-supplied region) is
+			// left out of the profile entirely, rather than stored as "".
+			continue
+		}
 		Creds.Set("profiles."+profileName+"."+strings.Replace(key, "-", "_", -1), values[i])
 	}
 
