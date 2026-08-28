@@ -149,14 +149,7 @@ func (h *AuthCodeHandler) OnRequest(log *zerolog.Logger, request *http.Request) 
 		// or generate a new one from the issuing server.
 		profile := cli.GetProfile()
 
-		params := url.Values{}
-		if h.getParamsFunc != nil {
-			// Backward-compatibility with old call style, only used internally.
-			params = h.getParamsFunc(profile)
-		}
-		for _, name := range h.Params {
-			params.Add(name, profile[name])
-		}
+		params := endpointParams(h.getParamsFunc, h.Params, profile)
 
 		source := &AuthorizationCodeTokenSource{
 			ClientID:       h.ClientID,

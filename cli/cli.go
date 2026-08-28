@@ -356,26 +356,17 @@ func migrateLegacyServerConfig(configDir string) {
 		return
 	}
 
-	legacy, _ := config["server"].(string)
-	if strings.TrimSpace(legacy) == "" {
-		if _, present := config["server"]; !present {
-			return
-		}
+	if _, present := config["server"]; !present {
+		return
 	}
+	legacy, _ := config["server"].(string)
 
 	delete(config, "server")
 	if existing, _ := config["server-default"].(string); strings.TrimSpace(existing) == "" && strings.TrimSpace(legacy) != "" {
 		config["server-default"] = legacy
 	}
 
-	migrated, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return
-	}
-
-	if err := writeFileAtomic(filename, func(tmp string) error {
-		return ioutil.WriteFile(tmp, migrated, 0600)
-	}); err != nil {
+	if err := writeJSONFile(filename, config); err != nil {
 		return
 	}
 
@@ -403,7 +394,12 @@ func saveJSONConfig(values map[string]interface{}) error {
 		viper.Set(key, value)
 	}
 
-	data, err := json.MarshalIndent(merged, "", "  ")
+	return writeJSONFile(filename, merged)
+}
+
+// writeJSONFile atomically replaces filename with value as indented JSON.
+func writeJSONFile(filename string, value interface{}) error {
+	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
 	}

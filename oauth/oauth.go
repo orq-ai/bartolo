@@ -62,6 +62,21 @@ func TokenMiddleware(source oauth2.TokenSource, ctx *context.Context, h context.
 	}
 }
 
+// endpointParams builds the extra token-endpoint parameters for a request.
+// getParams is the older callback style, kept for internal callers; names are
+// read from the profile.
+func endpointParams(getParams func(map[string]string) url.Values, names []string, profile map[string]string) url.Values {
+	params := url.Values{}
+	if getParams != nil {
+		params = getParams(profile)
+	}
+	for _, name := range names {
+		params.Add(name, profile[name])
+	}
+
+	return params
+}
+
 // credentialScope keys the token cache on everything identifying this
 // credential: with no profile in force, two OAuth configurations behind one
 // server would otherwise share a token bucket.

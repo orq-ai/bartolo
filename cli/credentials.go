@@ -149,6 +149,16 @@ func newAuthAddCommand(parent *cobra.Command, use string, deprecationNotice stri
 
 // deprecationPreRunE prints notice, naming whichever command cobra ran. Cobra
 // runs only the leaf's hooks, so every typed child needs its own copy.
+// deprecationPreRunEIf is deprecationPreRunE for a notice that may be empty,
+// since cobra treats a nil PreRunE as "no hook" but calls a non-nil one.
+func deprecationPreRunEIf(notice string) func(cmd *cobra.Command, args []string) error {
+	if notice == "" {
+		return nil
+	}
+
+	return deprecationPreRunE(notice)
+}
+
 func deprecationPreRunE(notice string) func(cmd *cobra.Command, args []string) error {
 	return func(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(Stderr, "Command %q is deprecated, %s\n", cmd.Name(), notice)
@@ -163,11 +173,8 @@ func newProfileListCommand(use string, deprecationNotice string) *cobra.Command 
 		Short:   "List available configured authentication profiles",
 		Args:    cobra.NoArgs,
 		Hidden:  deprecationNotice != "",
+		PreRunE: deprecationPreRunEIf(deprecationNotice),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if deprecationNotice != "" {
-				fmt.Fprintf(Stderr, "Command %q is deprecated, %s\n", cmd.Name(), deprecationNotice)
-			}
-
 			profiles := Creds.GetStringMap("profiles")
 			if len(profiles) == 0 {
 				return Formatter.Format(map[string]interface{}{
@@ -209,7 +216,7 @@ func profileListEntry(name string, profile map[string]interface{}, active string
 	}
 
 	for _, key := range keys {
-		field := strings.Replace(key, "-", "_", -1)
+		field := normalizeProfileKeyName(key)
 		if field == "type" {
 			continue
 		}
@@ -415,14 +422,14 @@ func UseAuth(typeName string, handler AuthHandler) {
 	// history and `ps`, so the default is to prompt for it.
 	use := " [flags] <name>"
 	for _, name := range keys {
-		use += " [<" + strings.Replace(name, "_", "-", -1) + ">]"
+		use += " [<" + profileKeyLabel(name) + ">]"
 	}
 
 	run := addProfileRunE(typeName, handler, keys)
 
 	addKeyFileFlags := func(cmd *cobra.Command) {
 		for _, key := range keys {
-			label := strings.Replace(key, "_", "-", -1)
+			label := profileKeyLabel(key)
 			cmd.Flags().String(label+"-file", "", fmt.Sprintf("Read %s from a file (use - for stdin)", label))
 		}
 	}
@@ -501,6 +508,12 @@ func requireProfileValues(handler AuthHandler, keys []string, values []string) e
 // comparison would make a key required under one spelling optional under the other.
 func normalizeProfileKeyName(key string) string {
 	return strings.Replace(key, "-", "_", -1)
+}
+
+// profileKeyLabel spells a profile key the way the command line does, which is
+// the inverse of the stored spelling normalizeProfileKeyName produces.
+func profileKeyLabel(key string) string {
+	return strings.Replace(key, "_", "-", -1)
 }
 
 // keyRequired reports whether key is among required, normalizing both sides.
@@ -696,7 +709,7 @@ func promptAuthType() (string, error) {
 // to the prompt so pressing Enter on an optional field (e.g. a generator-
 // supplied region) succeeds instead of being rejected by survey.Required.
 func resolveProfileValue(cmd *cobra.Command, key string, args []string, i int, required bool) (string, error) {
-	label := strings.Replace(key, "_", "-", -1)
+	label := profileKeyLabel(key)
 
 	// 1. --<label>-file flag
 	flagName := label + "-file"
@@ -840,7 +853,7 @@ func setProfileValues(profileName string, required []string, keys []string, valu
 		if strings.TrimSpace(values[i]) == "" && !keyRequired(required, key) {
 			continue
 		}
-		Creds.Set("profiles."+profileName+"."+strings.Replace(key, "-", "_", -1), values[i])
+		Creds.Set("profiles."+profileName+"."+normalizeProfileKeyName(key), values[i])
 	}
 }
 
