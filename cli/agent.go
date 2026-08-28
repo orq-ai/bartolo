@@ -2,10 +2,15 @@ package cli
 
 import (
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	gentleman "gopkg.in/h2non/gentleman.v2"
@@ -41,11 +46,155 @@ func GetServers() []map[string]string {
 	return servers
 }
 
+// NormalizeServerURL turns a user-supplied server value into a usable API base
+// URL, or explains why it cannot be one. Without it a typo like `htp://x` is
+// persisted happily and only surfaces later as an opaque transport error.
+//
+// A value with no scheme gets `https://`, since that is what a remote API base
+// URL almost always is. Loopback hosts are the exception and must say which
+// scheme they mean: a local dev server on `localhost:8080` is usually plain
+// HTTP, so guessing https there would be wrong more often than right.
+//
+// The bool reports whether a scheme was added, so callers can say so.
+func NormalizeServerURL(raw string) (string, bool, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", false, fmt.Errorf("server URL cannot be empty")
+	}
+
+	candidate, added, err := withScheme(trimmed)
+	if err != nil {
+		return "", false, err
+	}
+
+	parsed, err := url.Parse(candidate)
+	if err != nil {
+		return "", false, fmt.Errorf("server URL %q is not a valid URL: %w", trimmed, err)
+	}
+
+	if err := checkParsedServer(trimmed, parsed, added); err != nil {
+		return "", false, err
+	}
+
+	// Same reason: a trailing slash would produce `https://host//things`.
+	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
+
+	// Lowered because `server list` and ResolveServer compare URLs as strings.
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+
+	return parsed.String(), added, nil
+}
+
+// checkParsedServer holds the rules that need the parsed URL rather than the
+// raw text.
+func checkParsedServer(trimmed string, parsed *url.URL, added bool) error {
+	switch {
+	case !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https"):
+		return fmt.Errorf("server URL %q must start with http:// or https://", trimmed)
+	case parsed.Hostname() == "":
+		return fmt.Errorf("server URL %q is missing a host", trimmed)
+	case added && parsed.User != nil:
+		// `user@host.com` reads as a bare host; a prepended scheme would turn the local part into credentials.
+		return fmt.Errorf("server URL %q is ambiguous: write it as https://%s", trimmed, trimmed)
+	case parsed.RawQuery != "" || parsed.Fragment != "":
+		// server+path concatenation would put a query or fragment mid-URL.
+		return fmt.Errorf("server URL %q must not carry a query or fragment", trimmed)
+	}
+
+	return nil
+}
+
+var schemePrefix = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.\-]*://`)
+
+// withScheme prepends `https://` to a value that has none, and refuses to guess
+// for loopback hosts. Testing for the `scheme://` prefix rather than asking
+// url.Parse is deliberate: RFC 3986 reads `localhost:8080` as scheme
+// `localhost` with opaque part `8080`, so url.Parse cannot tell a scheme-less
+// `host:port` from a real opaque URI like `mailto:someone`.
+func withScheme(trimmed string) (string, bool, error) {
+	if schemePrefix.MatchString(trimmed) {
+		return trimmed, false, nil
+	}
+
+	// Protocol-relative: strip `//` so the loopback rule below sees a bare authority.
+	authority := strings.TrimPrefix(trimmed, "//")
+
+	// A mistyped scheme is not a host: `https:/x` would otherwise become `https://https:/x`.
+	host, _, _ := strings.Cut(authority, "/")
+
+	if schemeTypo.MatchString(host) {
+		return "", false, fmt.Errorf("server URL %q is not a valid URL: write it as http://... or https://...", trimmed)
+	}
+
+	if isLoopback(host) {
+		return "", false, fmt.Errorf("server URL %q is ambiguous: write it as http://%s or https://%s", trimmed, authority, authority)
+	}
+
+	return "https://" + authority, true, nil
+}
+
+// schemeTypo matches an authority that is really a scheme with too few slashes,
+// e.g. `https:/host` or the bare `https:`.
+var schemeTypo = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.\-]*:$`)
+
+// isLoopback reports whether a scheme-less authority points at this machine,
+// where http is at least as likely as https.
+func isLoopback(authority string) bool {
+	host := authority
+	if h, _, err := net.SplitHostPort(authority); err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.Trim(host, "[]"))
+
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+
+	ip := net.ParseIP(host)
+
+	return ip != nil && ip.IsLoopback()
+}
+
+// normalizeServerURLWarn is NormalizeServerURL plus the one place the
+// scheme-was-guessed warning is worded. It warns at most once per distinct
+// value, so the per-request ResolveServer path cannot spam stderr.
+func normalizeServerURLWarn(raw string) (string, error) {
+	normalized, added, err := NormalizeServerURL(raw)
+	if err != nil {
+		return "", err
+	}
+
+	if added {
+		warnServerOnce(raw, fmt.Sprintf("No scheme detected in %q, using %s", strings.TrimSpace(raw), normalized))
+	}
+
+	return normalized, nil
+}
+
+var warnedServers sync.Map
+
+func warnServerOnce(key, msg string) {
+	if _, seen := warnedServers.LoadOrStore(key, struct{}{}); !seen {
+		log.Warn().Msg(msg)
+	}
+}
+
 // ResolveServer returns the active server URL, most specific source first:
 // `--server`, `<PREFIX>_SERVER` or viper.Set, the active profile's server, the
 // `server set` default (kept off the flag's key so viper cannot rank it as
 // explicit), then the selected OpenAPI server.
+//
+// Normalization happens here rather than only where a value is written, because
+// a config or credentials file can be written by an older bartolo, edited by
+// hand, or supplied as `<PREFIX>_SERVER_DEFAULT` — all of which bypass every
+// write path. A value that cannot be normalized is returned as-is: this is the
+// request path, and a transport error naming the bad URL beats swallowing it.
 func ResolveServer() string {
+	return normalizeResolved(resolveServerRaw())
+}
+
+func resolveServerRaw() string {
 	if override := strings.TrimSpace(viper.GetString("server")); override != "" {
 		return override
 	}
@@ -59,6 +208,24 @@ func ResolveServer() string {
 	}
 
 	return SelectedServer()
+}
+
+// normalizeResolved is normalizeServerURLWarn for the read path, where an
+// unusable value is returned as-is: a transport error naming the bad URL beats
+// an empty server.
+func normalizeResolved(raw string) string {
+	if raw == "" {
+		return raw
+	}
+
+	normalized, err := normalizeServerURLWarn(raw)
+	if err != nil {
+		warnServerOnce(raw, fmt.Sprintf("Server URL %q is not usable: %v", raw, err))
+
+		return raw
+	}
+
+	return normalized
 }
 
 // SelectedServer returns the registered OpenAPI server at `server-index`,

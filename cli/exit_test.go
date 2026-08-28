@@ -56,6 +56,14 @@ func initExitTestCLI(t *testing.T) {
 	Root.AddCommand(group)
 
 	Root.AddCommand(&cobra.Command{
+		Use:  "reject",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return NewValueError(errors.New(`--kind: "external" is not one of [internal, a2a]`))
+		},
+	})
+
+	Root.AddCommand(&cobra.Command{
 		Use:  "boom",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -154,4 +162,91 @@ func TestGroupWithoutArgsShowsHelp(t *testing.T) {
 
 	assert.Equal(t, ExitOK, code)
 	assert.Contains(t, stdout, "leaf")
+}
+
+// A bad body-flag value is the user's mistake, so it exits 2 (usage) like any
+// other bad input, not 1 (operation failure). Generated commands reach this
+// through GetBodyWithFlags, which is where the classification lives.
+func TestBodyFlagErrorIsUsageError(t *testing.T) {
+	viper.Reset()
+	Init(&Config{AppName: "test"})
+
+	fields := []BodyField{{
+		Name:     "status",
+		FlagName: "status",
+		Type:     "enum-string",
+		Enum:     []string{"active", "archived"},
+	}}
+
+	cmd := &cobra.Command{
+		Use: "create",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			params := viper.New()
+			_, err := GetBodyWithFlags(cmd, "application/json", args, params, fields)
+			if err != nil {
+				// The generated template wraps rather than classifies.
+				return fmt.Errorf("unable to get body: %w", err)
+			}
+
+			return nil
+		},
+	}
+	AddBodyFieldFlags(cmd, fields)
+	Root.AddCommand(cmd)
+	defer Root.RemoveCommand(cmd)
+
+	_, stderr, code := executeForExit("create --status bogus")
+
+	assert.Equal(t, ExitUsage, code, "stderr: %s", stderr)
+	assert.Contains(t, stderr, "is not one of")
+}
+
+// "error calling operation" would name something that never happened when the
+// value was rejected before the request was built.
+func TestOperationErrorLeavesUsageErrorsUnlabelled(t *testing.T) {
+	usage := NewUsageError(errors.New(`--kind: "external" is not one of [internal, a2a]`))
+	if got := OperationError(usage); got.Error() != usage.Error() {
+		t.Errorf("OperationError(usage) = %q, want it unchanged", got)
+	}
+
+	failure := errors.New("connection refused")
+	if got := OperationError(failure); got.Error() != "error calling operation: connection refused" {
+		t.Errorf("OperationError(failure) = %q, want it labelled", got)
+	}
+
+	if OperationError(nil) != nil {
+		t.Error("OperationError(nil) should stay nil")
+	}
+}
+
+// A value error and a malformed invocation both exit 2, but only one of them is
+// answered by the usage block: if the reader already got the command right and
+// only the value is wrong, repeating the syntax buries the message that names
+// the offending value.
+func TestUsageBlockOnlyPrintsForMalformedInvocations(t *testing.T) {
+	initExitTestCLI(t)
+	_, stderr, code := executeForExit("reject")
+	assert.Equal(t, ExitUsage, code)
+	assert.Contains(t, stderr, `--kind: "external" is not one of [internal, a2a]`)
+	assert.NotContains(t, stderr, "Usage:")
+
+	initExitTestCLI(t)
+	_, stderr, code = executeForExit("group leaf --nope")
+	assert.Equal(t, ExitUsage, code)
+	assert.Contains(t, stderr, "Usage:")
+}
+
+// The label names where the value came from: a user who set <PREFIX>_SERVER
+// should not be sent off to fix a flag they never passed.
+func TestBadServerURLNamesItsSource(t *testing.T) {
+	initExitTestCLI(t)
+	_, stderr, code := executeForExit("boom --server htp://x")
+	assert.Equal(t, ExitUsage, code)
+	assert.Contains(t, stderr, "--server:")
+
+	initExitTestCLI(t)
+	viper.Set("server", "htp://x")
+	_, stderr, code = executeForExit("boom")
+	assert.Equal(t, ExitUsage, code)
+	assert.Contains(t, stderr, "server URL:")
 }

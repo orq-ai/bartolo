@@ -137,6 +137,9 @@ func AddBodyFieldFlags(cmd *cobra.Command, fields []BodyField) {
 		case "json-or-string":
 			cmd.Flags().String(name, "", description+" (plain string, or JSON for objects/arrays, e.g. '{\"k\":1}')")
 		case "enum-string":
+			if len(field.Enum) > 0 {
+				description += fmt.Sprintf(" (one of: %s)", strings.Join(field.Enum, ", "))
+			}
 			cmd.Flags().String(name, "", description)
 			if len(field.Enum) > 0 {
 				values := append([]string{}, field.Enum...)
@@ -164,6 +167,16 @@ func GetBody(mediaType string, args []string, params *viper.Viper) (string, erro
 // satisfied before it decides to read stdin, which is what keeps a command
 // from blocking on an idle pipe. See loadBaseBody for the stdin rules.
 func GetBodyWithFlags(cmd *cobra.Command, mediaType string, args []string, params *viper.Viper, fields []BodyField) (string, error) {
+	body, err := getBodyWithFlags(cmd, mediaType, args, params, fields)
+	if err != nil {
+		// Every failure here is the user's own input, so it exits 2, and classifying it once keeps the generated caller a plain wrap.
+		return "", NewValueError(err)
+	}
+
+	return body, nil
+}
+
+func getBodyWithFlags(cmd *cobra.Command, mediaType string, args []string, params *viper.Viper, fields []BodyField) (string, error) {
 	body, err := loadBaseBody(params, bodySuppliedElsewhere(cmd, params, args, fields))
 	if err != nil {
 		return "", err
@@ -332,17 +345,8 @@ func ApplyBodyFlags(cmd *cobra.Command, params *viper.Viper, mediaType string, b
 			}
 		case "enum-string":
 			value := params.GetString(name)
-			if len(field.Enum) > 0 {
-				allowed := false
-				for _, candidate := range field.Enum {
-					if candidate == value {
-						allowed = true
-						break
-					}
-				}
-				if !allowed {
-					return "", fmt.Errorf("--%s: %q is not one of [%s]", name, value, strings.Join(field.Enum, ", "))
-				}
+			if err := ValidateEnum("--"+name, value, field.Enum); err != nil {
+				return "", err
 			}
 			overrides[field.Name] = value
 		default:

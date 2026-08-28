@@ -100,9 +100,13 @@ func Init(config *Config) {
 			format := viper.GetString("output-format")
 			normalized, ok := parseOutputFormat(format)
 			if !ok {
-				return NewUsageError(fmt.Errorf("--output-format: %q is not one of [%s]", format, outputFormatList()))
+				return NewValueError(fmt.Errorf("--output-format: %q is not one of [%s]", format, outputFormatList()))
 			}
 			viper.Set("output-format", normalized)
+
+			if err := applyServerSetting(cmd); err != nil {
+				return err
+			}
 
 			if viper.GetBool("json") {
 				viper.Set("output-format", "json")
@@ -288,6 +292,32 @@ func parseOutputFormat(value string) (string, bool) {
 	return "", false
 }
 
+// applyServerSetting normalizes the configured server URL in place. Same
+// reasoning as the output format above: an unusable `--server`,
+// `<PREFIX>_SERVER` or config value should fail here rather than as a transport
+// error much later.
+func applyServerSetting(cmd *cobra.Command) error {
+	server := strings.TrimSpace(viper.GetString("server"))
+	if server == "" {
+		return nil
+	}
+
+	normalized, err := normalizeServerURLWarn(server)
+	if err != nil {
+		// Naming --server unconditionally misdirects a user who set <PREFIX>_SERVER.
+		label := "server URL"
+		if flag := cmd.Flags().Lookup("server"); flag != nil && flag.Changed {
+			label = "--server"
+		}
+
+		return NewValueError(fmt.Errorf("%s: %w", label, err))
+	}
+
+	viper.Set("server", normalized)
+
+	return nil
+}
+
 func newDefaultFormatCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "default-format [" + strings.Join(outputFormats, "|") + "]",
@@ -302,7 +332,7 @@ func newDefaultFormatCommand() *cobra.Command {
 
 			next, ok := parseOutputFormat(args[0])
 			if !ok {
-				return NewUsageError(fmt.Errorf("%q is not one of [%s]", args[0], outputFormatList()))
+				return NewValueError(fmt.Errorf("%q is not one of [%s]", args[0], outputFormatList()))
 			}
 			if err := saveJSONConfig(map[string]interface{}{"output-format": next}); err != nil {
 				return err

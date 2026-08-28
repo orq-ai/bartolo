@@ -103,9 +103,9 @@ func newServerSetCommand() *cobra.Command {
 		Short: "Persist a custom server override URL",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			url := strings.TrimSpace(args[0])
-			if url == "" {
-				return fmt.Errorf("server URL cannot be empty")
+			url, err := normalizeServerURLWarn(args[0])
+			if err != nil {
+				return NewValueError(err)
 			}
 
 			if err := saveJSONConfig(map[string]interface{}{

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
 
@@ -180,12 +181,24 @@ func HelpSection(parent *cobra.Command, cmd *cobra.Command, title string) {
 }
 
 // sweepIntoOtherHelpSection puts every remaining ungrouped command under
-// HelpSectionOther, so a CLI that uses sections at all does not also show
-// cobra's "Additional Commands" block. It runs at execute time because that is
-// the first point where every command is registered, including the ones a
-// consuming CLI adds after Register.
+// HelpSectionOther, so a command tree that uses sections at all does not also
+// show cobra's "Additional Commands" block. It runs at execute time because
+// that is the first point where every command is registered, including the ones
+// a consuming CLI adds after Register.
+//
+// It recurses because operations inside a generated group get their sections
+// from the same x-cli-help-section extension as top-level ones, so a group can
+// hold a mix of sectioned and unsectioned subcommands.
 func sweepIntoOtherHelpSection(root *cobra.Command) {
-	if root == nil || len(root.Groups()) == 0 {
+	if root == nil {
+		return
+	}
+
+	for _, cmd := range root.Commands() {
+		sweepIntoOtherHelpSection(cmd)
+	}
+
+	if len(root.Groups()) == 0 {
 		return
 	}
 
@@ -216,4 +229,54 @@ func ensureHelpSection(parent *cobra.Command, title string) {
 	}
 
 	parent.AddGroup(&cobra.Group{ID: title, Title: heading})
+}
+
+// passedFlagsKey holds the set of flags the user actually typed, so a generated
+// operation can tell "unset" from "set to the zero value". It lives in the
+// operation's viper rather than in the operation function's signature so that
+// signature stays free of cobra, and it is spelled with underscores because
+// slug() cannot produce those — no parameter can collide with it.
+const passedFlagsKey = "__passed_flags"
+
+// MarkPassedFlags records which flags were given on the command line. Generated
+// commands call it before building a request; body fields get the same
+// treatment directly from cmd in ApplyBodyFlags.
+func MarkPassedFlags(cmd *cobra.Command, params *viper.Viper) {
+	if cmd == nil || params == nil {
+		return
+	}
+
+	passed := map[string]bool{}
+	cmd.Flags().Visit(func(flag *pflag.Flag) {
+		passed[flag.Name] = true
+	})
+
+	params.Set(passedFlagsKey, passed)
+}
+
+// RequestParams is params.AllSettings without the passed-flag bookkeeping, for
+// callers that treat the settings map as the user's own parameters — waiter
+// matchers, for one.
+func RequestParams(params *viper.Viper) map[string]interface{} {
+	if params == nil {
+		return map[string]interface{}{}
+	}
+
+	settings := params.AllSettings()
+	delete(settings, passedFlagsKey)
+
+	return settings
+}
+
+// FlagPassed reports whether name was given on the command line. It is false
+// for a params built by hand, which is why generated code also sends any
+// non-zero value: a library caller sets values rather than passing flags.
+func FlagPassed(params *viper.Viper, name string) bool {
+	if params == nil {
+		return false
+	}
+
+	passed, _ := params.Get(passedFlagsKey).(map[string]bool)
+
+	return passed[name]
 }
