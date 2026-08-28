@@ -12,20 +12,35 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// executeStreams runs a command against the configured CLI and returns
-// stdout and stderr separately, so a test can assert that a payload landed
-// on stdout while an out-of-band notice (e.g. a deprecation warning) landed
-// on stderr instead.
-func executeStreams(cmd string) (stdout string, stderr string) {
+// executeArgsStreams runs a command against the configured CLI using an
+// explicit argument vector and returns stdout, stderr, and whatever error
+// Root.Execute() returned. An explicit vector is the real shell path: a
+// caller that needs an actual empty argument (e.g. a quoted "" on a real
+// command line) passes it as its own slice element, rather than relying on
+// how a string happens to split.
+func executeArgsStreams(args []string) (stdout string, stderr string, err error) {
 	outBuf := new(bytes.Buffer)
 	errBuf := new(bytes.Buffer)
-	Root.SetArgs(strings.Split(cmd, " "))
+	Root.SetArgs(args)
 	Root.SetOut(outBuf)
 	Root.SetErr(errBuf)
 	Stdout = outBuf
 	Stderr = errBuf
-	Root.Execute()
-	return outBuf.String(), errBuf.String()
+	err = Root.Execute()
+	return outBuf.String(), errBuf.String(), err
+}
+
+// executeStreams is a convenience wrapper over executeArgsStreams for the
+// common case of a plain, space-separated command line with no empty
+// arguments. strings.Fields collapses repeated or trailing whitespace, so
+// unlike strings.Split it cannot manufacture an empty argument a real shell
+// would never send — a test that needs one (a genuine empty positional) must
+// call executeArgsStreams directly with an explicit slice instead. It
+// discards the execution error, same as before; a test that needs to assert
+// on it should also call executeArgsStreams directly.
+func executeStreams(cmd string) (stdout string, stderr string) {
+	stdout, stderr, _ = executeArgsStreams(strings.Fields(cmd))
+	return stdout, stderr
 }
 
 // execute is a thin stdout-only wrapper over executeStreams, kept so the

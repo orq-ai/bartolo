@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/rs/zerolog"
+	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 )
@@ -100,6 +101,7 @@ func resetAuthSingletons() {
 	authCommand = nil
 	profileCommand = nil
 	authAddCommands = nil
+	authAddDeprecationNotices = map[*cobra.Command]string{}
 	AuthHandlers = make(map[string]AuthHandler)
 	registeredServers = nil
 }
@@ -215,6 +217,22 @@ func TestAddProfileDeprecatedAliasWarnsOnStderr(t *testing.T) {
 	stdout, stderr := executeStreams("auth add-profile acme secret")
 
 	assert.Contains(t, stderr, `"add-profile" is deprecated`)
+	assert.Contains(t, stderr, "auth profile add")
+	assert.NotContains(t, stdout, "deprecated")
+}
+
+// Cobra runs the selected leaf's own hooks, not a parent's, so the notice
+// attached to `add-profile` itself never fired for a typed subcommand nested
+// under it (e.g. with more than one auth type registered). It must fire for
+// that spelling too.
+func TestAddProfileDeprecatedAliasWarnsOnStderrForTypedSubcommand(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("oauth", stubAuthHandler{})
+
+	stdout, stderr := executeStreams("auth add-profile oauth acme secret")
+
+	assert.Contains(t, stderr, `"oauth" is deprecated`)
 	assert.Contains(t, stderr, "auth profile add")
 	assert.NotContains(t, stdout, "deprecated")
 }
@@ -597,16 +615,12 @@ func TestAuthProfileUseRejectsUnknownProfile(t *testing.T) {
 	assert.Equal(t, "acme", ActiveProfileName(), "a rejected profile must not change the selection")
 }
 
-// `auth use` was added on this branch (never shipped on origin/main) and was
-// removed before shipping, since deprecating a command that never shipped is
-// pure cost. It must not resolve to anything, including the surviving
-// `auth profile use`.
-// `auth use` was added on this branch and never shipped on origin/main; it
-// must not resolve to anything, including the surviving `auth profile use`.
-// `auth` has no RunE of its own, so cobra's response to unmatched args under
-// it is its help text rather than an "unknown command" error (unlike an
-// unmatched *top-level* command, which does error) -- either way, the point
-// is that it must not perform a profile switch.
+// `auth use` never shipped, so it must not resolve to anything, including
+// the surviving `auth profile use`. `auth` has no RunE of its own, so
+// cobra's response to unmatched args under it is its help text rather than
+// an "unknown command" error (unlike an unmatched *top-level* command, which
+// does error) -- either way, the point is that it must not perform a
+// profile switch.
 func TestAuthUseCommandIsGone(t *testing.T) {
 	serverFixture(t, "")
 	viper.Set("profile", "")
@@ -630,6 +644,17 @@ func TestActiveProfileNameAndListingAreCaseInsensitive(t *testing.T) {
 
 	assert.Equal(t, "acme", ActiveProfileName())
 	assert.Contains(t, execute("auth profile list --json"), `"active": true`)
+}
+
+// ProfileExists must agree with SelectProfile and ActiveProfileName, which
+// both run their input through sanitizeProfileName: a caller that resolves a
+// name through one of those and checks it through ProfileExists must see the
+// same profile either way.
+func TestProfileExistsSanitizesName(t *testing.T) {
+	serverFixture(t, "")
+
+	assert.True(t, ProfileExists("ACME"), "expected a differently-cased spelling of an existing profile to be found")
+	assert.True(t, ProfileExists("  acme  "), "expected surrounding whitespace to be trimmed")
 }
 
 func TestAuthProfileClearDropsPersistedSelection(t *testing.T) {
@@ -726,7 +751,10 @@ func TestSaveAuthProfileRequiredKeyMatchingIgnoresSeparatorSpelling(t *testing.T
 // End-to-end: `auth profile add` must let the optional key resolve to an
 // empty positional argument and let the required key resolve via
 // --<key>-file, exercising the resolveProfileValue chain (file, positional,
-// prompt) ahead of the narrowed validation.
+// prompt) ahead of the narrowed validation. The trailing "" is passed as its
+// own argument-vector element -- the kind a real shell sends for a quoted
+// empty string -- rather than produced by splitting a string with a trailing
+// space, which no real shell would send as an argument at all.
 func TestAuthProfileAddOptionalKeyThroughRealCommandPath(t *testing.T) {
 	resetAuthState(t)
 	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
@@ -739,11 +767,15 @@ func TestAuthProfileAddOptionalKeyThroughRealCommandPath(t *testing.T) {
 
 	// `api-key` is resolved via the --api-key-file route; `acme` is the
 	// profile name; the placeholder positional is the api-key positional
-	// (ignored, since the file flag wins); the trailing space produces a
-	// final empty positional argument for the optional `region` key,
-	// exercising the positional route with an empty value.
-	stdout, stderr := executeStreams("auth profile add optional --api-key-file " + keyFile + " acme placeholder ")
+	// (ignored, since the file flag wins); the final "" is the optional
+	// `region` positional, exercising the positional route with an empty
+	// value.
+	stdout, stderr, err := executeArgsStreams([]string{
+		"auth", "profile", "add", "optional",
+		"--api-key-file", keyFile, "acme", "placeholder", "",
+	})
 
+	assert.NoError(t, err)
 	assert.Empty(t, stderr)
 	_ = stdout
 	profile := Creds.GetStringMapString("profiles.acme")
@@ -753,16 +785,50 @@ func TestAuthProfileAddOptionalKeyThroughRealCommandPath(t *testing.T) {
 }
 
 // End-to-end: the required key still fails through the real command path
-// when resolved via an empty positional argument.
+// when resolved via an empty positional argument. Passed as an explicit
+// argument-vector element so the empty value is unambiguous, rather than
+// relying on a double space that a real shell would collapse -- and would
+// therefore route "eu-west" into the required position instead.
 func TestAuthProfileAddRequiredKeyEmptyThroughRealCommandPath(t *testing.T) {
 	resetAuthState(t)
 	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
 	UseAuth("optional", stubOptionalKeyHandler{})
 
-	_, stderr := executeStreams("auth profile add optional acme  eu-west")
+	_, stderr, err := executeArgsStreams([]string{
+		"auth", "profile", "add", "optional", "acme", "", "eu-west",
+	})
 
+	assert.Error(t, err)
 	assert.Contains(t, stderr, "api-key cannot be empty")
 	assert.False(t, ProfileExists("acme"))
+}
+
+// Regression test: resolveProfileValue used to demand a TTY before ever
+// consulting `required`, so a script that simply omits an optional trailing
+// positional -- the way a real caller would, not by passing an empty one --
+// got a UsageError instead of succeeding. `region` is optional through
+// stubOptionalKeyHandler.RequiredProfileKeys, so leaving it off the command
+// line entirely must succeed non-interactively.
+func TestAuthProfileAddOmittedOptionalPositionalSucceedsNonInteractively(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("optional", stubOptionalKeyHandler{})
+
+	keyFile := filepath.Join(t.TempDir(), "api-key")
+	if err := os.WriteFile(keyFile, []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, err := executeArgsStreams([]string{
+		"auth", "profile", "add", "optional", "--api-key-file", keyFile, "acme",
+	})
+
+	assert.NoError(t, err)
+	assert.Empty(t, stderr)
+	profile := Creds.GetStringMapString("profiles.acme")
+	assert.Equal(t, "secret", profile["api_key"])
+	_, hasRegion := profile["region"]
+	assert.False(t, hasRegion, "expected the omitted optional region left out of the profile")
 }
 
 // An install that predates the removal of the implicit `default` profile keeps
@@ -949,21 +1015,16 @@ func TestOnBranchDefaultProfileStaysClearedAcrossRestart(t *testing.T) {
 	assert.Empty(t, ActiveProfileName(), "clearing an on-branch `default` profile must survive a restart")
 }
 
-// TestClearOverridingPersistedSelectionStaysClearedAcrossRestart is the
-// regression test for the Important defect where reverting only
-// `newProfileClearCommand`'s marker write (back to
-// `{"profile-selected": nil}`, dropping `"profile-decided": true`) still left
-// `go test ./cli/` green: neither TestClearedLegacyProfileStaysClearedAcrossRestart
-// nor TestOnBranchDefaultProfileStaysClearedAcrossRestart seed a
-// pre-existing `profile-selected` alongside `profiles.default`, so in both of
-// those `saveAuthProfile`'s first-profile auto-select (or the adoption path
-// itself) writes the `profile-decided` marker anyway, masking the missing
-// write in `clear`. This test seeds a legacy `profiles.default` plus a
-// *pre-existing* persisted selection of a different profile (`work`) so
-// neither auto-select path ever runs, meaning `clear` is the only command
-// that can write the marker. Reverting `clear`'s marker write reproduces the
-// live bug: the next process finds `profile-decided` unset, treats it as a
-// fresh install, and silently re-adopts `default`.
+// TestClearOverridingPersistedSelectionStaysClearedAcrossRestart isolates
+// `clear` as the *only* command that can write `profile-decided`, by seeding
+// a legacy `profiles.default` plus a pre-existing persisted selection of a
+// different profile (`work`): with a selection already on disk, neither
+// adoption nor `saveAuthProfile`'s first-profile auto-select ever runs, so
+// they cannot mask a missing marker write in `clear` the way they would if
+// this test seeded neither (see TestClearedLegacyProfileStaysClearedAcrossRestart
+// and TestOnBranchDefaultProfileStaysClearedAcrossRestart). If `clear` ever
+// drops the marker, the next process finds `profile-decided` unset, treats it
+// as a fresh install, and silently re-adopts `default`.
 func TestClearOverridingPersistedSelectionStaysClearedAcrossRestart(t *testing.T) {
 	home := resetAuthState(t)
 	dir := filepath.Join(home, ".test-auth")
@@ -1131,6 +1192,29 @@ func TestAuthSetupProfileFlagDefaultsEmpty(t *testing.T) {
 	assert.Equal(t, "", flag.DefValue)
 }
 
+// `newAuthSetupCommand` registers its own local `--profile` flag (targeting
+// which profile setup writes to) alongside the persistent root `--profile`
+// flag AddGlobalFlag binds to viper's `profile` key -- pflag silently lets
+// the local flag win, and neither a direct RunAuthSetup call nor inspecting
+// the flag object in isolation exercises that collision. Only a run through
+// the real command tree does, so this drives `auth setup --profile` through
+// cobra and asserts it targets the named profile.
+func TestAuthSetupCommandTargetsProfileFlagThroughCobra(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	withFakeInteractiveSetup(t, func(key string, required bool) (string, error) {
+		return "secret", nil
+	})
+
+	_, stderr, err := executeArgsStreams([]string{"auth", "setup", "--profile", "named"})
+
+	assert.NoError(t, err)
+	assert.Empty(t, stderr)
+	assert.True(t, ProfileExists("named"), "expected `--profile named` to target the `named` profile")
+}
+
 // withFakeInteractiveSetup swaps isInteractive and promptProfileValue for the
 // duration of the test so RunAuthSetup can be exercised without a TTY.
 func withFakeInteractiveSetup(t *testing.T, prompt func(key string, required bool) (string, error)) {
@@ -1223,10 +1307,10 @@ func TestRunAuthSetupRejectsEmptyProfileNamePrompt(t *testing.T) {
 // `auth setup` has no file or positional route: it always goes through
 // promptProfileValue. Pressing Enter on the optional `region` field must
 // succeed and the field must be left out of the saved profile, while the
-// same empty answer to the required `api-key` field must still fail. This is
-// the headline scenario a reviewer found broken: promptProfileValue used to
-// apply survey.Required unconditionally, so RunAuthSetup could never save a
-// handler with an optional field via the interactive route.
+// same empty answer to the required `api-key` field must still fail --
+// promptProfileValue must apply survey.Required only to keys the handler
+// actually requires, or RunAuthSetup could never save a handler with an
+// optional field via the interactive route.
 func TestRunAuthSetupPromptSkipsOptionalKey(t *testing.T) {
 	resetAuthState(t)
 	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
