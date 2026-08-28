@@ -18,6 +18,24 @@ type stubAuthHandler struct{}
 func (stubAuthHandler) ProfileKeys() []string                              { return []string{"api-key"} }
 func (stubAuthHandler) OnRequest(_ *zerolog.Logger, _ *http.Request) error { return nil }
 
+// stubOptionalKeyHandler declares a required credential plus an optional
+// extra field (e.g. a region), narrowing what must be present via
+// RequiredKeysHandler the same way apikey.Handler does.
+type stubOptionalKeyHandler struct{}
+
+func (stubOptionalKeyHandler) ProfileKeys() []string { return []string{"api-key", "region"} }
+func (stubOptionalKeyHandler) RequiredProfileKeys() []string {
+	return []string{"api-key"}
+}
+func (stubOptionalKeyHandler) OnRequest(_ *zerolog.Logger, _ *http.Request) error { return nil }
+
+// stubTwoKeyHandler declares two profile keys but does not implement
+// RequiredKeysHandler, so both must stay required.
+type stubTwoKeyHandler struct{}
+
+func (stubTwoKeyHandler) ProfileKeys() []string                              { return []string{"api-key", "region"} }
+func (stubTwoKeyHandler) OnRequest(_ *zerolog.Logger, _ *http.Request) error { return nil }
+
 func TestSaveAuthProfile(t *testing.T) {
 	viper.Reset()
 	Cache = nil
@@ -521,6 +539,88 @@ func TestAddProfileRejectsEmptyKey(t *testing.T) {
 	err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"  "}, "")
 
 	assert.ErrorContains(t, err, "api-key cannot be empty")
+	assert.False(t, ProfileExists("acme"))
+}
+
+// A handler that narrows its required keys via RequiredKeysHandler must let
+// a profile save with its non-credential field left empty.
+func TestSaveAuthProfileAllowsOptionalKeyEmpty(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("optional", stubOptionalKeyHandler{})
+
+	err := saveAuthProfile("optional", "acme", []string{"api-key", "region"}, []string{"secret", ""}, "")
+
+	assert.NoError(t, err)
+	profile := Creds.GetStringMapString("profiles.acme")
+	assert.Equal(t, "secret", profile["api_key"])
+	assert.Equal(t, "", profile["region"], "expected optional region to stay unset")
+}
+
+// The same handler still rejects an empty credential even though it narrows
+// its other keys.
+func TestSaveAuthProfileStillRejectsEmptyCredential(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("optional", stubOptionalKeyHandler{})
+
+	err := saveAuthProfile("optional", "acme", []string{"api-key", "region"}, []string{"  ", "eu-west"}, "")
+
+	assert.ErrorContains(t, err, "api-key cannot be empty")
+	assert.False(t, ProfileExists("acme"))
+}
+
+// A handler that does not implement RequiredKeysHandler keeps every declared
+// key required, so nothing outside this repo breaks.
+func TestSaveAuthProfileRequiresAllKeysWithoutInterface(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("twokey", stubTwoKeyHandler{})
+
+	err := saveAuthProfile("twokey", "acme", []string{"api-key", "region"}, []string{"secret", ""}, "")
+
+	assert.ErrorContains(t, err, "region cannot be empty")
+	assert.False(t, ProfileExists("acme"))
+}
+
+// End-to-end: `auth profile add` must let the optional key resolve to an
+// empty positional argument and let the required key resolve via
+// --<key>-file, exercising the resolveProfileValue chain (file, positional,
+// prompt) ahead of the narrowed validation.
+func TestAuthProfileAddOptionalKeyThroughRealCommandPath(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("optional", stubOptionalKeyHandler{})
+
+	keyFile := filepath.Join(t.TempDir(), "api-key")
+	if err := os.WriteFile(keyFile, []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// `api-key` is resolved via the --api-key-file route; `acme` is the
+	// profile name; the placeholder positional is the api-key positional
+	// (ignored, since the file flag wins); the trailing space produces a
+	// final empty positional argument for the optional `region` key,
+	// exercising the positional route with an empty value.
+	stdout, stderr := executeStreams("auth profile add optional --api-key-file " + keyFile + " acme placeholder ")
+
+	assert.Empty(t, stderr)
+	_ = stdout
+	profile := Creds.GetStringMapString("profiles.acme")
+	assert.Equal(t, "secret", profile["api_key"])
+	assert.Equal(t, "", profile["region"], "expected optional region left unset via empty positional arg")
+}
+
+// End-to-end: the required key still fails through the real command path
+// when resolved via an empty positional argument.
+func TestAuthProfileAddRequiredKeyEmptyThroughRealCommandPath(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("optional", stubOptionalKeyHandler{})
+
+	_, stderr := executeStreams("auth profile add optional acme  eu-west")
+
+	assert.Contains(t, stderr, "api-key cannot be empty")
 	assert.False(t, ProfileExists("acme"))
 }
 

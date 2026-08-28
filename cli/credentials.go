@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -64,6 +65,13 @@ type AuthHandler interface {
 // AuthStatusHandler can describe whether authentication is configured.
 type AuthStatusHandler interface {
 	AuthStatus(profile map[string]string) map[string]interface{}
+}
+
+// RequiredKeysHandler narrows which of a handler's profile keys must be
+// present for a profile to be saveable. A handler that does not implement
+// this keeps every key ProfileKeys declares required.
+type RequiredKeysHandler interface {
+	RequiredProfileKeys() []string
 }
 
 // AuthHandlers is the map of registered auth type names to handlers
@@ -448,13 +456,25 @@ func UseAuth(typeName string, handler AuthHandler) {
 	}
 }
 
-// requireProfileValues rejects a profile that would be saved without every
-// field its auth type declares. A profile missing its key is worse than no
-// profile at all: it silently falls back to whatever credential is in the
-// environment, which is how a staging profile ends up sending a production key.
-func requireProfileValues(keys []string, values []string) error {
+// requireProfileValues rejects a profile that would be saved without a
+// required field. A handler narrows which of its declared keys are required
+// by implementing RequiredKeysHandler (e.g. apikey.Handler requires only its
+// credential, not generator-supplied extras like a region); a handler that
+// does not implement it keeps every declared key required. A profile missing
+// a required key is worse than no profile at all: a profile in force is
+// authoritative, so a missing key surfaces as an error rather than silently
+// falling back to whatever credential is in the environment.
+func requireProfileValues(handler AuthHandler, keys []string, values []string) error {
+	required := keys
+	if narrower, ok := handler.(RequiredKeysHandler); ok {
+		required = narrower.RequiredProfileKeys()
+	}
+
 	for i, key := range keys {
-		if i >= len(values) || strings.TrimSpace(values[i]) == "" {
+		if !slices.Contains(required, key) {
+			continue
+		}
+		if strings.TrimSpace(values[i]) == "" {
 			return fmt.Errorf("%s cannot be empty", strings.Replace(key, "_", " ", -1))
 		}
 	}
@@ -696,7 +716,7 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 		return fmt.Errorf("profile values do not match keys")
 	}
 
-	if err := requireProfileValues(keys, values); err != nil {
+	if err := requireProfileValues(AuthHandlers[typeName], keys, values); err != nil {
 		return err
 	}
 

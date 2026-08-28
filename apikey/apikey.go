@@ -41,6 +41,13 @@ func (h *Handler) ProfileKeys() []string {
 	return append([]string{apiKey}, h.Keys...)
 }
 
+// RequiredProfileKeys narrows the fields a profile must supply to just the
+// credential; generator-supplied extras in h.Keys (e.g. a region or an
+// organisation id) are optional.
+func (h *Handler) RequiredProfileKeys() []string {
+	return []string{apiKey}
+}
+
 // OnRequest gets run before the request goes out on the wire.
 func (h *Handler) OnRequest(log *zerolog.Logger, request *http.Request) error {
 	profile := cli.GetProfile()

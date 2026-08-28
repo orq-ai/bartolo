@@ -179,3 +179,13 @@ func TestUnknownProfileIsAnError(t *testing.T) {
 
 	assert.ErrorContains(t, r.Context.Error, `profile "typo" is not configured`)
 }
+
+// RequiredProfileKeys must narrow ProfileKeys down to just the credential,
+// so a generator-supplied extra (a region, an organisation id, ...) does not
+// block saving a profile that leaves it empty.
+func TestRequiredProfileKeysIsJustTheAPIKey(t *testing.T) {
+	h := &Handler{Name: "x-auth", In: LocationHeader, Keys: []string{"region", "org-id"}}
+
+	assert.Equal(t, []string{apiKey, "region", "org-id"}, h.ProfileKeys())
+	assert.Equal(t, []string{apiKey}, h.RequiredProfileKeys())
+}
