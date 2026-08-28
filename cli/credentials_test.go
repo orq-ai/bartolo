@@ -466,6 +466,56 @@ func TestExplicitProfileBeatsAuthProfileUse(t *testing.T) {
 	assert.Equal(t, "other", ActiveProfileName())
 }
 
+// TestActiveProfileNamePrecedenceAcrossAllRungs pins the full ranking
+// ActiveProfileName documents (flag, then PREFIX_PROFILE/viper.Set, then the
+// selection persisted by `auth profile use`), including every pairing and the
+// all-three-set case. TestExplicitProfileBeatsAuthProfileUse only pins
+// flag-over-persisted; without the rest, swapping the env and persisted
+// rungs (or any other reordering) has no defended answer, e.g.
+// PREFIX_PROFILE=prod on a machine where `auth profile use staging` was run.
+func TestActiveProfileNamePrecedenceAcrossAllRungs(t *testing.T) {
+	tests := []struct {
+		name         string
+		setFlag      string
+		setEnv       string
+		setPersisted string
+		want         string
+	}{
+		{name: "flag alone", setFlag: "flag-profile", want: "flag-profile"},
+		{name: "env alone", setEnv: "env-profile", want: "env-profile"},
+		{name: "persisted alone", setPersisted: "persisted-profile", want: "persisted-profile"},
+		{name: "flag beats env", setFlag: "flag-profile", setEnv: "env-profile", want: "flag-profile"},
+		{name: "flag beats persisted", setFlag: "flag-profile", setPersisted: "persisted-profile", want: "flag-profile"},
+		{name: "env beats persisted", setEnv: "env-profile", setPersisted: "persisted-profile", want: "env-profile"},
+		{name: "flag beats env and persisted together", setFlag: "flag-profile", setEnv: "env-profile", setPersisted: "persisted-profile", want: "flag-profile"},
+		{name: "nothing set", want: ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAuthState(t)
+			Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+			UseAuth("", stubAuthHandler{})
+
+			if tc.setPersisted != "" {
+				// The persisted rung must come from the real command, which
+				// validates the profile exists before it writes the
+				// selection, exactly like `auth profile use` does.
+				Creds.Set("profiles."+tc.setPersisted+".api_key", "secret")
+				execute("auth profile use " + tc.setPersisted)
+			}
+			if tc.setEnv != "" {
+				t.Setenv("TEST_AUTH_PROFILE", tc.setEnv)
+			}
+			if tc.setFlag != "" {
+				assert.NoError(t, Root.PersistentFlags().Set("profile", tc.setFlag))
+			}
+
+			assert.Equal(t, tc.want, ActiveProfileName())
+		})
+	}
+}
+
 func TestAuthProfileUseRejectsUnknownProfile(t *testing.T) {
 	serverFixture(t, "")
 
@@ -654,6 +704,28 @@ func TestFirstProfileBecomesActive(t *testing.T) {
 	execute("auth profile add acme secret")
 
 	assert.Equal(t, "acme", ActiveProfileName())
+}
+
+// TestSecondProfileDoesNotStealSelectionFromFirst guards saveAuthProfile's
+// `if !ProfileSelected()` auto-select: it must fire only for the first
+// profile ever saved. TestFirstProfileBecomesActive only ever saves one
+// profile, so it cannot catch the auto-select firing unconditionally
+// (which would silently repoint every later command onto whatever scratch
+// profile was added last, while a real profile like `prod` was in force).
+func TestSecondProfileDoesNotStealSelectionFromFirst(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	execute("auth profile add prod secret-prod")
+	assert.Equal(t, "prod", ActiveProfileName(), "the first saved profile must become active")
+
+	execute("auth profile add scratch secret-scratch")
+	assert.Equal(t, "prod", ActiveProfileName(), "a later profile save must not repoint an already-active selection")
+
+	data, err := os.ReadFile(filepath.Join(viper.GetString("config-directory"), "config.json"))
+	assert.NoError(t, err)
+	assert.Contains(t, string(data), `"profile-selected": "prod"`)
 }
 
 // TestClearedLegacyProfileStaysClearedAcrossRestart is the regression test for

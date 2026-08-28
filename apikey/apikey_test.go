@@ -1,6 +1,10 @@
 package apikey
 
 import (
+	"bytes"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -111,74 +115,113 @@ func TestCustomAPIKeyEnvVarTakesPrecedence(t *testing.T) {
 	assert.Equal(t, "custom-secret", r.Context.Request.Header.Get("x-auth"))
 }
 
-func TestSelectedProfileBeatsEnvKey(t *testing.T) {
-	resetCLI(t)
-	cli.Init(&cli.Config{
-		AppName:   "test",
-		EnvPrefix: "TEST",
-	})
-	Init("x-auth", LocationHeader)
-	t.Setenv("TEST_API_KEY", "from-env")
-	cli.Creds.Set("profiles.acme.api_key", "from-profile")
+// runCLI executes a command against the real cli.Root command tree, the same
+// way a user would invoke it, so a fixture that needs a persisted profile
+// selection goes through `auth profile use` rather than poking viper.
+func runCLI(t *testing.T, cmd string) (stdout, stderr string) {
+	t.Helper()
 
-	r := cli.Client.Get()
-	r.Do()
-	assert.Equal(t, "from-env", r.Context.Request.Header.Get("x-auth"))
-
-	assert.NoError(t, cli.Root.PersistentFlags().Set("profile", "acme"))
-	r = cli.Client.Get()
-	r.Do()
-	assert.Equal(t, "from-profile", r.Context.Request.Header.Get("x-auth"))
+	outBuf := &bytes.Buffer{}
+	errBuf := &bytes.Buffer{}
+	cli.Root.SetArgs(strings.Split(cmd, " "))
+	cli.Root.SetOut(outBuf)
+	cli.Root.SetErr(errBuf)
+	cli.Stdout = outBuf
+	cli.Stderr = errBuf
+	_ = cli.Root.Execute()
+	return outBuf.String(), errBuf.String()
 }
 
-func TestProfileKeyUsedWhenNoEnvVarIsSet(t *testing.T) {
-	resetCLI(t)
-	cli.Init(&cli.Config{
-		AppName:   "test",
-		EnvPrefix: "TEST",
-	})
-	Init("x-auth", LocationHeader)
-	cli.Creds.Set("profiles.default.api_key", "from-profile")
-	cli.SelectProfile("default")
+// putProfileInForce puts a profile named "acme" in force through one of the
+// three ways it can happen in real use: an explicit --profile flag, a
+// PREFIX_PROFILE environment variable, or the selection persisted by
+// `auth profile use`. missing indicates the profile itself was never saved,
+// which `auth profile use` refuses (it validates existence), so that case is
+// simulated the other way the task brief allows: writing the real config
+// file directly and letting viper re-read it.
+func putProfileInForce(t *testing.T, via string, name string, missing bool) {
+	t.Helper()
 
-	r := cli.Client.Get()
-	r.Do()
+	switch via {
+	case "flag":
+		assert.NoError(t, cli.Root.PersistentFlags().Set("profile", name))
+	case "env":
+		t.Setenv("TEST_PROFILE", name)
+	case "persisted":
+		if missing {
+			dir := viper.GetString("config-directory")
+			body := fmt.Sprintf(`{"profile-selected": %q}`, name)
+			assert.NoError(t, os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o600))
+			assert.NoError(t, viper.ReadInConfig())
+			return
+		}
 
-	assert.Equal(t, "from-profile", r.Context.Request.Header.Get("x-auth"))
+		stdout, stderr := runCLI(t, "auth profile use "+name)
+		if !strings.Contains(stdout, `"active_profile"`) {
+			t.Fatalf("auth profile use %s did not persist a selection: stdout=%q stderr=%q", name, stdout, stderr)
+		}
+	default:
+		t.Fatalf("unknown entry mode %q", via)
+	}
 }
 
-func TestSelectedProfileWithoutKeyIsAnError(t *testing.T) {
-	resetCLI(t)
-	cli.Init(&cli.Config{
-		AppName:   "test",
-		EnvPrefix: "TEST",
-	})
-	Init("x-auth", LocationHeader)
-	t.Setenv("TEST_API_KEY", "from-env")
-	cli.Creds.Set("profiles.acme.type", "")
-	assert.NoError(t, cli.Root.PersistentFlags().Set("profile", "acme"))
+// TestProfileAuthorityAcrossEntryModesAndSources is the one table the task
+// brief asks for over how a profile enters force (flag / env / the
+// selection `auth profile use` persists), the profile's own state, and
+// whether an ambient PREFIX_API_KEY is present. A profile in force must be
+// authoritative for the outgoing key in every combination: it must never
+// fall back to an ambient key, whether that profile supplies one, is
+// missing one, or does not exist at all.
+func TestProfileAuthorityAcrossEntryModesAndSources(t *testing.T) {
+	entryModes := []string{"flag", "env", "persisted"}
 
-	r := cli.Client.Get()
-	r.Do()
+	states := []struct {
+		name  string
+		setup func(name string)
+	}{
+		{"has key", func(name string) { cli.Creds.Set("profiles."+name+".api_key", "profile-key") }},
+		{"no key", func(name string) { cli.Creds.Set("profiles."+name+".type", "") }},
+		{"does not exist", func(name string) {}},
+	}
 
-	assert.ErrorContains(t, r.Context.Error, `profile "acme" has no API key`)
-	assert.Empty(t, r.Context.Request.Header.Get("x-auth"))
-}
+	for _, via := range entryModes {
+		for _, st := range states {
+			for _, envKeySet := range []bool{true, false} {
+				name := fmt.Sprintf("via=%s/state=%s/env=%v", via, st.name, envKeySet)
+				t.Run(name, func(t *testing.T) {
+					resetCLI(t)
+					cli.Init(&cli.Config{
+						AppName:   "test",
+						EnvPrefix: "TEST",
+					})
+					Init("x-auth", LocationHeader)
 
-func TestUnknownProfileIsAnError(t *testing.T) {
-	resetCLI(t)
-	cli.Init(&cli.Config{
-		AppName:   "test",
-		EnvPrefix: "TEST",
-	})
-	Init("x-auth", LocationHeader)
-	t.Setenv("TEST_API_KEY", "from-env")
-	assert.NoError(t, cli.Root.PersistentFlags().Set("profile", "typo"))
+					st.setup("acme")
+					if envKeySet {
+						t.Setenv("TEST_API_KEY", "from-env")
+					}
+					putProfileInForce(t, via, "acme", st.name == "does not exist")
 
-	r := cli.Client.Get()
-	r.Do()
+					r := cli.Client.Get()
+					r.Do()
 
-	assert.ErrorContains(t, r.Context.Error, `profile "typo" is not configured`)
+					switch st.name {
+					case "has key":
+						assert.Equal(t, "profile-key", r.Context.Request.Header.Get("x-auth"),
+							"a profile in force is authoritative even when an ambient key is present")
+					case "no key":
+						assert.ErrorContains(t, r.Context.Error, `profile "acme" has no API key`)
+						assert.Empty(t, r.Context.Request.Header.Get("x-auth"),
+							"an incomplete profile in force must not fall back to the ambient key")
+					case "does not exist":
+						assert.ErrorContains(t, r.Context.Error, `profile "acme" is not configured`)
+						assert.Empty(t, r.Context.Request.Header.Get("x-auth"),
+							"an unknown profile in force must not fall back to the ambient key")
+					}
+				})
+			}
+		}
+	}
 }
 
 // RequiredProfileKeys must narrow ProfileKeys down to just the credential,
