@@ -36,6 +36,21 @@ type stubTwoKeyHandler struct{}
 func (stubTwoKeyHandler) ProfileKeys() []string                              { return []string{"api-key", "region"} }
 func (stubTwoKeyHandler) OnRequest(_ *zerolog.Logger, _ *http.Request) error { return nil }
 
+// stubMismatchedSpellingHandler declares its required key with a different
+// separator (`_`) than the one it uses in ProfileKeys (`-`) — the same split
+// spelling used in-tree by apikey (`api_key`) and oauth (`client-id`). It
+// exists to catch a required-key check that compares raw strings instead of
+// normalizing both sides: with a raw comparison, `api-key` would never be
+// found in a `RequiredProfileKeys` of `["api_key"]`, silently making the
+// credential optional.
+type stubMismatchedSpellingHandler struct{}
+
+func (stubMismatchedSpellingHandler) ProfileKeys() []string { return []string{"api-key"} }
+func (stubMismatchedSpellingHandler) RequiredProfileKeys() []string {
+	return []string{"api_key"}
+}
+func (stubMismatchedSpellingHandler) OnRequest(_ *zerolog.Logger, _ *http.Request) error { return nil }
+
 func TestSaveAuthProfile(t *testing.T) {
 	viper.Reset()
 	Cache = nil
@@ -441,6 +456,27 @@ func TestListProfilesDeprecatedAliasKeepsJSONCleanOnStdout(t *testing.T) {
 	assert.Contains(t, stderr, "auth profile list")
 }
 
+// TestListProfilesEmptyStaysJSONOnStdout is the regression test for the Minor
+// defect where the "No profiles configured" branch used fmt.Printf directly,
+// bypassing both Formatter and cli.Stdout, so `auth profile list --json`
+// emitted non-JSON on a fresh install with no profiles configured.
+func TestListProfilesEmptyStaysJSONOnStdout(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	viper.Set("output-format", "json")
+	stdout := execute("auth profile list --json")
+
+	var decoded struct {
+		Profiles []map[string]interface{} `json:"profiles"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout)
+	}
+	assert.Empty(t, decoded.Profiles)
+}
+
 func TestAuthProfileUseSetsActiveProfile(t *testing.T) {
 	serverFixture(t, "")
 	viper.Set("profile", "")
@@ -634,6 +670,23 @@ func TestSaveAuthProfileRequiresAllKeysWithoutInterface(t *testing.T) {
 	assert.False(t, ProfileExists("acme"))
 }
 
+// TestSaveAuthProfileRequiredKeyMatchingIgnoresSeparatorSpelling is the
+// regression test for the Minor defect where required-key matching was an
+// exact-string comparison across a codebase that spells profile keys two
+// ways (`-` in ProfileKeys/flags, `_` once normalised and stored). A handler
+// declaring `api-key` in ProfileKeys but `api_key` in RequiredProfileKeys
+// must still reject an empty value for that key.
+func TestSaveAuthProfileRequiredKeyMatchingIgnoresSeparatorSpelling(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("mismatched", stubMismatchedSpellingHandler{})
+
+	err := saveAuthProfile("mismatched", "acme", []string{"api-key"}, []string{"  "}, "")
+
+	assert.ErrorContains(t, err, "api-key cannot be empty")
+	assert.False(t, ProfileExists("acme"))
+}
+
 // End-to-end: `auth profile add` must let the optional key resolve to an
 // empty positional argument and let the required key resolve via
 // --<key>-file, exercising the resolveProfileValue chain (file, positional,
@@ -770,6 +823,52 @@ func TestClearedLegacyProfileStaysClearedAcrossRestart(t *testing.T) {
 	assert.Empty(t, ActiveProfileName(), "clearing an adopted legacy profile must survive a restart")
 }
 
+// TestOnBranchDefaultProfileStaysClearedAcrossRestart is the regression test
+// for the same defect as TestClearedLegacyProfileStaysClearedAcrossRestart,
+// but for an install where the legacy migration never had a chance to fire:
+// there is no `profiles.default` on disk when the process first starts, so
+// adoptLegacyDefaultProfile is a no-op, and the `default` profile is instead
+// created fresh through `auth profile add` (saveAuthProfile's first-profile
+// auto-select). Before the marker's semantics changed to "a profile decision
+// has been made" (written on every deliberate `profile-selected` write, not
+// just by adoptLegacyDefaultProfile), that auto-select left `profile-decided`
+// unset, so `auth profile clear` followed by a restart would have looked
+// identical to "never decided" and adoptLegacyDefaultProfile would have
+// silently re-selected `default`.
+func TestOnBranchDefaultProfileStaysClearedAcrossRestart(t *testing.T) {
+	home := resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	// No `profiles.default` exists yet, so adoption is a no-op here.
+	assert.Empty(t, ActiveProfileName())
+
+	// The user creates a profile named `default` themselves, on this branch;
+	// the first-profile auto-select puts it in force.
+	execute("auth profile add default secret")
+	if got := ActiveProfileName(); got != "default" {
+		t.Fatalf("expected the first saved profile to become active, got %q", got)
+	}
+
+	execute("auth profile clear")
+	if got := ActiveProfileName(); got != "" {
+		t.Fatalf("expected clear to empty the active profile, got %q", got)
+	}
+
+	// Second process against the same HOME: re-run init from scratch.
+	resetAuthSingletons()
+	oldHome := os.Getenv("HOME")
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatalf("set HOME: %v", err)
+	}
+	t.Cleanup(func() { os.Setenv("HOME", oldHome) })
+
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	assert.Empty(t, ActiveProfileName(), "clearing an on-branch `default` profile must survive a restart")
+}
+
 // TestAdoptLegacyDefaultProfile tables the first-run adoption behaviour across
 // the states that matter: no profiles, only `default`, a non-default profile,
 // and a selection already persisted. Each entry runs init twice and asserts
@@ -827,7 +926,7 @@ func TestAdoptLegacyDefaultProfile(t *testing.T) {
 			UseAuth("", stubAuthHandler{})
 
 			assert.Equal(t, tt.wantSelectedAfter, sanitizeProfileName(viper.GetString("profile-selected")))
-			assert.Equal(t, tt.wantAdoptedAfter, viper.GetBool("profile-adopted"))
+			assert.Equal(t, tt.wantAdoptedAfter, viper.GetBool("profile-decided"))
 
 			firstRun, err := os.ReadFile(filepath.Join(dir, "config.json"))
 			if tt.wantAdoptedAfter || tt.seedConfig != "" {
@@ -849,7 +948,7 @@ func TestAdoptLegacyDefaultProfile(t *testing.T) {
 			UseAuth("", stubAuthHandler{})
 
 			assert.Equal(t, tt.wantSelectedAfter, sanitizeProfileName(viper.GetString("profile-selected")))
-			assert.Equal(t, tt.wantAdoptedAfter, viper.GetBool("profile-adopted"))
+			assert.Equal(t, tt.wantAdoptedAfter, viper.GetBool("profile-decided"))
 
 			secondRun, err := os.ReadFile(filepath.Join(dir, "config.json"))
 			if err == nil && firstRun != nil {
@@ -1143,7 +1242,7 @@ func TestAuthProfileCurrentNoneInForce(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
 		t.Fatalf("unmarshal: %v, out=%s", err, out)
 	}
-	assert.Equal(t, "", decoded["profile"])
+	assert.Equal(t, "", decoded["active_profile"])
 	assert.Equal(t, "none", decoded["source"])
 	assert.Equal(t, false, decoded["exists"])
 }
@@ -1161,7 +1260,7 @@ func TestAuthProfileCurrentFromFlagReportsMissing(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
 		t.Fatalf("unmarshal: %v, out=%s", err, out)
 	}
-	assert.Equal(t, "ghost", decoded["profile"])
+	assert.Equal(t, "ghost", decoded["active_profile"])
 	assert.Equal(t, "flag", decoded["source"])
 	assert.Equal(t, false, decoded["exists"])
 }
@@ -1183,7 +1282,7 @@ func TestAuthProfileCurrentFromPersistedSelection(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
 		t.Fatalf("unmarshal: %v, out=%s", err, out)
 	}
-	assert.Equal(t, "acme", decoded["profile"])
+	assert.Equal(t, "acme", decoded["active_profile"])
 	assert.Equal(t, "selected", decoded["source"])
 	assert.Equal(t, true, decoded["exists"])
 }

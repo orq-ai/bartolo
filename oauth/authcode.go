@@ -186,7 +186,7 @@ func (h *AuthCodeHandler) OnRequest(log *zerolog.Logger, request *http.Request) 
 // InitAuthCode sets up the OAuth 2.0 authorization code with PKCE authentication
 // flow. Must be called *after* you have called `cli.Init()`. The endpoint
 // params allow you to pass additional info to the token URL. Pass in
-// profile-related extra variables to store them alongside the default profile
+// profile-related extra variables to store them alongside the active profile's
 // information.
 func InitAuthCode(clientID string, authorizeURL string, tokenURL string, options ...func(*config) error) {
 	var c config

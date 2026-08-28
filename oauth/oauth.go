@@ -32,7 +32,8 @@ func GetParams(f func(profile map[string]string) url.Values) func(*config) error
 }
 
 // Extra provides the names of additional parameters to use to store information
-// in user profiles. Use `cli.GetProfile("default")["name"]` to access it.
+// in user profiles. Use `cli.GetProfile()["name"]` to access it, once a
+// profile is in force.
 func Extra(names ...string) func(*config) error {
 	return func(c *config) error {
 		c.extra = names

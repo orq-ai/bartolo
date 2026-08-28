@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strings"
 
@@ -186,8 +185,10 @@ func newProfileListCommand(use string, deprecationNotice string) *cobra.Command 
 
 			profiles := Creds.GetStringMap("profiles")
 			if len(profiles) == 0 {
-				fmt.Printf("No profiles configured. Use `%s auth setup` to add one.\n", Root.CommandPath())
-				return nil
+				return Formatter.Format(map[string]interface{}{
+					"profiles": []map[string]interface{}{},
+					"message":  fmt.Sprintf("No profiles configured. Use `%s auth setup` to add one.", Root.CommandPath()),
+				})
 			}
 
 			active := ActiveProfileName()
@@ -237,7 +238,7 @@ func newProfileUseCommand(use string) *cobra.Command {
 				return fmt.Errorf("unknown profile %q", args[0])
 			}
 
-			if err := saveJSONConfig(map[string]interface{}{"profile-selected": name}); err != nil {
+			if err := saveJSONConfig(map[string]interface{}{"profile-selected": name, "profile-decided": true}); err != nil {
 				return err
 			}
 
@@ -260,7 +261,7 @@ func newProfileCurrentCommand() *cobra.Command {
 			name, source := activeProfileNameWithSource()
 
 			return Formatter.Format(map[string]interface{}{
-				"profile":        name,
+				"active_profile": name,
 				"source":         source,
 				"exists":         ProfileExists(name),
 				"profile_server": ProfileServer(),
@@ -275,7 +276,7 @@ func newProfileClearCommand() *cobra.Command {
 		Short: "Stop using a persisted active profile",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := saveJSONConfig(map[string]interface{}{"profile-selected": nil}); err != nil {
+			if err := saveJSONConfig(map[string]interface{}{"profile-selected": nil, "profile-decided": true}); err != nil {
 				return err
 			}
 
@@ -469,7 +470,7 @@ func requireProfileValues(handler AuthHandler, keys []string, values []string) e
 	required := requiredProfileKeys(handler, keys)
 
 	for i, key := range keys {
-		if !slices.Contains(required, key) {
+		if !keyRequired(required, key) {
 			continue
 		}
 		if strings.TrimSpace(values[i]) == "" {
@@ -478,6 +479,30 @@ func requireProfileValues(handler AuthHandler, keys []string, values []string) e
 	}
 
 	return nil
+}
+
+// normalizeProfileKeyName canonicalizes a profile key's spelling so `-` and
+// `_` compare equal. saveAuthProfile normalises a key to underscores before
+// writing it to the profile, but a handler is free to spell the same key
+// either way across ProfileKeys and RequiredProfileKeys (in-tree handlers use
+// both: `api_key` in apikey, `client-id` in oauth). Comparing raw strings
+// would let a handler declare a key required under one spelling and optional
+// under the other, silently making its credential optional.
+func normalizeProfileKeyName(key string) string {
+	return strings.Replace(key, "-", "_", -1)
+}
+
+// keyRequired reports whether key is among required, comparing both sides
+// through normalizeProfileKeyName so a spelling mismatch cannot make a
+// required key look optional.
+func keyRequired(required []string, key string) bool {
+	needle := normalizeProfileKeyName(key)
+	for _, candidate := range required {
+		if normalizeProfileKeyName(candidate) == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // requiredProfileKeys narrows a handler's declared profile keys to those that
@@ -493,7 +518,7 @@ func requiredProfileKeys(handler AuthHandler, keys []string) []string {
 // isKeyRequired reports whether a single profile key must be non-empty for
 // the given handler, per requiredProfileKeys.
 func isKeyRequired(handler AuthHandler, keys []string, key string) bool {
-	return slices.Contains(requiredProfileKeys(handler, keys), key)
+	return keyRequired(requiredProfileKeys(handler, keys), key)
 }
 
 // explicitServer returns `--server` only when passed on this invocation, so an
@@ -752,7 +777,7 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 	required := requiredProfileKeys(handler, keys)
 	Creds.Set("profiles."+profileName+".type", typeName)
 	for i, key := range keys {
-		if strings.TrimSpace(values[i]) == "" && !slices.Contains(required, key) {
+		if strings.TrimSpace(values[i]) == "" && !keyRequired(required, key) {
 			// An omitted optional field (e.g. a generator-supplied region) is
 			// left out of the profile entirely, rather than stored as "".
 			continue
@@ -772,7 +797,7 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 	// A first profile nobody has chosen yet would otherwise sit unused until the
 	// next `auth profile use`.
 	if !ProfileSelected() {
-		if err := saveJSONConfig(map[string]interface{}{"profile-selected": profileName}); err != nil {
+		if err := saveJSONConfig(map[string]interface{}{"profile-selected": profileName, "profile-decided": true}); err != nil {
 			return fmt.Errorf("profile %q was saved but could not be selected: %w; run `auth profile use %s` or pass --profile %s", profileName, err, profileName, profileName)
 		}
 	}
@@ -971,13 +996,19 @@ func InitCredentialsFile() {
 // else was set; now that nothing is implicit, the selection has to be written
 // down once or an existing install would come up with no profile at all.
 //
-// It guards on a dedicated `profile-adopted` marker rather than on
-// `profile-selected` being empty, because those are not the same condition:
-// `auth profile clear` also empties `profile-selected`, and without a separate
-// marker the next process could not tell "never adopted" from "adopted, then
-// deliberately cleared" and would silently re-adopt `default`.
+// It guards on the `profile-decided` marker rather than on `profile-selected`
+// being empty, because those are not the same condition: `auth profile clear`
+// also empties `profile-selected`, and without a separate marker the next
+// process could not tell "no decision has ever been made" from "a profile was
+// chosen (by this migration, `auth profile use`, `auth profile clear`, or the
+// first-profile auto-select), and now nothing is selected on purpose" — it
+// would silently re-adopt `default` and undo the user's own `clear`.
+// `profile-decided` therefore means "the user (or this migration, standing in
+// for them once) has made a profile decision", not "this migration ran"; every
+// deliberate write of `profile-selected` sets it alongside, not just this one.
+//
 func adoptLegacyDefaultProfile() {
-	if viper.GetBool("profile-adopted") {
+	if viper.GetBool("profile-decided") {
 		return
 	}
 
@@ -992,7 +1023,7 @@ func adoptLegacyDefaultProfile() {
 	// viper.Set loop runs, so in that case the in-memory selection does not
 	// land either.
 	if err := saveJSONConfig(map[string]interface{}{
-		"profile-adopted":  true,
+		"profile-decided":  true,
 		"profile-selected": "default",
 	}); err != nil {
 		fmt.Fprintf(Stderr, "warning: could not record profile adoption: %v\n", err)

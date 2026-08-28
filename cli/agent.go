@@ -46,9 +46,11 @@ func GetServers() []map[string]string {
 // `server set` default (kept off the flag's key so viper cannot rank it as
 // explicit), then the selected OpenAPI server.
 //
-// The profile sits above the environment because a profile pins a server and a
-// key together: ranking them separately is what lets a command reach one
-// deployment holding another one's credentials.
+// The profile sits above the environment because a profile in force is
+// authoritative for both server and key: ranking them separately is what lets
+// a command reach one deployment holding another one's credentials. A profile
+// added without `--server` has no bound server and correctly falls through to
+// the environment/persisted default below — that fallback is intended.
 func ResolveServer() string {
 	if override, _ := flagValueIfChanged(Root, "server"); override != "" {
 		return override
