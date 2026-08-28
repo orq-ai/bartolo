@@ -168,7 +168,7 @@ func (h *AuthCodeHandler) OnRequest(log *zerolog.Logger, request *http.Request) 
 
 		// Try to get a cached refresh token from the current profile and use
 		// it to wrap the auth code token source with a refreshing source.
-		refreshKey := "profiles." + cli.ActiveProfileName() + ".refresh"
+		refreshKey := "profiles." + cli.CredentialScope() + ".refresh"
 		refreshSource := RefreshTokenSource{
 			ClientID:       h.ClientID,
 			TokenURL:       h.TokenURL,

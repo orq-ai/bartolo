@@ -130,7 +130,11 @@ func (h *Handler) missingKeyError(source string) error {
 		return fmt.Errorf("profile %q has no API key; run `auth setup --profile %s`", name, name)
 	}
 
-	return fmt.Errorf("missing API key; configure a profile with `auth setup` or set one of %s", strings.Join(h.EnvVars, ", "))
+	remedies := []string{"configure a profile with `auth setup`"}
+	if len(h.EnvVars) > 0 {
+		remedies = append(remedies, "set one of "+strings.Join(h.EnvVars, ", "))
+	}
+	return fmt.Errorf("missing API key; %s", strings.Join(remedies, " or "))
 }
 
 func (h *Handler) applyPrefix(value string) string {

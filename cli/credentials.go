@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -769,7 +771,9 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 	// A first profile nobody has chosen yet would otherwise sit unused until the
 	// next `auth profile use`.
 	if !ProfileSelected() {
-		return saveJSONConfig(map[string]interface{}{"profile-selected": profileName})
+		if err := saveJSONConfig(map[string]interface{}{"profile-selected": profileName}); err != nil {
+			return fmt.Errorf("profile %q was saved but could not be selected: %w; run `auth profile use %s` or pass --profile %s", profileName, err, profileName, profileName)
+		}
 	}
 
 	return nil
@@ -926,6 +930,23 @@ func SelectProfile(name string) {
 // an error rather than a silent fallback when it cannot supply them.
 func ProfileSelected() bool {
 	return ActiveProfileName() != ""
+}
+
+// CredentialScope returns a stable, non-empty namespace to key per-credential
+// caches (e.g. OAuth tokens) on. It is the active profile name when one is in
+// force. Otherwise there is no name to key on, but the environment can still
+// point at different deployments (different `<PREFIX>_SERVER`/client
+// settings), so a shared "" bucket would let one deployment's cached token
+// leak into a request meant for another. In that case it returns a short
+// digest of ResolveServer(), prefixed with "env-" so it can never collide
+// with a profile whose name happens to look like a hash.
+func CredentialScope() string {
+	if name := ActiveProfileName(); name != "" {
+		return name
+	}
+
+	sum := sha256.Sum256([]byte(ResolveServer()))
+	return "env-" + hex.EncodeToString(sum[:])[:12]
 }
 
 // InitCredentialsFile sets up the creds file and `profile` global parameter.

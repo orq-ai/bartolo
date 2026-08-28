@@ -1115,3 +1115,89 @@ func TestAuthProfileCurrentFromPersistedSelection(t *testing.T) {
 	assert.Equal(t, "selected", decoded["source"])
 	assert.Equal(t, true, decoded["exists"])
 }
+
+// When credentials.json is written but the profile-selected marker can't be
+// persisted afterward, the error must say the key was saved and name the
+// recovery command, rather than surfacing the raw underlying I/O error alone.
+func TestSaveAuthProfilePartialSaveErrorNamesRecovery(t *testing.T) {
+	home := resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	dir := filepath.Join(home, ".test-auth")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const malformed = `{"server-default": "https://acme.example.com",`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(malformed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, "")
+
+	assert.ErrorContains(t, err, `"acme" was saved`)
+	assert.ErrorContains(t, err, "auth profile use acme")
+	assert.ErrorContains(t, err, "--profile acme")
+
+	// The profile itself must have made it to disk despite the second
+	// write failing.
+	resetAuthSingletons()
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatal(err)
+	}
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+	assert.True(t, ProfileExists("acme"))
+}
+
+// With a profile in force, CredentialScope must be the profile name itself,
+// so existing `profiles.<name>.<field>` cache keys keep working.
+func TestCredentialScopeIsProfileNameWhenSelected(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, ""); err != nil {
+		t.Fatalf("saveAuthProfile: %v", err)
+	}
+	SelectProfile("acme")
+
+	assert.Equal(t, "acme", CredentialScope())
+}
+
+// With no profile in force, two environments differing only by the resolved
+// server must land in different scopes, or a cached OAuth token for one
+// deployment would be replayed against another that happens to share the
+// unnamed bucket.
+func TestCredentialScopeDiffersByServerWhenNoProfileSelected(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	t.Setenv("TEST_AUTH_SERVER", "https://one.example.com")
+	scopeOne := CredentialScope()
+
+	t.Setenv("TEST_AUTH_SERVER", "https://two.example.com")
+	scopeTwo := CredentialScope()
+
+	assert.NotEmpty(t, scopeOne)
+	assert.NotEmpty(t, scopeTwo)
+	assert.NotEqual(t, scopeOne, scopeTwo)
+	assert.True(t, strings.HasPrefix(scopeOne, "env-"))
+	assert.True(t, strings.HasPrefix(scopeTwo, "env-"))
+}
+
+// Even when ResolveServer() itself is empty, CredentialScope must still
+// return a stable, non-empty scope rather than collapsing to "".
+func TestCredentialScopeIsStableWhenServerIsEmpty(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	first := CredentialScope()
+	second := CredentialScope()
+
+	assert.NotEmpty(t, first)
+	assert.Equal(t, first, second)
+	assert.True(t, strings.HasPrefix(first, "env-"))
+}

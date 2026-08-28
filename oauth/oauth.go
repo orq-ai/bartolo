@@ -66,11 +66,15 @@ func TokenMiddleware(source oauth2.TokenSource, ctx *context.Context, h context.
 func TokenHandler(source oauth2.TokenSource, log *zerolog.Logger, request *http.Request) error {
 	var cached *oauth2.Token
 
-	// Load any existing token from the CLI's cache file.
-	expiresKey := "profiles." + cli.ActiveProfileName() + ".expires"
-	typeKey := "profiles." + cli.ActiveProfileName() + ".type"
-	tokenKey := "profiles." + cli.ActiveProfileName() + ".token"
-	refreshKey := "profiles." + cli.ActiveProfileName() + ".refresh"
+	// Load any existing token from the CLI's cache file. CredentialScope keys
+	// on the active profile name when one is in force, or a digest of the
+	// resolved server otherwise, so two unnamed credential sets pointed at
+	// different deployments don't share a cache slot.
+	scope := cli.CredentialScope()
+	expiresKey := "profiles." + scope + ".expires"
+	typeKey := "profiles." + scope + ".type"
+	tokenKey := "profiles." + scope + ".token"
+	refreshKey := "profiles." + scope + ".refresh"
 
 	expiry := cli.Cache.GetTime(expiresKey)
 	if !expiry.IsZero() {

@@ -1,6 +1,7 @@
 package apikey
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/orq-ai/bartolo/cli"
@@ -188,4 +189,18 @@ func TestRequiredProfileKeysIsJustTheAPIKey(t *testing.T) {
 
 	assert.Equal(t, []string{apiKey, "region", "org-id"}, h.ProfileKeys())
 	assert.Equal(t, []string{apiKey}, h.RequiredProfileKeys())
+}
+
+// A generated CLI with a blank EnvPrefix has no env vars to suggest, which is
+// exactly the case with no profile name to anchor the message on either. The
+// message must still read as a complete sentence and point at `auth setup`.
+func TestMissingKeyErrorWithNoEnvVarsIsACompleteSentence(t *testing.T) {
+	h := &Handler{Name: "x-auth", In: LocationHeader}
+
+	err := h.missingKeyError("missing")
+
+	assert.ErrorContains(t, err, "auth setup")
+	assert.NotContains(t, err.Error(), "set one of")
+	assert.False(t, strings.HasSuffix(err.Error(), ": "))
+	assert.False(t, strings.HasSuffix(err.Error(), "or "))
 }
