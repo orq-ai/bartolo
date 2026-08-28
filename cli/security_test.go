@@ -254,7 +254,7 @@ func TestResolveProfileValue(t *testing.T) {
 		os.WriteFile(f, []byte("sk-from-file\n"), 0o600)
 		cmd := makeCmd(f)
 		cmd.Flags().Set("api-key-file", f)
-		v, err := resolveProfileValue(cmd, "api_key", []string{"prod"}, 0)
+		v, err := resolveProfileValue(cmd, "api_key", []string{"prod"}, 0, true)
 		if err != nil || v != "sk-from-file" {
 			t.Errorf("key_file: got (%q, %v), want (sk-from-file, nil)", v, err)
 		}
@@ -262,12 +262,12 @@ func TestResolveProfileValue(t *testing.T) {
 
 	// 2. Positional value present: used verbatim.
 	t.Run("positional", func(t *testing.T) {
-		promptProfileValue = func(string) (string, error) {
+		promptProfileValue = func(string, bool) (string, error) {
 			t.Fatal("prompt ran when a positional value was given")
 			return "", nil
 		}
 		cmd := makeCmd("")
-		v, err := resolveProfileValue(cmd, "api_key", []string{"prod", "sk-123"}, 0)
+		v, err := resolveProfileValue(cmd, "api_key", []string{"prod", "sk-123"}, 0, true)
 		if err != nil || v != "sk-123" {
 			t.Errorf("positional: got (%q, %v), want (sk-123, nil)", v, err)
 		}
@@ -275,9 +275,9 @@ func TestResolveProfileValue(t *testing.T) {
 
 	// 3. No positional, prompt succeeds.
 	t.Run("prompted", func(t *testing.T) {
-		promptProfileValue = func(string) (string, error) { return "typed-secret", nil }
+		promptProfileValue = func(string, bool) (string, error) { return "typed-secret", nil }
 		cmd := makeCmd("")
-		v, err := resolveProfileValue(cmd, "api_key", []string{"prod"}, 0)
+		v, err := resolveProfileValue(cmd, "api_key", []string{"prod"}, 0, true)
 		if err != nil || v != "typed-secret" {
 			t.Errorf("prompted: got (%q, %v), want (typed-secret, nil)", v, err)
 		}
@@ -286,12 +286,12 @@ func TestResolveProfileValue(t *testing.T) {
 	// 4. No terminal: returns a UsageError, not a hang.
 	t.Run("no_terminal", func(t *testing.T) {
 		isInteractive = func() bool { return false }
-		promptProfileValue = func(string) (string, error) {
+		promptProfileValue = func(string, bool) (string, error) {
 			t.Fatal("prompt ran without a terminal")
 			return "", nil
 		}
 		cmd := makeCmd("")
-		_, err := resolveProfileValue(cmd, "api_key", []string{"prod"}, 0)
+		_, err := resolveProfileValue(cmd, "api_key", []string{"prod"}, 0, true)
 		if err == nil {
 			t.Fatal("no terminal: want an error")
 		}
@@ -304,9 +304,12 @@ func TestResolveProfileValue(t *testing.T) {
 	// 5. Multi-key handler: second key at index 1 resolves correctly.
 	t.Run("multi_key_index", func(t *testing.T) {
 		isInteractive = func() bool { return true }
-		promptProfileValue = func(key string) (string, error) {
+		promptProfileValue = func(key string, required bool) (string, error) {
 			if key != "client_secret" {
 				t.Errorf("unexpected prompt for %q, want client_secret", key)
+			}
+			if !required {
+				t.Errorf("expected client_secret to be required")
 			}
 			return "prompted-secret", nil
 		}
@@ -314,7 +317,7 @@ func TestResolveProfileValue(t *testing.T) {
 		cmd.Flags().String("client-id-file", "", "")
 		cmd.Flags().String("client-secret-file", "", "")
 		// args = ["prod", "my-client-id"], so client_id is positional, client_secret is prompted
-		v, err := resolveProfileValue(cmd, "client_secret", []string{"prod", "my-client-id"}, 1)
+		v, err := resolveProfileValue(cmd, "client_secret", []string{"prod", "my-client-id"}, 1, true)
 		if err != nil || v != "prompted-secret" {
 			t.Errorf("multi_key_index: got (%q, %v), want (prompted-secret, nil)", v, err)
 		}

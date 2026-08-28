@@ -386,24 +386,17 @@ func migrateLegacyServerConfig(configDir string) {
 		return
 	}
 
-	legacy, _ := config["server"].(string)
-	if strings.TrimSpace(legacy) == "" {
-		if _, present := config["server"]; !present {
-			return
-		}
+	if _, present := config["server"]; !present {
+		return
 	}
+	legacy, _ := config["server"].(string)
 
 	delete(config, "server")
 	if existing, _ := config["server-default"].(string); strings.TrimSpace(existing) == "" && strings.TrimSpace(legacy) != "" {
 		config["server-default"] = legacy
 	}
 
-	migrated, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return
-	}
-
-	if err := ioutil.WriteFile(filename, migrated, 0600); err != nil {
+	if err := writeJSONFile(filename, config); err != nil {
 		return
 	}
 
@@ -415,7 +408,9 @@ func saveJSONConfig(values map[string]interface{}) error {
 	merged := map[string]interface{}{}
 
 	if data, err := ioutil.ReadFile(filename); err == nil {
-		_ = json.Unmarshal(data, &merged)
+		if err := json.Unmarshal(data, &merged); err != nil {
+			return fmt.Errorf("config.json is not valid JSON; fix or delete it: %w", err)
+		}
 	}
 
 	for key, value := range values {
@@ -429,12 +424,43 @@ func saveJSONConfig(values map[string]interface{}) error {
 		viper.Set(key, value)
 	}
 
-	data, err := json.MarshalIndent(merged, "", "  ")
+	return writeJSONFile(filename, merged)
+}
+
+// writeJSONFile atomically replaces filename with value as indented JSON.
+func writeJSONFile(filename string, value interface{}) error {
+	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
 	}
 
-	return ioutil.WriteFile(filename, data, 0600)
+	return writeFileAtomic(filename, func(tmp string) error {
+		return ioutil.WriteFile(tmp, data, 0600)
+	})
+}
+
+// writeFileAtomic fills a sibling temp file, created 0600 from birth so a
+// permissive umask never opens a readable window, then renames it into place.
+// A failure discards it, leaving filename untouched rather than half-written.
+func writeFileAtomic(filename string, write func(tmp string) error) error {
+	dir := filepath.Dir(filename)
+	ext := filepath.Ext(filename)
+	base := strings.TrimSuffix(filepath.Base(filename), ext)
+	f, err := os.CreateTemp(dir, base+"-*"+ext)
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	f.Close()
+	if err := write(tmp); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, filename); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func initCache(appName string) {

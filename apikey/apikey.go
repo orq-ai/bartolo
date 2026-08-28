@@ -41,16 +41,31 @@ func (h *Handler) ProfileKeys() []string {
 	return append([]string{apiKey}, h.Keys...)
 }
 
+// RequiredProfileKeys narrows the fields a profile must supply to just the
+// credential; generator-supplied extras in h.Keys (e.g. a region or an
+// organisation id) are optional.
+func (h *Handler) RequiredProfileKeys() []string {
+	return []string{apiKey}
+}
+
 // OnRequest gets run before the request goes out on the wire.
 func (h *Handler) OnRequest(log *zerolog.Logger, request *http.Request) error {
 	profile := cli.GetProfile()
-	key, source := h.lookupKey(profile)
+	activeProfile := cli.ActiveProfileName()
+	key, source := h.lookupKey(profile, activeProfile)
 	if key == "" {
-		return fmt.Errorf("missing API key; configure a profile with `auth setup` or set one of %s", strings.Join(h.EnvVars, ", "))
+		return h.missingKeyError(activeProfile, source)
 	}
 
 	log.Debug().Str("auth-source", source).Msg("Using API key authentication")
+	h.applyKey(request, key)
 
+	return nil
+}
+
+// applyKey writes the key wherever the spec says it belongs, leaving a value
+// the caller already set in place.
+func (h *Handler) applyKey(request *http.Request, key string) {
 	switch h.In {
 	case LocationHeader:
 		if request.Header.Get(h.Name) == "" {
@@ -70,13 +85,11 @@ func (h *Handler) OnRequest(log *zerolog.Logger, request *http.Request) error {
 			})
 		}
 	}
-
-	return nil
 }
 
 // AuthStatus describes whether auth is configured for `doctor`.
 func (h *Handler) AuthStatus(profile map[string]string) map[string]interface{} {
-	key, source := h.lookupKey(profile)
+	key, source := h.lookupKey(profile, cli.ActiveProfileName())
 	status := map[string]interface{}{
 		"configured": key != "",
 		"source":     source,
@@ -89,18 +102,43 @@ func (h *Handler) AuthStatus(profile map[string]string) map[string]interface{} {
 	return status
 }
 
-func (h *Handler) lookupKey(profile map[string]string) (string, string) {
+func (h *Handler) lookupKey(profile map[string]string, activeProfile string) (string, string) {
+	if key := strings.TrimSpace(profile[apiKey]); key != "" {
+		return h.applyPrefix(key), "profile"
+	}
+
+	// A chosen profile is authoritative. Falling back to an ambient key here is
+	// how `--profile staging` ends up sending the production key it was passed
+	// to avoid, so an incomplete or unknown profile is an error instead.
+	if activeProfile != "" {
+		if cli.ProfileExists(activeProfile) {
+			return "", "profile-incomplete"
+		}
+		return "", "profile-unknown"
+	}
+
 	for _, envVar := range h.EnvVars {
 		if value := strings.TrimSpace(os.Getenv(envVar)); value != "" {
 			return h.applyPrefix(value), "env"
 		}
 	}
 
-	if value := strings.TrimSpace(profile[apiKey]); value != "" {
-		return h.applyPrefix(value), "profile"
+	return "", "missing"
+}
+
+func (h *Handler) missingKeyError(name string, source string) error {
+	switch source {
+	case "profile-unknown":
+		return fmt.Errorf("profile %q is not configured; run `auth setup --profile %s` or pick one with `auth profile list`", name, name)
+	case "profile-incomplete":
+		return fmt.Errorf("profile %q has no API key; run `auth setup --profile %s`", name, name)
 	}
 
-	return "", "missing"
+	remedies := []string{"configure a profile with `auth setup`"}
+	if len(h.EnvVars) > 0 {
+		remedies = append(remedies, "set one of "+strings.Join(h.EnvVars, ", "))
+	}
+	return fmt.Errorf("missing API key; %s", strings.Join(remedies, " or "))
 }
 
 func (h *Handler) applyPrefix(value string) string {

@@ -16,8 +16,9 @@ func Example() {
 	// Initialize the API key authentication.
 	Init("X-API-Key", LocationHeader)
 
-	// Mock out a profile to be used in the request.
-	cli.Creds.Set("profiles.default.api_key", "my-secret")
+	// Mock out a profile and put it in force, as `--profile` would.
+	cli.Creds.Set("profiles.work.api_key", "my-secret")
+	cli.SelectProfile("work")
 
 	// Make a request.
 	req := cli.Client.Get().URL("http://example.com/")

@@ -11,32 +11,59 @@ import (
 )
 
 func TestDoctorCommand(t *testing.T) {
-	Init(&Config{
-		AppName:   "test",
-		EnvPrefix: "TEST",
-		Version:   "1.2.3",
+	t.Run("no profile in force", func(t *testing.T) {
+		resetAuthState(t)
+		Init(&Config{
+			AppName:   "test",
+			EnvPrefix: "TEST",
+			Version:   "1.2.3",
+		})
+
+		RegisterServers([]map[string]string{
+			{
+				"description": "Test server",
+				"url":         "https://example.com",
+			},
+		})
+
+		out := execute("doctor")
+
+		var decoded map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+			t.Fatalf("decode doctor output: %v\n%s", err, out)
+		}
+
+		app := decoded["app"].(map[string]interface{})
+		config := decoded["config"].(map[string]interface{})
+
+		assert.Equal(t, "test", app["name"])
+		assert.Equal(t, "1.2.3", app["version"])
+		assert.Equal(t, "", config["profile"])
+		assert.Equal(t, "", config["profile_server"])
+		assert.Equal(t, "https://example.com", config["selected_server"])
 	})
 
-	RegisterServers([]map[string]string{
-		{
-			"description": "Test server",
-			"url":         "https://example.com",
-		},
+	// Exercises doctor through the persisted rung, which a revert to
+	// viper.GetString("profile") would miss.
+	t.Run("persisted profile selection is authoritative", func(t *testing.T) {
+		serverFixture(t, "https://profile.example.com")
+		// serverFixture uses the flag-bound key; swap it for a persisted
+		// selection so this test can tell the two rungs apart.
+		viper.Set("profile", "")
+		execute("auth profile use acme")
+
+		out := execute("doctor")
+
+		var decoded map[string]interface{}
+		if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+			t.Fatalf("decode doctor output: %v\n%s", err, out)
+		}
+		config := decoded["config"].(map[string]interface{})
+
+		assert.Equal(t, "acme", config["profile"])
+		assert.Equal(t, "https://profile.example.com", config["profile_server"])
+		assert.Equal(t, "https://profile.example.com", config["selected_server"])
 	})
-
-	out := execute("doctor")
-
-	var decoded map[string]interface{}
-	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
-		t.Fatalf("decode doctor output: %v\n%s", err, out)
-	}
-
-	app := decoded["app"].(map[string]interface{})
-	config := decoded["config"].(map[string]interface{})
-
-	assert.Equal(t, "test", app["name"])
-	assert.Equal(t, "1.2.3", app["version"])
-	assert.Equal(t, "https://example.com", config["selected_server"])
 }
 
 func TestRequestCommand(t *testing.T) {

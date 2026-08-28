@@ -12,15 +12,34 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// execute a command against the configured CLI
+// executeArgsStreams runs an explicit argument vector and returns stdout,
+// stderr and Root.Execute()'s error. A test needing a genuine empty argument
+// passes it as its own element rather than relying on how a string splits.
+func executeArgsStreams(args []string) (stdout string, stderr string, err error) {
+	outBuf := new(bytes.Buffer)
+	errBuf := new(bytes.Buffer)
+	Root.SetArgs(args)
+	Root.SetOut(outBuf)
+	Root.SetErr(errBuf)
+	Stdout = outBuf
+	Stderr = errBuf
+	err = Root.Execute()
+	return outBuf.String(), errBuf.String(), err
+}
+
+// executeStreams wraps executeArgsStreams for a plain command line, splitting
+// on strings.Fields so it cannot manufacture an empty argument the way
+// strings.Split did. It discards the execution error.
+func executeStreams(cmd string) (stdout string, stderr string) {
+	stdout, stderr, _ = executeArgsStreams(strings.Fields(cmd))
+	return stdout, stderr
+}
+
+// execute is a thin stdout-only wrapper over executeStreams, kept so the
+// many existing call sites that only care about the payload need no change.
 func execute(cmd string) string {
-	out := new(bytes.Buffer)
-	Root.SetArgs(strings.Split(cmd, " "))
-	Root.SetOutput(out)
-	Stdout = out
-	Stderr = out
-	Root.Execute()
-	return out.String()
+	stdout, _ := executeStreams(cmd)
+	return stdout
 }
 
 func TestInit(t *testing.T) {

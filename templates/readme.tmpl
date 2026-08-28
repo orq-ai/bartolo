@@ -65,7 +65,7 @@ Bind a profile to its own API base URL with `--server` when adding it, so you do
 not have to repeat the flag on every call:
 
 ```sh
-{{ .CommandName }} auth add-profile --server https://api.staging.example.com staging
+{{ .CommandName }} auth profile add --server https://api.staging.example.com staging
 ```
 
 `{{ .CommandName }} auth setup` takes the same flag.
@@ -74,11 +74,31 @@ Each secret is prompted for without echo. In CI or automation, use `--<key>-file
 (or `--<key>-file -` for stdin) to supply secrets without putting them on the command line.
 Positional arguments still work but print a warning for sensitive keys.
 
-Resolution order, most specific first: an explicit `--server` flag or
-`<PREFIX>_SERVER` environment variable (same prefix as the variables above),
-then the profile's bound server, then a persisted `server set` default, then
-the generated server default. `auth list-profiles` shows the server bound to
-each profile, and `doctor` shows the one the active profile resolves to.
+Pick the profile every command uses, so `--profile` does not have to be repeated:
+
+```sh
+{{ .CommandName }} auth profile use staging   # `auth profile list` marks the active one
+{{ .CommandName }} auth profile current       # see the active profile
+{{ .CommandName }} auth profile clear         # go back to no profile
+```
+
+There is no implicit profile. Until one is named or chosen, credentials come
+from the environment variables above, which is the usual shape in CI. A profile
+you add is auto-selected whenever no profile is currently active — including
+right after `auth profile clear`, so adding another profile silently
+re-enables profiles.
+
+Once a profile is in force it outranks the environment for its key, so
+`--profile staging` cannot end up sending a key that came from the
+environment — see "Server resolution order" below for how a profile's server
+fits in. A profile that cannot supply a key is an error rather than a silent
+fallback, and `--profile ""` turns profiles off for one command.
+
+Server resolution order, most specific first: an explicit `--server` flag, the
+profile's bound server, the `<PREFIX>_SERVER` environment variable (same prefix
+as the variables above), a persisted `server set` default, then the generated
+server default. `auth profile list` shows the server bound to each profile, and
+`doctor` shows the one the active profile resolves to.
 {{- else }}
 
 {{ .AuthDoc.Summary }}
@@ -138,6 +158,7 @@ Bartolo keeps generated and user-owned code separate:
 - Use `--help` on any command group or command to inspect flags and required args.
 - Use `help-input` when a command accepts a request body from stdin or CLI shorthand.
 - Use `server list`, `server use`, and `server set` to manage generated server defaults.
+- Use `auth profile list`, `auth profile use`, `auth profile current`, and `auth profile clear` to see, pick, show, and drop the active credentials profile.
 - `make build` writes the binary to `./bin/{{ .CommandName }}`.
 - `make install-local` installs the binary to `~/.local/bin/{{ .CommandName }}` by default.
 - `make completions` writes shell completion files into `./completions/`.

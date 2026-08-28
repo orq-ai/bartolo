@@ -181,9 +181,13 @@ func warnServerOnce(key, msg string) {
 }
 
 // ResolveServer returns the active server URL, most specific source first:
-// `--server`, `<PREFIX>_SERVER` or viper.Set, the active profile's server, the
+// `--server`, the active profile's server, `<PREFIX>_SERVER` or viper.Set, the
 // `server set` default (kept off the flag's key so viper cannot rank it as
 // explicit), then the selected OpenAPI server.
+//
+// The profile outranks the environment because ranking server and key
+// separately is what lets a command reach one deployment holding another's
+// credentials. A profile with no bound server falls through, by design.
 //
 // Normalization happens here rather than only where a value is written, because
 // a config or credentials file can be written by an older bartolo, edited by
@@ -195,12 +199,16 @@ func ResolveServer() string {
 }
 
 func resolveServerRaw() string {
-	if override := strings.TrimSpace(viper.GetString("server")); override != "" {
+	if override, _ := flagValueIfChanged(Root, "server"); override != "" {
 		return override
 	}
 
 	if server := ProfileServer(); server != "" {
 		return server
+	}
+
+	if override := strings.TrimSpace(viper.GetString("server")); override != "" {
+		return override
 	}
 
 	if persisted := strings.TrimSpace(viper.GetString("server-default")); persisted != "" {
@@ -294,7 +302,7 @@ func doctorStatus() map[string]interface{} {
 		},
 		"config": map[string]interface{}{
 			"directory":       viper.GetString("config-directory"),
-			"profile":         viper.GetString("profile"),
+			"profile":         ActiveProfileName(),
 			"server_index":    viper.GetInt("server-index"),
 			"server_override": viper.GetString("server"),
 			"profile_server":  ProfileServer(),
@@ -315,7 +323,7 @@ func doctorStatus() map[string]interface{} {
 func runDoctorFixes(status map[string]interface{}) (bool, error) {
 	auth, _ := status["auth"].(map[string]interface{})
 	if configured, _ := auth["configured"].(bool); !configured {
-		if err := RunAuthSetup(viper.GetString("profile"), "", ""); err != nil {
+		if err := RunAuthSetup(ActiveProfileName(), "", ""); err != nil {
 			return false, err
 		}
 		return true, nil
