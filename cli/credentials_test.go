@@ -152,6 +152,39 @@ func TestAddProfileIgnoresEnvAndConfigServer(t *testing.T) {
 	}
 }
 
+// `auth add-profile` is a deprecated alias for `auth profile add`, but it
+// shipped on origin/main with an `add` alias of its own (`auth add`). This
+// branch dropped that alias without listing the break; it must be restored.
+func TestAuthAddAliasStillResolves(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	execute("auth add acme secret")
+
+	viper.Set("profile", "acme")
+	if got := GetProfile()["api_key"]; got != "secret" {
+		t.Fatalf("expected saved api key via `auth add` alias, got %q", got)
+	}
+}
+
+// The deprecation notice for a surviving alias must land on stderr, not
+// stdout, so the payload on stdout stays parseable (e.g. `--json | jq`).
+// Cobra's own `Deprecated` field prints through OutOrStderr, which resolves
+// to the *out* writer once one is set, corrupting `--json` output; this is
+// why the notice is emitted manually instead.
+func TestAddProfileDeprecatedAliasWarnsOnStderr(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	stdout, stderr := executeStreams("auth add-profile acme secret")
+
+	assert.Contains(t, stderr, `"add-profile" is deprecated`)
+	assert.Contains(t, stderr, "auth profile add")
+	assert.NotContains(t, stdout, "deprecated")
+}
+
 func TestResolveServerPrefersProfileOverServerIndex(t *testing.T) {
 	serverFixture(t, "https://orq.acme.internal")
 
@@ -361,11 +394,40 @@ func TestListProfilesMasksSecretsAndHonorsJSON(t *testing.T) {
 	assert.Equal(t, "https://acme.example.com", decoded.Profiles[0]["server"])
 }
 
-func TestAuthUseSetsActiveProfile(t *testing.T) {
+// Regression test for the Critical defect: cobra's `Deprecated` field prints
+// its notice through the command's *out* writer once one is set, so it used
+// to land on stdout ahead of the JSON payload and break
+// `auth list-profiles --json | jq`. The notice must go to stderr instead,
+// leaving stdout as valid JSON.
+func TestListProfilesDeprecatedAliasKeepsJSONCleanOnStdout(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, ""); err != nil {
+		t.Fatalf("saveAuthProfile: %v", err)
+	}
+
+	viper.Set("output-format", "json")
+	stdout, stderr := executeStreams("auth list-profiles --json")
+
+	var decoded struct {
+		Profiles []map[string]interface{} `json:"profiles"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout)
+	}
+	assert.Len(t, decoded.Profiles, 1)
+
+	assert.Contains(t, stderr, `"list-profiles" is deprecated`)
+	assert.Contains(t, stderr, "auth profile list")
+}
+
+func TestAuthProfileUseSetsActiveProfile(t *testing.T) {
 	serverFixture(t, "")
 	viper.Set("profile", "")
 
-	execute("auth use acme")
+	execute("auth profile use acme")
 
 	assert.Equal(t, "acme", ActiveProfileName())
 	assert.Equal(t, "secret", GetProfile()["api_key"])
@@ -375,22 +437,51 @@ func TestAuthUseSetsActiveProfile(t *testing.T) {
 	assert.Contains(t, string(data), `"profile-selected": "acme"`)
 }
 
-// `auth use` persists off the flag's viper key. Writing it to `profile` would
-// land on viper's override layer, which outranks a bound flag, so `--profile`
-// would stop working for the rest of the process.
-func TestExplicitProfileBeatsAuthUse(t *testing.T) {
+// `auth profile use` persists off the flag's viper key. Writing it to
+// `profile` would land on viper's override layer, which outranks a bound
+// flag, so `--profile` would stop working for the rest of the process.
+func TestExplicitProfileBeatsAuthProfileUse(t *testing.T) {
 	serverFixture(t, "")
-	execute("auth use acme")
+	execute("auth profile use acme")
 
 	assert.NoError(t, Root.PersistentFlags().Set("profile", "other"))
 	assert.Equal(t, "other", ActiveProfileName())
 }
 
-func TestAuthUseRejectsUnknownProfile(t *testing.T) {
+func TestAuthProfileUseRejectsUnknownProfile(t *testing.T) {
 	serverFixture(t, "")
 
-	assert.Contains(t, execute("auth use nope"), `unknown profile "nope"`)
+	_, stderr := executeStreams("auth profile use nope")
+
+	assert.Contains(t, stderr, `unknown profile "nope"`)
 	assert.Equal(t, "acme", ActiveProfileName(), "a rejected profile must not change the selection")
+}
+
+// `auth use` was added on this branch (never shipped on origin/main) and was
+// removed before shipping, since deprecating a command that never shipped is
+// pure cost. It must not resolve to anything, including the surviving
+// `auth profile use`.
+// `auth use` was added on this branch and never shipped on origin/main; it
+// must not resolve to anything, including the surviving `auth profile use`.
+// `auth` has no RunE of its own, so cobra's response to unmatched args under
+// it is its help text rather than an "unknown command" error (unlike an
+// unmatched *top-level* command, which does error) -- either way, the point
+// is that it must not perform a profile switch.
+func TestAuthUseCommandIsGone(t *testing.T) {
+	serverFixture(t, "")
+	viper.Set("profile", "")
+
+	configPath := filepath.Join(viper.GetString("config-directory"), "config.json")
+	before, _ := os.ReadFile(configPath)
+
+	stdout, _ := executeStreams("auth use acme")
+
+	assert.Contains(t, stdout, "Available Commands", "expected auth's help text, not a resolved `use` command")
+	assert.NotContains(t, stdout, "active_profile", "must not have run a profile switch")
+
+	after, err := os.ReadFile(configPath)
+	assert.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "must not have persisted a selection")
 }
 
 func TestActiveProfileNameAndListingAreCaseInsensitive(t *testing.T) {

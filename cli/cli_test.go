@@ -12,15 +12,27 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// execute a command against the configured CLI
-func execute(cmd string) string {
-	out := new(bytes.Buffer)
+// executeStreams runs a command against the configured CLI and returns
+// stdout and stderr separately, so a test can assert that a payload landed
+// on stdout while an out-of-band notice (e.g. a deprecation warning) landed
+// on stderr instead.
+func executeStreams(cmd string) (stdout string, stderr string) {
+	outBuf := new(bytes.Buffer)
+	errBuf := new(bytes.Buffer)
 	Root.SetArgs(strings.Split(cmd, " "))
-	Root.SetOutput(out)
-	Stdout = out
-	Stderr = out
+	Root.SetOut(outBuf)
+	Root.SetErr(errBuf)
+	Stdout = outBuf
+	Stderr = errBuf
 	Root.Execute()
-	return out.String()
+	return outBuf.String(), errBuf.String()
+}
+
+// execute is a thin stdout-only wrapper over executeStreams, kept so the
+// many existing call sites that only care about the payload need no change.
+func execute(cmd string) string {
+	stdout, _ := executeStreams(cmd)
+	return stdout
 }
 
 func TestInit(t *testing.T) {

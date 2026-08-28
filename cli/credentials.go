@@ -108,13 +108,16 @@ func initAuth() {
 		newAuthAddCommand(profileCommand, "add", ""),
 		newAuthAddCommand(authCommand, "add-profile", "use `auth profile add` instead"),
 	}
+	// `add-profile` shipped on origin/main with an `add` alias
+	// (`auth add-profile`/`auth add`); keep it working for the deprecated
+	// spelling.
+	authAddCommands[1].Aliases = []string{"add"}
 
 	profileCommand.AddCommand(newProfileListCommand("list", ""))
-	profileCommand.AddCommand(newProfileUseCommand("use", ""))
+	profileCommand.AddCommand(newProfileUseCommand("use"))
 	profileCommand.AddCommand(newProfileClearCommand())
 
 	authCommand.AddCommand(newProfileListCommand("list-profiles", "use `auth profile list` instead"))
-	authCommand.AddCommand(newProfileUseCommand("use", "use `auth profile use` instead"))
 
 	authCommand.AddCommand(newAuthSetupCommand())
 
@@ -136,24 +139,41 @@ func initAuth() {
 	})
 }
 
-func newAuthAddCommand(parent *cobra.Command, use string, deprecated string) *cobra.Command {
+// newAuthAddCommand registers one spelling of the add-profile command.
+// deprecationNotice, when non-empty, hides the command from help and prints
+// a deprecation notice to cli.Stderr before the command runs, rather than
+// relying on cobra's own Deprecated field: cobra prints that notice through
+// Command.OutOrStderr(), which resolves to the *out* writer once one is set
+// (as this package's test harness, and any --json caller, does), so the
+// notice used to land on stdout ahead of the payload.
+func newAuthAddCommand(parent *cobra.Command, use string, deprecationNotice string) *cobra.Command {
 	cmd := &cobra.Command{
-		Use:        use,
-		Short:      "Add user profile for authentication",
-		Deprecated: deprecated,
+		Use:   use,
+		Short: "Add user profile for authentication",
+	}
+	if deprecationNotice != "" {
+		cmd.Hidden = true
+		cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
+			fmt.Fprintf(Stderr, "Command %q is deprecated, %s\n", cmd.Name(), deprecationNotice)
+			return nil
+		}
 	}
 	parent.AddCommand(cmd)
 	return cmd
 }
 
-func newProfileListCommand(use string, deprecated string) *cobra.Command {
+func newProfileListCommand(use string, deprecationNotice string) *cobra.Command {
 	return &cobra.Command{
-		Use:        use,
-		Aliases:    []string{"ls"},
-		Short:      "List available configured authentication profiles",
-		Args:       cobra.NoArgs,
-		Deprecated: deprecated,
+		Use:     use,
+		Aliases: []string{"ls"},
+		Short:   "List available configured authentication profiles",
+		Args:    cobra.NoArgs,
+		Hidden:  deprecationNotice != "",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if deprecationNotice != "" {
+				fmt.Fprintf(Stderr, "Command %q is deprecated, %s\n", cmd.Name(), deprecationNotice)
+			}
+
 			profiles := Creds.GetStringMap("profiles")
 			if len(profiles) == 0 {
 				fmt.Printf("No profiles configured. Use `%s auth setup` to add one.\n", Root.CommandPath())
@@ -195,13 +215,12 @@ func newProfileListCommand(use string, deprecated string) *cobra.Command {
 	}
 }
 
-func newProfileUseCommand(use string, deprecated string) *cobra.Command {
+func newProfileUseCommand(use string) *cobra.Command {
 	return &cobra.Command{
-		Use:        use + " <name>",
-		Aliases:    []string{"switch"},
-		Short:      "Set the active authentication profile",
-		Args:       cobra.ExactArgs(1),
-		Deprecated: deprecated,
+		Use:     use + " <name>",
+		Aliases: []string{"switch"},
+		Short:   "Set the active authentication profile",
+		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := sanitizeProfileName(args[0])
 			if !ProfileExists(name) {
