@@ -20,10 +20,8 @@ import (
 	"gopkg.in/h2non/gentleman.v2/context"
 )
 
-// Save persists the credentials file atomically at 0600. os.CreateTemp
-// creates the temp file at 0600 from birth (no world-readable window), then viper
-// writes into it, then rename replaces the target. An interrupted write leaves the
-// existing file intact.
+// Save persists the credentials file atomically via writeFileAtomic (see
+// cli.go), viper's WriteConfigAs supplying the write.
 //
 // The whole in-memory tree is written, so Save replaces the target rather than
 // merging into it. Build through NewCredentialsFile, which loads what is
@@ -33,24 +31,9 @@ func (c *CredentialsFile) Save(filename string) error {
 	if c == nil || c.viper == nil {
 		return fmt.Errorf("credentials file is not initialized")
 	}
-	dir := filepath.Dir(filename)
-	ext := filepath.Ext(filename)
-	base := strings.TrimSuffix(filepath.Base(filename), ext)
-	f, err := os.CreateTemp(dir, base+"-*"+ext)
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	f.Close()
-	if err := c.viper.WriteConfigAs(tmp); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, filename); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return nil
+	return writeFileAtomic(filename, func(tmp string) error {
+		return c.viper.WriteConfigAs(tmp)
+	})
 }
 
 // AuthHandler describes a handler that can be called on a request to inject
@@ -86,6 +69,15 @@ var profileCommand *cobra.Command
 // which `UseAuth` fills in (or hangs a typed subcommand off, for a named auth
 // type).
 var authAddCommands []*cobra.Command
+
+// authAddDeprecationNotices records which of authAddCommands carries a
+// deprecation notice, keyed by the command object itself. Cobra runs the
+// selected leaf's own hooks, not a parent's, so a typed subcommand `UseAuth`
+// hangs off a deprecated parent (e.g. `auth add-profile oauth ...`) needs the
+// same PreRunE attached directly to it, or the notice never fires for that
+// spelling. See UseAuth, which consults this map when building each typed
+// child.
+var authAddDeprecationNotices = map[*cobra.Command]string{}
 
 // initAuth sets up basic commands and the credentials file so that new auth
 // handlers can be registered. This is safe to call many times.
@@ -162,13 +154,22 @@ func newAuthAddCommand(parent *cobra.Command, use string, deprecationNotice stri
 	}
 	if deprecationNotice != "" {
 		cmd.Hidden = true
-		cmd.PreRunE = func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintf(Stderr, "Command %q is deprecated, %s\n", cmd.Name(), deprecationNotice)
-			return nil
-		}
+		cmd.PreRunE = deprecationPreRunE(deprecationNotice)
+		authAddDeprecationNotices[cmd] = deprecationNotice
 	}
 	parent.AddCommand(cmd)
 	return cmd
+}
+
+// deprecationPreRunE builds the PreRunE that prints notice, naming whichever
+// command cobra actually ran. It is attached to a deprecated parent as well
+// as to any typed child UseAuth hangs off it, since cobra only runs the leaf
+// command's own hooks.
+func deprecationPreRunE(notice string) func(cmd *cobra.Command, args []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		fmt.Fprintf(Stderr, "Command %q is deprecated, %s\n", cmd.Name(), notice)
+		return nil
+	}
 }
 
 func newProfileListCommand(use string, deprecationNotice string) *cobra.Command {
@@ -240,13 +241,7 @@ func newProfileUseCommand(use string) *cobra.Command {
 				return fmt.Errorf("unknown profile %q", args[0])
 			}
 
-			// `profile-decided` is written here defensively, alongside every other
-			// deliberate write to `profile-selected` (see adoptLegacyDefaultProfile
-			// and clear's own write below): it is not load-bearing for this call
-			// specifically, but dropping it from any one of these sites would let
-			// a later adoptLegacyDefaultProfile mistake "a decision was made here"
-			// for "no decision has ever been made".
-			if err := saveJSONConfig(map[string]interface{}{"profile-selected": name, "profile-decided": true}); err != nil {
+			if err := persistProfileSelection(name); err != nil {
 				return err
 			}
 
@@ -284,13 +279,29 @@ func newProfileClearCommand() *cobra.Command {
 		Short: "Stop using a persisted active profile",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := saveJSONConfig(map[string]interface{}{"profile-selected": nil, "profile-decided": true}); err != nil {
+			if err := persistProfileSelection(""); err != nil {
 				return err
 			}
 
 			return Formatter.Format(map[string]interface{}{"active_profile": ActiveProfileName(), "persisted": true})
 		},
 	}
+}
+
+// persistProfileSelection is the only place allowed to write
+// `profile-selected`. It always writes `profile-decided": true` alongside it,
+// so the marker means "the user (or adoptLegacyDefaultProfile, standing in
+// for them once) has made a profile decision" — never "this migration ran" —
+// and adoptLegacyDefaultProfile can tell "no decision has ever been made"
+// from "a profile was chosen and now nothing is selected on purpose" (e.g.
+// after `auth profile clear`). name == "" persists the clear/delete case,
+// removing the key instead of storing an empty string.
+func persistProfileSelection(name string) error {
+	var selected interface{} = name
+	if name == "" {
+		selected = nil
+	}
+	return saveJSONConfig(map[string]interface{}{"profile-selected": selected, "profile-decided": true})
 }
 
 // sortedKeys returns a map's keys in a stable order.
@@ -460,6 +471,9 @@ func UseAuth(typeName string, handler AuthHandler) {
 			Short: "Add a new named " + typeName + " authentication profile",
 			Args:  cobra.RangeArgs(1, 1+len(keys)),
 			RunE:  run,
+		}
+		if notice, deprecated := authAddDeprecationNotices[cmd]; deprecated {
+			typed.PreRunE = deprecationPreRunE(notice)
 		}
 		addKeyFileFlags(typed)
 		cmd.AddCommand(typed)
@@ -688,6 +702,14 @@ func resolveProfileValue(cmd *cobra.Command, key string, args []string, i int, r
 	}
 
 	// 3. prompt
+	if !required {
+		// An optional key left off every route (file, positional, and now the
+		// prompt) is simply unset, the same as pressing Enter on it would
+		// produce — this must not depend on a TTY being present, or a scripted
+		// caller that omits an optional trailing argument fails for a field it
+		// never needed to supply.
+		return "", nil
+	}
 	if !isInteractive() {
 		return "", NewUsageError(fmt.Errorf("no %s provided; use --%s-file <path> or run in an interactive terminal", label, label))
 	}
@@ -804,14 +826,8 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 
 	// A first profile nobody has chosen yet would otherwise sit unused until the
 	// next `auth profile use`.
-	//
-	// `profile-decided` is written here defensively, same as at every other
-	// deliberate write to `profile-selected` (see `use`, `clear`, and
-	// adoptLegacyDefaultProfile): dropping it from any single site would let a
-	// later adoptLegacyDefaultProfile mistake "a decision was made here" for
-	// "no decision has ever been made".
 	if !ProfileSelected() {
-		if err := saveJSONConfig(map[string]interface{}{"profile-selected": profileName, "profile-decided": true}); err != nil {
+		if err := persistProfileSelection(profileName); err != nil {
 			return fmt.Errorf("profile %q was saved but could not be selected: %w; run `auth profile use %s` or pass --profile %s", profileName, err, profileName, profileName)
 		}
 	}
@@ -919,8 +935,12 @@ func GetProfile() map[string]string {
 	return Creds.GetStringMapString("profiles." + name)
 }
 
-// ProfileExists reports whether a profile of that name is configured.
+// ProfileExists reports whether a profile of that name is configured. name is
+// run through sanitizeProfileName, the same as SelectProfile and
+// ActiveProfileName, so a differently-cased or dotted spelling of a profile
+// that does exist does not report false.
 func ProfileExists(name string) bool {
+	name = sanitizeProfileName(name)
 	return Creds != nil && name != "" && Creds.IsSet("profiles."+name)
 }
 
@@ -1016,10 +1036,8 @@ func InitCredentialsFile() {
 // process could not tell "no decision has ever been made" from "a profile was
 // chosen (by this migration, `auth profile use`, `auth profile clear`, or the
 // first-profile auto-select), and now nothing is selected on purpose" — it
-// would silently re-adopt `default` and undo the user's own `clear`.
-// `profile-decided` therefore means "the user (or this migration, standing in
-// for them once) has made a profile decision", not "this migration ran"; every
-// deliberate write of `profile-selected` sets it alongside, not just this one.
+// would silently re-adopt `default` and undo the user's own `clear`. See
+// persistProfileSelection for what the marker means.
 //
 // Adoption also reverses which credential goes on the wire: previously a
 // `<PREFIX>_API_KEY` in the environment was tried before any profile, so a
@@ -1033,6 +1051,12 @@ func adoptLegacyDefaultProfile() {
 		return
 	}
 
+	// The `profile-selected != ""` half of this guard is now reachable only
+	// through a hand-edited config.json (one with `profile-selected` set but
+	// `profile-decided` missing or false): every code path that writes
+	// `profile-selected` goes through persistProfileSelection, which always
+	// sets `profile-decided` alongside it, so that combination cannot occur
+	// from normal use.
 	if !Creds.IsSet("profiles.default") || viper.GetString("profile-selected") != "" {
 		return
 	}
@@ -1043,15 +1067,13 @@ func adoptLegacyDefaultProfile() {
 	// existing config.json is different: saveJSONConfig returns before that
 	// viper.Set loop runs, so in that case the in-memory selection does not
 	// land either.
-	if err := saveJSONConfig(map[string]interface{}{
-		"profile-decided":  true,
-		"profile-selected": "default",
-	}); err != nil {
-		// saveJSONConfig's viper.Set loop may already have run (see the comment
-		// above): when it has, `default` is authoritative for this process even
-		// though the write to disk failed, so the reversal sentence still needs
-		// to reach the user — folded into the warning rather than a separate
-		// notice, since the disk write itself did not succeed.
+	if err := persistProfileSelection("default"); err != nil {
+		// persistProfileSelection's underlying viper.Set loop may already have
+		// run (see the comment above): when it has, `default` is authoritative
+		// for this process even though the write to disk failed, so the
+		// reversal sentence still needs to reach the user — folded into the
+		// warning rather than a separate notice, since the disk write itself
+		// did not succeed.
 		if ActiveProfileName() == "default" {
 			fmt.Fprintf(Stderr, "warning: could not record profile adoption: %v; %q is nonetheless the active authentication profile for this run, and the environment API key is not consulted while a profile is in force.\n", err, "default")
 		} else {

@@ -406,7 +406,37 @@ func saveJSONConfig(values map[string]interface{}) error {
 		return err
 	}
 
-	return ioutil.WriteFile(filename, data, 0600)
+	return writeFileAtomic(filename, func(tmp string) error {
+		return ioutil.WriteFile(tmp, data, 0600)
+	})
+}
+
+// writeFileAtomic writes filename via a temp file in the same directory,
+// created 0600 from birth (no world-readable window) so a permissive process
+// umask never leaks the content, then an os.Rename into place. write fills
+// the temp file at tmp; whatever it writes there either fully replaces
+// filename or, on any failure, is discarded, leaving an existing filename
+// untouched rather than half-written. This is CredentialsFile.Save's write
+// strategy, factored out so config.json gets the same guarantee.
+func writeFileAtomic(filename string, write func(tmp string) error) error {
+	dir := filepath.Dir(filename)
+	ext := filepath.Ext(filename)
+	base := strings.TrimSuffix(filepath.Base(filename), ext)
+	f, err := os.CreateTemp(dir, base+"-*"+ext)
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	f.Close()
+	if err := write(tmp); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, filename); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func initCache(appName string) {
