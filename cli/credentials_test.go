@@ -428,6 +428,41 @@ func TestListProfilesMasksSecretsAndHonorsJSON(t *testing.T) {
 	assert.Equal(t, "https://acme.example.com", decoded.Profiles[0]["server"])
 }
 
+// TestListProfilesJSONShapeIsStableAcrossEmptyAndNonEmpty is the regression
+// test for the Minor defect where `auth profile list --json` emitted a
+// different object shape depending on whether any profiles existed: empty
+// returned `{"message": ..., "profiles": []}` but non-empty returned only
+// `{"profiles": [...]}`, with no "message" key at all. A caller decoding into
+// a fixed struct or diffing output between runs would see the key
+// appear/disappear based on profile count alone.
+func TestListProfilesJSONShapeIsStableAcrossEmptyAndNonEmpty(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	viper.Set("output-format", "json")
+	emptyOut := execute("auth profile list --json")
+
+	var emptyDecoded map[string]interface{}
+	if err := json.Unmarshal([]byte(emptyOut), &emptyDecoded); err != nil {
+		t.Fatalf("empty output is not JSON: %v\n%s", err, emptyOut)
+	}
+	_, hasMessageWhenEmpty := emptyDecoded["message"]
+	assert.True(t, hasMessageWhenEmpty, "expected a \"message\" key when no profiles are configured")
+
+	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, ""); err != nil {
+		t.Fatalf("saveAuthProfile: %v", err)
+	}
+	nonEmptyOut := execute("auth profile list --json")
+
+	var nonEmptyDecoded map[string]interface{}
+	if err := json.Unmarshal([]byte(nonEmptyOut), &nonEmptyDecoded); err != nil {
+		t.Fatalf("non-empty output is not JSON: %v\n%s", err, nonEmptyOut)
+	}
+	_, hasMessageWhenNonEmpty := nonEmptyDecoded["message"]
+	assert.Equal(t, hasMessageWhenEmpty, hasMessageWhenNonEmpty, "the \"message\" key must be present (or absent) consistently, regardless of profile count")
+}
+
 // Regression test for the Critical defect: cobra's `Deprecated` field prints
 // its notice through the command's *out* writer once one is set, so it used
 // to land on stdout ahead of the JSON payload and break
@@ -912,6 +947,60 @@ func TestOnBranchDefaultProfileStaysClearedAcrossRestart(t *testing.T) {
 	UseAuth("", stubAuthHandler{})
 
 	assert.Empty(t, ActiveProfileName(), "clearing an on-branch `default` profile must survive a restart")
+}
+
+// TestClearOverridingPersistedSelectionStaysClearedAcrossRestart is the
+// regression test for the Important defect where reverting only
+// `newProfileClearCommand`'s marker write (back to
+// `{"profile-selected": nil}`, dropping `"profile-decided": true`) still left
+// `go test ./cli/` green: neither TestClearedLegacyProfileStaysClearedAcrossRestart
+// nor TestOnBranchDefaultProfileStaysClearedAcrossRestart seed a
+// pre-existing `profile-selected` alongside `profiles.default`, so in both of
+// those `saveAuthProfile`'s first-profile auto-select (or the adoption path
+// itself) writes the `profile-decided` marker anyway, masking the missing
+// write in `clear`. This test seeds a legacy `profiles.default` plus a
+// *pre-existing* persisted selection of a different profile (`work`) so
+// neither auto-select path ever runs, meaning `clear` is the only command
+// that can write the marker. Reverting `clear`'s marker write reproduces the
+// live bug: the next process finds `profile-decided` unset, treats it as a
+// fresh install, and silently re-adopts `default`.
+func TestClearOverridingPersistedSelectionStaysClearedAcrossRestart(t *testing.T) {
+	home := resetAuthState(t)
+	dir := filepath.Join(home, ".test-auth")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"profiles":{"default":{"type":"","api_key":"secret"},"work":{"type":"","api_key":"secret2"}}}`
+	if err := os.WriteFile(filepath.Join(dir, "credentials.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeConfig(t, home, `{"profile-selected":"work"}`)
+
+	// First process: `work` is already selected, so adoption is a no-op and
+	// nothing but `clear` ever touches the marker.
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+	if got := ActiveProfileName(); got != "work" {
+		t.Fatalf("expected the pre-existing selection %q, got %q", "work", got)
+	}
+
+	execute("auth profile clear")
+	if got := ActiveProfileName(); got != "" {
+		t.Fatalf("expected clear to empty the active profile, got %q", got)
+	}
+
+	// Second process against the same HOME: re-run init from scratch.
+	resetAuthSingletons()
+	oldHome := os.Getenv("HOME")
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatalf("set HOME: %v", err)
+	}
+	t.Cleanup(func() { os.Setenv("HOME", oldHome) })
+
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	assert.Empty(t, ActiveProfileName(), "clearing a persisted selection over a legacy `default` must survive a restart, not silently re-adopt `default`")
 }
 
 // TestAdoptLegacyDefaultProfile tables the first-run adoption behaviour across

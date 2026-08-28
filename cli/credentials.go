@@ -221,7 +221,9 @@ func newProfileListCommand(use string, deprecationNotice string) *cobra.Command 
 				listed = append(listed, entry)
 			}
 
-			return Formatter.Format(map[string]interface{}{"profiles": listed})
+			// "message" is always present, even when empty, so the object shape
+			// does not change between the empty and non-empty cases above.
+			return Formatter.Format(map[string]interface{}{"profiles": listed, "message": ""})
 		},
 	}
 }
@@ -238,6 +240,12 @@ func newProfileUseCommand(use string) *cobra.Command {
 				return fmt.Errorf("unknown profile %q", args[0])
 			}
 
+			// `profile-decided` is written here defensively, alongside every other
+			// deliberate write to `profile-selected` (see adoptLegacyDefaultProfile
+			// and clear's own write below): it is not load-bearing for this call
+			// specifically, but dropping it from any one of these sites would let
+			// a later adoptLegacyDefaultProfile mistake "a decision was made here"
+			// for "no decision has ever been made".
 			if err := saveJSONConfig(map[string]interface{}{"profile-selected": name, "profile-decided": true}); err != nil {
 				return err
 			}
@@ -796,6 +804,12 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 
 	// A first profile nobody has chosen yet would otherwise sit unused until the
 	// next `auth profile use`.
+	//
+	// `profile-decided` is written here defensively, same as at every other
+	// deliberate write to `profile-selected` (see `use`, `clear`, and
+	// adoptLegacyDefaultProfile): dropping it from any single site would let a
+	// later adoptLegacyDefaultProfile mistake "a decision was made here" for
+	// "no decision has ever been made".
 	if !ProfileSelected() {
 		if err := saveJSONConfig(map[string]interface{}{"profile-selected": profileName, "profile-decided": true}); err != nil {
 			return fmt.Errorf("profile %q was saved but could not be selected: %w; run `auth profile use %s` or pass --profile %s", profileName, err, profileName, profileName)
@@ -1033,9 +1047,18 @@ func adoptLegacyDefaultProfile() {
 		"profile-decided":  true,
 		"profile-selected": "default",
 	}); err != nil {
-		fmt.Fprintf(Stderr, "warning: could not record profile adoption: %v\n", err)
+		// saveJSONConfig's viper.Set loop may already have run (see the comment
+		// above): when it has, `default` is authoritative for this process even
+		// though the write to disk failed, so the reversal sentence still needs
+		// to reach the user — folded into the warning rather than a separate
+		// notice, since the disk write itself did not succeed.
+		if ActiveProfileName() == "default" {
+			fmt.Fprintf(Stderr, "warning: could not record profile adoption: %v; %q is nonetheless the active authentication profile for this run, and the environment API key is not consulted while a profile is in force.\n", err, "default")
+		} else {
+			fmt.Fprintf(Stderr, "warning: could not record profile adoption: %v\n", err)
+		}
 		return
 	}
 
-	fmt.Fprintf(Stderr, "Profile %q is now the active authentication profile; the environment API key is no longer consulted while a profile is in force. Run `auth profile clear` to opt out.\n", "default")
+	fmt.Fprintf(Stderr, "Profile %q is the active authentication profile. The environment API key is not consulted while a profile is in force; run `auth profile clear` to opt out.\n", "default")
 }
