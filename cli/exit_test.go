@@ -235,3 +235,18 @@ func TestUsageBlockOnlyPrintsForMalformedInvocations(t *testing.T) {
 	assert.Equal(t, ExitUsage, code)
 	assert.Contains(t, stderr, "Usage:")
 }
+
+// The label names where the value came from: a user who set <PREFIX>_SERVER
+// should not be sent off to fix a flag they never passed.
+func TestBadServerURLNamesItsSource(t *testing.T) {
+	initExitTestCLI(t)
+	_, stderr, code := executeForExit("boom --server htp://x")
+	assert.Equal(t, ExitUsage, code)
+	assert.Contains(t, stderr, "--server:")
+
+	initExitTestCLI(t)
+	viper.Set("server", "htp://x")
+	_, stderr, code = executeForExit("boom")
+	assert.Equal(t, ExitUsage, code)
+	assert.Contains(t, stderr, "server URL:")
+}
