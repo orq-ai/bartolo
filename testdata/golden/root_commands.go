@@ -31,7 +31,7 @@ func registerRootCommands(root *cobra.Command) {
 
 				_, decoded, err := ExampleGetThing(args[0], params)
 				if err != nil {
-					return errors.Wrap(err, "error calling operation")
+					return bartolocli.OperationError(err)
 				}
 
 				if err := bartolocli.Formatter.Format(decoded); err != nil {

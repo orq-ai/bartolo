@@ -60,7 +60,7 @@ func registerwidgetsCommands(root *cobra.Command) {
 
 				_, decoded, err := ExampleCreateWidget(params, body)
 				if err != nil {
-					return errors.Wrap(err, "error calling operation")
+					return bartolocli.OperationError(err)
 				}
 
 				if err := bartolocli.Formatter.Format(decoded); err != nil {
@@ -120,7 +120,7 @@ func registerwidgetsCommands(root *cobra.Command) {
 
 				_, decoded, err := ExampleDeleteWidget(args[0], params)
 				if err != nil {
-					return errors.Wrap(err, "error calling operation")
+					return bartolocli.OperationError(err)
 				}
 
 				if err := bartolocli.Formatter.Format(decoded); err != nil {

@@ -202,7 +202,7 @@ rather than calling log.Fatal so cobra can classify them — a usage error exits
 
 	{{ if .NeedsResponse }}resp{{ else }}_{{ end }}, decoded, err := {{ .PublicPrefix }}{{ .GoName }}({{ range $x, $param := .RequiredParams }}args[{{ $x }}], {{ end }}params{{ if .CanHaveBody }}, body{{ end }})
 	if err != nil {
-		return errors.Wrap(err, "error calling operation")
+		return bartolocli.OperationError(err)
 	}
 
 	if err := bartolocli.{{ if .IsList }}FormatList{{ else }}Formatter.Format{{ end }}(decoded{{ if .IsList }}{{ range .ListFields }}, "{{ . | escapeStr }}"{{ end }}{{ end }}); err != nil {

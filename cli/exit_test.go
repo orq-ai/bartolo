@@ -192,3 +192,21 @@ func TestBodyFlagErrorIsUsageError(t *testing.T) {
 	assert.Equal(t, ExitUsage, code, "stderr: %s", stderr)
 	assert.Contains(t, stderr, "is not one of")
 }
+
+// "error calling operation" would name something that never happened when the
+// value was rejected before the request was built.
+func TestOperationErrorLeavesUsageErrorsUnlabelled(t *testing.T) {
+	usage := NewUsageError(errors.New(`--kind: "external" is not one of [internal, a2a]`))
+	if got := OperationError(usage); got.Error() != usage.Error() {
+		t.Errorf("OperationError(usage) = %q, want it unchanged", got)
+	}
+
+	failure := errors.New("connection refused")
+	if got := OperationError(failure); got.Error() != "error calling operation: connection refused" {
+		t.Errorf("OperationError(failure) = %q, want it labelled", got)
+	}
+
+	if OperationError(nil) != nil {
+		t.Error("OperationError(nil) should stay nil")
+	}
+}

@@ -75,6 +75,18 @@ func ExecuteContext(ctx context.Context) int {
 	return ExitCodeFor(err)
 }
 
+// OperationError labels an error from a generated operation. A usage error is
+// returned untouched: the value never reached the API, so "error calling
+// operation" would name something that did not happen.
+func OperationError(err error) error {
+	var usage *UsageError
+	if err == nil || errors.As(err, &usage) {
+		return err
+	}
+
+	return fmt.Errorf("error calling operation: %w", err)
+}
+
 // ExitCodeFor maps an error returned by Root.Execute to a process exit code.
 func ExitCodeFor(err error) int {
 	if err == nil {
