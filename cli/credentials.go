@@ -546,8 +546,14 @@ func isKeyRequired(handler AuthHandler, keys []string, key string) bool {
 // explicitServer returns `--server` only when passed on this invocation, so an
 // env var or persisted default is never baked into a profile.
 func explicitServer(cmd *cobra.Command) string {
-	value, _ := flagValueIfChanged(cmd, "server")
-	return value
+	if _, changed := flagValueIfChanged(cmd, "server"); !changed {
+		return ""
+	}
+
+	// Read through viper rather than the flag: the root PersistentPreRunE has
+	// already normalized the value there, so this cannot disagree with what the
+	// request will actually use.
+	return strings.TrimSpace(viper.GetString("server"))
 }
 
 // flagValueIfChanged reports whether a flag was passed on this invocation, as
@@ -731,7 +737,7 @@ func resolveProfileValue(cmd *cobra.Command, key string, args []string, i int, r
 		if !required {
 			return "", nil
 		}
-		return "", NewUsageError(fmt.Errorf("no %s provided; use --%s-file <path> or run in an interactive terminal", label, label))
+		return "", NewValueError(fmt.Errorf("no %s provided; use --%s-file <path> or run in an interactive terminal", label, label))
 	}
 	v, err := promptProfileValue(key, required)
 	if err != nil {
@@ -903,7 +909,7 @@ func ConfirmDestructive(cmd *cobra.Command, args []string) error {
 	action := strings.TrimSpace(cmd.CommandPath() + " " + strings.Join(args, " "))
 
 	if !isInteractive() {
-		return NewUsageError(fmt.Errorf("refusing to run %q without --force in a non-interactive shell", action))
+		return NewValueError(fmt.Errorf("refusing to run %q without --force in a non-interactive shell", action))
 	}
 	proceed, err := askConfirm(action)
 	if err != nil {

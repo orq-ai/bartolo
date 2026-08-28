@@ -49,6 +49,12 @@ smoke:
 		printf '==> smoke: generated delete refuses without --force\n'; \
 		set +e; "$$SMOKE_DIR/bin/example" widgets delete abc </dev/null >/dev/null 2>&1; \
 		code=$$?; set -e; \
-		test "$$code" -eq 2 || { echo "delete without --force exited $$code, want 2"; exit 1; }
+		test "$$code" -eq 2 || { echo "delete without --force exited $$code, want 2"; exit 1; }; \
+		printf '==> smoke: generated CLI refuses a value the schema rules out\n'; \
+		set +e; out=$$("$$SMOKE_DIR/bin/example" echo echo --status bogus </dev/null 2>&1); \
+		code=$$?; set -e; \
+		test "$$code" -eq 2 || { echo "a bad --status exited $$code, want 2"; exit 1; }; \
+		case "$$out" in *"is not one of"*) ;; *) echo "the error should name the rejected value, got: $$out"; exit 1;; esac; \
+		case "$$out" in *Usage:*) echo "a rejected value should not print the usage block, got: $$out"; exit 1;; esac
 
 verify: smoke test

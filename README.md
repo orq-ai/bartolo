@@ -75,6 +75,7 @@ Every generated CLI starts with a useful operator surface:
 - `--json`, `--output-format`, and `-j`/`--jmespath` make automation and projection straightforward.
 - Generated flags never shadow a global: a body field or parameter named after one (`raw`, `profile`, `output-format`, ...) is exposed as `--body-<name>` or `--param-<name>`.
 - Grouped nouns like `prompts`, `files`, or `human-evals` feel closer to a product CLI than a path translator.
+- String parameters with an `enum` list their values in `--help` and complete them in the shell.
 
 ## Schema Shaping
 
@@ -89,6 +90,7 @@ Bartolo will synthesize a decent CLI from a plain schema, but it gets significan
 | `x-cli-ignore` | Exclude a path, operation, or parameter entirely. |
 | `x-cli-list-fields` | Set the default columns for an interactive collection response. |
 | `x-cli-name` | Override a generated CLI name for an API, operation, or parameter. |
+| `x-cli-no-validate` | Set to `true` to skip the client-side `enum`/`format` check for a parameter, for a schema that is stricter than the API it describes. |
 | `x-cli-help-section` | Put a top-level command under a titled section in `--help`. |
 | `x-cli-waiters` | Add polling-based waiter commands and follow-up flags. |
 

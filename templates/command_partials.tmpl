@@ -1,0 +1,288 @@
+{{/*
+Template blocks shared between the command templates, each named with its
+consumers:
+
+  params, operationCommand  -> generated_root_commands.tmpl,
+                               generated_group_commands.tmpl
+  operationFunc             -> generated_client.tmpl
+
+They live here because the same blocks used to be copy-pasted between those
+files (and twice within generated_client.tmpl), and the copies drifted:
+body-field enums were wired up in the group template and silently missing from
+the root one, so enum validation never ran for ungrouped operations.
+
+A `define` cannot see variables from the file that calls it, so anything these
+blocks need is a field on the operation itself (see Operation.PublicPrefix).
+*/}}
+
+{{ define "params" }}
+	{{- range .OptionalParams }}
+		{{- if eq .Type "bool" }}
+			cmd.Flags().Bool("{{ .CLIName | escapeStr }}", false, "{{ .Description | escapeStr }}")
+		{{- else if eq .Type "int64" }}
+			cmd.Flags().Int64("{{ .CLIName | escapeStr }}", 0, "{{ .Description | escapeStr }}")
+		{{- else if eq .Type "float64" }}
+			cmd.Flags().Float64("{{ .CLIName | escapeStr }}", 0.0, "{{ .Description | escapeStr }}")
+		{{- else }}
+			cmd.Flags().String("{{ .CLIName | escapeStr }}", "", "{{ .Description | escapeStr }}{{ if .Enum }} (one of: {{ .Enum | joinComma | escapeStr }}){{ end }}")
+		{{- end }}
+		{{- if .Enum }}
+			_ = cmd.RegisterFlagCompletionFunc("{{ .CLIName | escapeStr }}", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+				return []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} }, cobra.ShellCompDirectiveNoFileComp
+			})
+		{{- end }}
+	{{- end }}
+
+	{{- range .Waiters }}
+		cmd.Flags().Bool("wait-{{ .Waiter.CLIName | escapeStr }}", false, "{{ .Waiter.Short | escapeStr }}")
+	{{- end }}
+
+	bartolocli.SetCustomFlags(cmd)
+
+	if cmd.Flags().HasFlags() {
+		params.BindPFlags(cmd.Flags())
+	}
+{{ end }}
+
+{{ define "bodyFields" }}
+	[]bartolocli.BodyField{
+		{{- range .BodyFields }}
+		{
+			Name: "{{ .Name | escapeStr }}",
+			FlagName: "{{ .CLIName | escapeStr }}",
+			Type: "{{ .Type | escapeStr }}",
+			Description: "{{ .Description | escapeStr }}",
+			{{- if .Enum }}
+			Enum: []string{
+				{{- range .Enum }}
+				"{{ . | escapeStr }}",
+				{{- end }}
+			},
+			{{- end }}
+		},
+		{{- end }}
+	},
+{{ end }}
+
+{{ define "operationFunc" }}
+	// {{ .PublicPrefix }}{{ .GoName }} {{ .Short }}
+	func {{ .PublicPrefix }}{{ .GoName }}({{ range .RequiredParams }}{{ .GoName }} string, {{ end }}params *viper.Viper{{ if .CanHaveBody }}, body string{{ end }}) (*gentleman.Response, {{ .ReturnType }}, error) {
+		handlerPath := "{{ .HandlerName | escapeStr }}"
+		server := bartolocli.ResolveServer()
+
+		url := server+"{{ .Path | escapeStr }}"
+
+		{{- range $param := .RequiredParams }}
+			{{- if eq $param.In "path" }}
+				if {{ $param.GoName }} == "" {
+					return nil, nil, bartolocli.NewValueError(errors.Errorf("path parameter {{ $param.Name }} cannot be empty"))
+				}
+
+				url = strings.Replace(url, "{{`{`}}{{ $param.Name | escapeStr }}{{`}`}}", neturl.PathEscape({{ $param.GoName }}), 1)
+			{{- end }}
+		{{- end }}
+
+		{{/* Required values the schema rules out. Optional ones are checked
+		below, where the check only applies when the flag was set. Both exit 2
+		without a request; x-cli-no-validate opts out a stricter-than-API schema. */}}
+		{{- range .RequiredParams }}
+			{{- if or .Enum .Format }}
+				if err := bartolocli.CheckParam("argument {{ .Name | slug | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} }); err != nil {
+					return nil, nil, err
+				}
+			{{- end }}
+		{{- end }}
+
+		req := bartolocli.Client.{{ .Method }}().URL(url)
+
+		{{ range $param := .RequiredParams }}
+			{{ if eq $param.In "query" }}
+				req = req.AddQuery("{{ .Name | escapeStr }}", {{ $param.GoName }})
+			{{ else if eq $param.In "header" }}
+				req = req.AddHeader("{{ .Name | escapeStr }}", {{ $param.GoName }})
+			{{ end }}
+		{{ end }}
+
+		{{- range .OptionalParams }}
+			{{ .GoName }} := params.Get{{ .Type | title }}("{{ .CLIName | escapeStr }}")
+			{{- /* A typed flag is sent even at its zero value; the zero-value clause covers a params built by hand. */}}
+			if bartolocli.FlagPassed(params, "{{ .CLIName | escapeStr }}") || {{ .GoName }} != {{ .TypeNil }} {
+				{{- if or .Enum .Format }}
+					{{- /* Enum and Format are string-only (see getParams), so no fmt.Sprintf — Imports.Fmt is set from `in`, not here. */}}
+					if err := bartolocli.CheckParam("--{{ .CLIName | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} }); err != nil {
+						return nil, nil, err
+					}
+				{{- end }}
+				{{- if eq .In "query" }}
+					req = req.AddQuery("{{ .Name | escapeStr }}", fmt.Sprintf("%v", {{ .GoName }}))
+				{{- else if eq .In "header" }}
+					req = req.AddHeader("{{ .Name | escapeStr }}", fmt.Sprintf("%v", {{ .GoName }}))
+				{{- end }}
+			}
+		{{- end }}
+
+		{{ if .CanHaveBody }}
+			if body != "" {
+				req = req.AddHeader("Content-Type", "{{ .MediaType | escapeStr }}").BodyString(body)
+			}
+		{{ end }}
+
+		bartolocli.HandleBefore(handlerPath, params, req)
+
+		resp, err := req.Do()
+		if err != nil {
+			return nil, nil, errors.Wrap(err, "request failed")
+		}
+
+		var decoded {{ .ReturnType }}
+
+		if resp.StatusCode < 400 {
+			if err := bartolocli.UnmarshalResponse(resp, &decoded); err != nil {
+				return nil, nil, errors.Wrap(err, "unmarshalling response failed")
+			}
+		} else {
+			return nil, nil, errors.Errorf("HTTP %d: %s", resp.StatusCode, resp.String())
+		}
+
+		after := bartolocli.HandleAfter(handlerPath, params, resp, decoded)
+		if after != nil {
+			decoded = after{{ if ne .ReturnType "interface{}" }}.({{ .ReturnType }}){{ end }}
+		}
+
+		return resp, decoded, nil
+	}
+{{ end }}
+
+{{/*
+operationRun is the body of a generated command's RunE. It returns errors
+rather than calling log.Fatal so cobra can classify them — a usage error exits
+2, an operation failure exits 1 (see cli/exit.go).
+*/}}
+{{ define "operationRun" }}
+	{{- $op := . }}
+	bartolocli.MarkPassedFlags(cmd, params)
+
+	{{- if .CanHaveBody }}
+	{{- if .BodyExample }}
+	if bartolocli.PrintBodyExample(params, "{{ .BodyExample | escapeStr }}") {
+		return nil
+	}
+	{{- end }}
+	body, err := bartolocli.GetBodyWithFlags(cmd, "{{ .MediaType | escapeStr }}", args[{{ len .RequiredParams }}:], params, {{ template "bodyFields" . }})
+	if err != nil {
+		return errors.Wrap(err, "unable to get body")
+	}
+	{{- end }}
+
+	{{- if eq .Method "Delete" }}
+	if err := bartolocli.ConfirmDestructive(cmd, args); err != nil {
+		return err
+	}
+	{{- end }}
+
+	{{ if .NeedsResponse }}resp{{ else }}_{{ end }}, decoded, err := {{ .PublicPrefix }}{{ .GoName }}({{ range $x, $param := .RequiredParams }}args[{{ $x }}], {{ end }}params{{ if .CanHaveBody }}, body{{ end }})
+	if err != nil {
+		return bartolocli.OperationError(err)
+	}
+
+	if err := bartolocli.{{ if .IsList }}FormatList{{ else }}Formatter.Format{{ end }}(decoded{{ if .IsList }}{{ range .ListFields }}, "{{ . | escapeStr }}"{{ end }}{{ end }}); err != nil {
+		return errors.Wrap(err, "formatting failed")
+	}
+
+	{{ if .Waiters }}
+		reqParams := bartolocli.RequestParams(params)
+
+		{{ range $i, $param := $op.RequiredParams }}
+			reqParams["{{ $param.Name }}"] = args[{{ $i }}]
+		{{ end }}
+
+		var actual interface{}
+	{{- end }}
+
+	{{- range .Waiters }}
+		if params.GetBool("wait-{{ .Waiter.CLIName | escapeStr }}") {
+			wparams := viper.New()
+
+			{{- range $x, $selector := .Args }}
+				actual, err = bartolocli.GetMatchValue(resp.Context, "{{ $selector | escapeStr }}", reqParams, decoded)
+				if err != nil {
+					return errors.Wrap(err, "could not get matcher value")
+				}
+
+				arg{{ $x }} := fmt.Sprintf("%v", actual)
+			{{- end }}
+
+			{{- range $id, $selector := .Params }}
+				actual, err = bartolocli.GetMatchValue(resp.Context, "{{ $selector }}", reqParams, decoded)
+				if err != nil {
+					return errors.Wrap(err, "could not get matcher value")
+				}
+
+				wparams.Set("{{ $id | escapeStr }}", actual)
+			{{- end }}
+
+			if err := {{ $op.PublicPrefix }}{{ .Waiter.GoName }}({{ range $x, $selector := .Args }}arg{{ $x }}, {{ end }}wparams); err != nil {
+				return errors.Wrap(err, "waiter error")
+			}
+		}
+	{{- end }}
+
+	return nil
+{{ end }}
+
+{{/*
+operationCommand builds and registers one operation's cobra command. `parent`
+is declared by the caller: the root command, or the group command the operation
+belongs to.
+*/}}
+{{ define "operationCommand" }}
+	params := viper.New()
+
+	var examples string
+
+	{{- $op := . }}
+	{{ range $ex := .Examples }}
+		examples += "  " + parent.CommandPath() + " {{ $op.Use }} {{ $ex }}\n"
+	{{ end }}
+	{{- if .BodyExample }}
+		examples += "  " + parent.CommandPath() + " {{ $op.Use }} --example\n"
+	{{- end }}
+
+	cmd := &cobra.Command{
+		Use: "{{ .Use | escapeStr }}",
+		{{- if .Aliases }}
+			Aliases: []string{
+				{{- range .Aliases }}
+					"{{ . | escapeStr }}",
+				{{- end }}
+			},
+		{{- end }}
+		Short:   "{{ .Short | escapeStr }}",
+		Long:    bartolocli.Markdown("{{ .Long }}"),
+		{{- if .Hidden }}
+			Hidden: {{ .Hidden }},
+		{{- end }}
+		Example: examples,
+		Args:    cobra.MinimumNArgs({{ len .RequiredParams }}),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			{{ template "operationRun" . }}
+		},
+	}
+	{{- if .HelpSection }}
+	bartolocli.HelpSection(parent, cmd, "{{ .HelpSection | escapeStr }}")
+	{{- end }}
+	parent.AddCommand(cmd)
+
+	{{- if eq .Method "Delete" }}
+	bartolocli.AddForceFlag(cmd)
+	{{- end }}
+
+	{{- if .CanHaveBody }}
+	bartolocli.AddBodyFlags(cmd)
+	{{- if .BodyExample }}
+	bartolocli.AddExampleFlag(cmd)
+	{{- end }}
+	bartolocli.AddBodyFieldFlags(cmd, {{ template "bodyFields" . }})
+	{{- end }}
+	{{ template "params" . }}
+{{ end }}
