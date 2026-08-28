@@ -33,10 +33,7 @@ func OpenapiEcho(params *viper.Viper, body string) (*gentleman.Response, map[str
 		handlerPath = "openapi " + handlerPath
 	}
 
-	server := viper.GetString("server")
-	if server == "" {
-		server = openapiServers()[viper.GetInt("server-index")]["url"]
-	}
+	server := cli.ResolveServer()
 
 	url := server + "/echo"
 

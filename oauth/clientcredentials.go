@@ -67,7 +67,9 @@ func (h *ClientCredentialsHandler) OnRequest(log *zerolog.Logger, request *http.
 			Scopes:         h.Scopes,
 		}).TokenSource(oauth2.NoContext)
 
-		return TokenHandler(source, log, request)
+		scope := credentialScope("clientcredentials", h.TokenURL, profile["client_id"], h.Scopes, params)
+
+		return TokenHandler(source, scope, log, request)
 	}
 
 	return nil

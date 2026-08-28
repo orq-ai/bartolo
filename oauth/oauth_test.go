@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"net/http"
+	"net/url"
 	"testing"
 	"time"
 
@@ -51,7 +52,7 @@ func TestTokenHandlerCachesUnderCredentialScope(t *testing.T) {
 		Expiry:      time.Now().Add(time.Hour),
 	}
 
-	assert.NoError(t, TokenHandler(stubTokenSource{token: token}, &logger, req))
+	assert.NoError(t, TokenHandler(stubTokenSource{token: token}, cli.CredentialScope(), &logger, req))
 
 	scope := cli.CredentialScope()
 	assert.Equal(t, "abc123", cli.Cache.GetString("profiles."+scope+".token"))
@@ -70,14 +71,14 @@ func TestTokenHandlerScopesDifferByResolvedServerWhenNoProfileSelected(t *testin
 	t.Setenv("TEST_OAUTH_SERVER", "https://one.example.com")
 	reqOne, err := http.NewRequest(http.MethodGet, "https://one.example.com", nil)
 	assert.NoError(t, err)
-	assert.NoError(t, TokenHandler(stubTokenSource{token: tokenOne}, &logger, reqOne))
+	assert.NoError(t, TokenHandler(stubTokenSource{token: tokenOne}, cli.CredentialScope(), &logger, reqOne))
 	scopeOne := cli.CredentialScope()
 
 	t.Setenv("TEST_OAUTH_SERVER", "https://two.example.com")
 	tokenTwo := &oauth2.Token{AccessToken: "token-two", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour)}
 	reqTwo, err := http.NewRequest(http.MethodGet, "https://two.example.com", nil)
 	assert.NoError(t, err)
-	assert.NoError(t, TokenHandler(stubTokenSource{token: tokenTwo}, &logger, reqTwo))
+	assert.NoError(t, TokenHandler(stubTokenSource{token: tokenTwo}, cli.CredentialScope(), &logger, reqTwo))
 	scopeTwo := cli.CredentialScope()
 
 	assert.NotEqual(t, scopeOne, scopeTwo)
@@ -86,5 +87,58 @@ func TestTokenHandlerScopesDifferByResolvedServerWhenNoProfileSelected(t *testin
 
 	// The second deployment's request must carry its own token, not the
 	// first deployment's cached one.
+	assert.Equal(t, "Bearer token-two", reqTwo.Header.Get("Authorization"))
+}
+
+// Two OAuth configurations can share a server and still be different
+// credentials: the collision this guards against is the same host fronting
+// two client ids, which is exactly what keying the cache on the server alone
+// could not tell apart.
+func TestCredentialScopeDiffersByClientIDOnSameServer(t *testing.T) {
+	resetOAuthState(t)
+	t.Setenv("TEST_OAUTH_SERVER", "https://one.example.com")
+
+	one := credentialScope("clientcredentials", "https://auth.example.com/token", "client-one", []string{"read"}, url.Values{})
+	two := credentialScope("clientcredentials", "https://auth.example.com/token", "client-two", []string{"read"}, url.Values{})
+
+	assert.NotEqual(t, one, two)
+}
+
+// The token endpoint, the scopes and the endpoint params each identify a
+// credential too, so each must move the cache bucket on its own.
+func TestCredentialScopeDiffersByEndpointScopesAndParams(t *testing.T) {
+	resetOAuthState(t)
+	t.Setenv("TEST_OAUTH_SERVER", "https://one.example.com")
+
+	base := credentialScope("clientcredentials", "https://auth.example.com/token", "client", []string{"read"}, url.Values{})
+
+	assert.NotEqual(t, base, credentialScope("clientcredentials", "https://other.example.com/token", "client", []string{"read"}, url.Values{}))
+	assert.NotEqual(t, base, credentialScope("clientcredentials", "https://auth.example.com/token", "client", []string{"read", "write"}, url.Values{}))
+	assert.NotEqual(t, base, credentialScope("clientcredentials", "https://auth.example.com/token", "client", []string{"read"}, url.Values{"audience": {"internal"}}))
+	assert.NotEqual(t, base, credentialScope("authcode", "https://auth.example.com/token", "client", []string{"read"}, url.Values{}))
+}
+
+// A cached token must not reach a request built from a different client id,
+// even though both resolve to the same server.
+func TestTokenHandlerDoesNotShareTokensAcrossClientIDs(t *testing.T) {
+	resetOAuthState(t)
+	t.Setenv("TEST_OAUTH_SERVER", "https://one.example.com")
+
+	logger := zerolog.Nop()
+	scopeOne := credentialScope("clientcredentials", "https://auth.example.com/token", "client-one", nil, url.Values{})
+	scopeTwo := credentialScope("clientcredentials", "https://auth.example.com/token", "client-two", nil, url.Values{})
+
+	reqOne, err := http.NewRequest(http.MethodGet, "https://one.example.com", nil)
+	assert.NoError(t, err)
+	tokenOne := &oauth2.Token{AccessToken: "token-one", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour)}
+	assert.NoError(t, TokenHandler(stubTokenSource{token: tokenOne}, scopeOne, &logger, reqOne))
+
+	reqTwo, err := http.NewRequest(http.MethodGet, "https://one.example.com", nil)
+	assert.NoError(t, err)
+	tokenTwo := &oauth2.Token{AccessToken: "token-two", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour)}
+	assert.NoError(t, TokenHandler(stubTokenSource{token: tokenTwo}, scopeTwo, &logger, reqTwo))
+
+	assert.Equal(t, "token-one", cli.Cache.GetString("profiles."+scopeOne+".token"))
+	assert.Equal(t, "token-two", cli.Cache.GetString("profiles."+scopeTwo+".token"))
 	assert.Equal(t, "Bearer token-two", reqTwo.Header.Get("Authorization"))
 }

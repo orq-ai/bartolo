@@ -990,19 +990,22 @@ func ProfileSelected() bool {
 }
 
 // CredentialScope returns a stable, non-empty namespace to key per-credential
-// caches (e.g. OAuth tokens) on. It is the active profile name when one is in
-// force. Otherwise there is no name to key on, but the environment can still
-// point at different deployments (different `<PREFIX>_SERVER`/client
-// settings), so a shared "" bucket would let one deployment's cached token
-// leak into a request meant for another. In that case it returns a short
-// digest of ResolveServer(), prefixed with "env-" so it can never collide
-// with a profile whose name happens to look like a hash.
-func CredentialScope() string {
+// caches (e.g. OAuth tokens) on. With a profile in force the profile name is
+// the whole identity: the profile holds the credential and records its auth
+// type, so nothing else can answer to that name.
+//
+// Without a profile the credential comes from the environment, which carries
+// no name, and a shared "" bucket would let one deployment's cached token
+// leak into a request meant for another. Callers pass whatever else tells
+// their credentials apart — token endpoint, client id, scopes — and it is
+// hashed together with the resolved server. Passing nothing keys on the
+// server alone, which only separates credentials that differ by server.
+func CredentialScope(identity ...string) string {
 	if name := ActiveProfileName(); name != "" {
 		return name
 	}
 
-	sum := sha256.Sum256([]byte(ResolveServer()))
+	sum := sha256.Sum256([]byte(strings.Join(append([]string{ResolveServer()}, identity...), "\x00")))
 	return "env-" + hex.EncodeToString(sum[:])[:12]
 }
 

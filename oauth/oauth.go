@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/orq-ai/bartolo/cli"
 	"github.com/rs/zerolog"
@@ -55,23 +56,27 @@ func TokenMiddleware(source oauth2.TokenSource, ctx *context.Context, h context.
 	log := ctx.Get("log").(*zerolog.Logger).
 		With().Str("profile", cli.ActiveProfileName()).Logger()
 
-	if err := TokenHandler(source, &log, ctx.Request); err != nil {
+	if err := TokenHandler(source, cli.CredentialScope(), &log, ctx.Request); err != nil {
 		h.Error(ctx, err)
 		return
 	}
 }
 
+// credentialScope keys the token cache on everything that identifies this
+// credential. With no profile in force the resolved server alone does not
+// tell two OAuth configurations apart: differing only by client id, token
+// endpoint, scopes or endpoint params is enough to make one deployment's
+// cached token useless — or dangerous — on the other.
+func credentialScope(flow, tokenURL, clientID string, scopes []string, params url.Values) string {
+	return cli.CredentialScope(flow, tokenURL, clientID, strings.Join(scopes, " "), params.Encode())
+}
+
 // TokenHandler takes a token source, gets a token, and modifies a request to
-// add the token auth as a header. Uses the CLI cache to store tokens on a per-
-// profile basis between runs.
-func TokenHandler(source oauth2.TokenSource, log *zerolog.Logger, request *http.Request) error {
+// add the token auth as a header. Uses the CLI cache to store tokens under
+// the given scope between runs; build it with credentialScope.
+func TokenHandler(source oauth2.TokenSource, scope string, log *zerolog.Logger, request *http.Request) error {
 	var cached *oauth2.Token
 
-	// Load any existing token from the CLI's cache file. CredentialScope keys
-	// on the active profile name when one is in force, or a digest of the
-	// resolved server otherwise, so two unnamed credential sets pointed at
-	// different deployments don't share a cache slot.
-	scope := cli.CredentialScope()
 	expiresKey := "profiles." + scope + ".expires"
 	typeKey := "profiles." + scope + ".type"
 	tokenKey := "profiles." + scope + ".token"
