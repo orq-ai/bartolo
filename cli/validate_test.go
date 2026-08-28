@@ -1,27 +1,22 @@
 package cli
 
 import (
-	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 func TestValidateEnum(t *testing.T) {
 	allowed := []string{"active", "archived"}
 
-	if err := ValidateEnum("--status", "active", allowed); err != nil {
-		t.Errorf("ValidateEnum(active) = %v, want nil", err)
-	}
+	assert.NoError(t, ValidateEnum("--status", "active", allowed))
 
 	// An unconstrained schema must not reject anything.
-	if err := ValidateEnum("--status", "anything", nil); err != nil {
-		t.Errorf("ValidateEnum with no enum = %v, want nil", err)
-	}
+	assert.NoError(t, ValidateEnum("--status", "anything", nil))
 
 	// Enums are case-sensitive, as JSON Schema defines them.
 	for _, value := range []string{"Active", "deleted", ""} {
-		if err := ValidateEnum("--status", value, allowed); err == nil {
-			t.Errorf("ValidateEnum(%q) = nil, want error", value)
-		}
+		assert.Errorf(t, ValidateEnum("--status", value, allowed), "ValidateEnum(%q)", value)
 	}
 }
 
@@ -31,14 +26,13 @@ func TestValidateFormat(t *testing.T) {
 		{"00000000-0000-0000-0000-000000000000", "uuid"},
 		{"https://example.com/hook", "uri"},
 		{"s3://bucket/key", "uri"},
+
 		// An unrecognized format is not evidence the value is wrong.
 		{"anything at all", "byte"},
 		{"anything at all", ""},
 	}
 	for _, c := range valid {
-		if err := ValidateFormat("--id", c.value, c.format); err != nil {
-			t.Errorf("ValidateFormat(%q, %q) = %v, want nil", c.value, c.format, err)
-		}
+		assert.NoErrorf(t, ValidateFormat("--id", c.value, c.format), "ValidateFormat(%q, %q)", c.value, c.format)
 	}
 
 	invalid := []struct{ value, format string }{
@@ -49,28 +43,19 @@ func TestValidateFormat(t *testing.T) {
 		{"example.com", "uri"},
 	}
 	for _, c := range invalid {
-		if err := ValidateFormat("--id", c.value, c.format); err == nil {
-			t.Errorf("ValidateFormat(%q, %q) = nil, want error", c.value, c.format)
-		}
+		assert.Errorf(t, ValidateFormat("--id", c.value, c.format), "ValidateFormat(%q, %q)", c.value, c.format)
 	}
 }
 
 func TestCheckParamChecksBoth(t *testing.T) {
 	err := CheckParam("--id", "cus_1", "uuid", []string{"cus_1"})
-	if err == nil {
-		t.Fatal("CheckParam = nil, want a format error even when the enum matches")
-	}
+	assert.Error(t, err, "CheckParam should report a format error even when the enum matches")
 }
 
 // A schema mismatch is the user's mistake, so it exits 2 like any other bad
 // input rather than 1, which means the request failed.
 func TestCheckParamIsUsageError(t *testing.T) {
 	var usage *UsageError
-	if err := CheckParam("--kind", "external", "", []string{"internal", "a2a"}); !errors.As(err, &usage) {
-		t.Errorf("CheckParam returned %#v, want a *UsageError", err)
-	}
-
-	if err := CheckParam("--kind", "internal", "", []string{"internal", "a2a"}); err != nil {
-		t.Errorf("CheckParam on a matching value = %v, want nil", err)
-	}
+	assert.ErrorAs(t, CheckParam("--kind", "external", "", []string{"internal", "a2a"}), &usage)
+	assert.NoError(t, CheckParam("--kind", "internal", "", []string{"internal", "a2a"}))
 }

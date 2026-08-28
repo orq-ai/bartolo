@@ -88,45 +88,30 @@ func TestServerUseCommand(t *testing.T) {
 }
 
 func TestNormalizeServerURL(t *testing.T) {
-	unchanged := []string{
-		"https://api.example.com",
-		"http://localhost:8080",
-		"https://user:pass@api.example.com",
-	}
-	for _, in := range unchanged {
-		got, added, err := NormalizeServerURL(in)
-		if err != nil || added || got != in {
-			t.Errorf("NormalizeServerURL(%q) = (%q, %v, %v), want (%q, false, nil)", in, got, added, err, in)
-		}
-	}
+	// A value that maps to itself is already canonical.
+	valid := map[string]string{
+		"https://api.example.com":           "https://api.example.com",
+		"http://localhost:8080":             "http://localhost:8080",
+		"https://user:pass@api.example.com": "https://user:pass@api.example.com",
 
-	rewritten := map[string]string{
 		// Scheme guessed for a remote host, with or without port and path.
 		"api.example.com":         "https://api.example.com",
 		"api.example.com/v2":      "https://api.example.com/v2",
 		"api.example.com:8443":    "https://api.example.com:8443",
 		"api.example.com:8443/v2": "https://api.example.com:8443/v2",
 		"//api.example.com":       "https://api.example.com",
-	}
-	// A trailing slash is dropped: server+path would otherwise produce `https://host//things`.
-	rewritten["https://api.example.com/v2/"] = "https://api.example.com/v2"
-	for in, want := range rewritten {
-		got, _, err := NormalizeServerURL(in)
-		if err != nil || got != want {
-			t.Errorf("NormalizeServerURL(%q) = (%q, _, %v), want (%q, _, nil)", in, got, err, want)
-		}
-	}
 
-	// Scheme and host are lowered to keep server URLs comparable by string equality.
-	canonicalized := map[string]string{
+		// A trailing slash is dropped: server+path would otherwise produce `https://host//things`.
+		"https://api.example.com/v2/": "https://api.example.com/v2",
+
+		// Scheme and host are lowered to keep server URLs comparable by string equality.
 		"HTTPS://API.example.com":    "https://api.example.com",
 		"https://API.example.com/V2": "https://api.example.com/V2",
 	}
-	for in, want := range canonicalized {
+	for in, want := range valid {
 		got, _, err := NormalizeServerURL(in)
-		if err != nil || got != want {
-			t.Errorf("NormalizeServerURL(%q) = (%q, _, %v), want (%q, _, nil)", in, got, err, want)
-		}
+		assert.NoErrorf(t, err, "NormalizeServerURL(%q)", in)
+		assert.Equalf(t, want, got, "NormalizeServerURL(%q)", in)
 	}
 
 	invalid := []string{
@@ -135,6 +120,7 @@ func TestNormalizeServerURL(t *testing.T) {
 		"ftp://api.example.com",
 		"https://",
 		"://x",
+
 		// Loopback must name its scheme; http is as likely as https.
 		"localhost:8080",
 		"localhost",
@@ -142,20 +128,33 @@ func TestNormalizeServerURL(t *testing.T) {
 		"dev.localhost:3000",
 		// Protocol-relative values reach the same loopback rule as bare hosts.
 		"//localhost:8080",
+
 		// A mistyped scheme is not a host: it would otherwise become `https://https:/x`.
 		"https:/api.example.com",
 		"https:api.example.com",
+
 		// A bare host with a local part would silently become URL credentials.
 		"user@api.example.com",
+
 		// server+path concatenation puts a query or fragment mid-URL.
 		"https://api.example.com/v2?token=abc",
 		"https://api.example.com/v2#frag",
 	}
 	for _, in := range invalid {
-		if got, _, err := NormalizeServerURL(in); err == nil {
-			t.Errorf("NormalizeServerURL(%q) = (%q, _, nil), want error", in, got)
-		}
+		_, _, err := NormalizeServerURL(in)
+		assert.Errorf(t, err, "NormalizeServerURL(%q)", in)
 	}
+}
+
+// The bool is what callers use to decide whether to warn that they guessed.
+func TestNormalizeServerURLReportsAGuessedScheme(t *testing.T) {
+	_, added, err := NormalizeServerURL("api.example.com")
+	assert.NoError(t, err)
+	assert.True(t, added)
+
+	_, added, err = NormalizeServerURL("https://api.example.com")
+	assert.NoError(t, err)
+	assert.False(t, added)
 }
 
 // ResolveServer normalizes on the read path, not only where a value is written:
@@ -167,6 +166,10 @@ func TestResolveServerNormalizesPersistedValues(t *testing.T) {
 		"api.example.com":          "https://api.example.com",
 		"HTTPS://API.example.com":  "https://api.example.com",
 		"https://api.example.com/": "https://api.example.com",
+
+		// Returned as-is: on the request path a transport error naming the bad
+		// URL beats an empty one.
+		"ftp://api.example.com": "ftp://api.example.com",
 	}
 
 	for raw, want := range cases {
@@ -174,17 +177,6 @@ func TestResolveServerNormalizesPersistedValues(t *testing.T) {
 		Init(&Config{AppName: "test"})
 		viper.Set("server-default", raw)
 
-		if got := ResolveServer(); got != want {
-			t.Errorf("ResolveServer() with server-default %q = %q, want %q", raw, got, want)
-		}
-	}
-
-	// Returned as-is: on the request path a transport error naming the bad URL beats an empty one.
-	viper.Reset()
-	Init(&Config{AppName: "test"})
-	viper.Set("server-default", "ftp://api.example.com")
-
-	if got := ResolveServer(); got != "ftp://api.example.com" {
-		t.Errorf("ResolveServer() with an unusable default = %q, want it returned unchanged", got)
+		assert.Equalf(t, want, ResolveServer(), "ResolveServer() with server-default %q", raw)
 	}
 }
