@@ -67,9 +67,8 @@ paths:
 
 // TestGeneratedOutputMatchesGolden pins the full rendered output of every
 // command template. The substring assertions elsewhere only catch drift someone
-// thought to assert; this catches the rest — a dropped enum, a missing
-// completion, a validation call that stopped being emitted all compile cleanly
-// and are invisible to `make smoke`.
+// thought to assert; this catches the rest. A dropped enum or a missing shell
+// completion still compiles, and smoke only runs the few paths it asserts on.
 //
 // Run `go test . -update` after an intentional template change, and read the
 // diff rather than trusting it.
