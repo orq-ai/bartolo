@@ -78,6 +78,7 @@ Pick the profile every command uses, so `--profile` does not have to be repeated
 
 ```sh
 {{ .CommandName }} auth profile use staging   # `auth profile list` marks the active one
+{{ .CommandName }} auth profile current       # see the active profile
 {{ .CommandName }} auth profile clear         # go back to no profile
 ```
 
@@ -157,7 +158,7 @@ Bartolo keeps generated and user-owned code separate:
 - Use `--help` on any command group or command to inspect flags and required args.
 - Use `help-input` when a command accepts a request body from stdin or CLI shorthand.
 - Use `server list`, `server use`, and `server set` to manage generated server defaults.
-- Use `auth profile list`, `auth profile use`, and `auth profile clear` to see, pick, and drop the active credentials profile.
+- Use `auth profile list`, `auth profile use`, `auth profile current`, and `auth profile clear` to see, pick, show, and drop the active credentials profile.
 - `make build` writes the binary to `./bin/{{ .CommandName }}`.
 - `make install-local` installs the binary to `~/.local/bin/{{ .CommandName }}` by default.
 - `make completions` writes shell completion files into `./completions/`.
