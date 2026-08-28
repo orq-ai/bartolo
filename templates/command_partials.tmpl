@@ -2,9 +2,9 @@
 Template blocks shared between the command templates, each named with its
 consumers:
 
-  params, bodyFields, operationRun  -> generated_root_commands.tmpl,
-                                       generated_group_commands.tmpl
-  operationFunc, checkParams        -> generated_client.tmpl
+  params, operationCommand  -> generated_root_commands.tmpl,
+                               generated_group_commands.tmpl
+  operationFunc             -> generated_client.tmpl
 
 They live here because the same blocks used to be copy-pasted between those
 files (and twice within generated_client.tmpl), and the copies drifted:
@@ -64,26 +64,7 @@ blocks need is a field on the operation itself (see Operation.PublicPrefix).
 	},
 {{ end }}
 
-{{/*
-checkParams refuses *required* parameter values the schema says the API will
-reject. Optional parameters are checked inline in operationFunc, since there the
-check only applies when the flag was actually set.
-
-Both emit a usage error, so a bad value exits 2 without a request. A schema
-stricter than its API opts out with x-cli-no-validate.
-*/}}
-{{ define "checkParams" }}
-	{{- range .RequiredParams }}
-		{{- if or .Enum .Format }}
-			if err := bartolocli.CheckParam("argument {{ .Name | slug | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} }); err != nil {
-				return nil, nil, err
-			}
-		{{- end }}
-	{{- end }}
-{{ end }}
-
 {{ define "operationFunc" }}
-	{{- $op := . }}
 	// {{ .PublicPrefix }}{{ .GoName }} {{ .Short }}
 	func {{ .PublicPrefix }}{{ .GoName }}({{ range .RequiredParams }}{{ .GoName }} string, {{ end }}params *viper.Viper{{ if .CanHaveBody }}, body string{{ end }}) (*gentleman.Response, {{ .ReturnType }}, error) {
 		handlerPath := "{{ .HandlerName | escapeStr }}"
@@ -96,14 +77,19 @@ stricter than its API opts out with x-cli-no-validate.
 				if {{ $param.GoName }} == "" {
 					return nil, nil, bartolocli.NewValueError(errors.Errorf("path parameter {{ $param.Name }} cannot be empty"))
 				}
+
+				url = strings.Replace(url, "{{`{`}}{{ $param.Name | escapeStr }}{{`}`}}", neturl.PathEscape({{ $param.GoName }}), 1)
 			{{- end }}
 		{{- end }}
 
-		{{ template "checkParams" $op }}
-
-		{{- range $param := .RequiredParams }}
-			{{- if eq $param.In "path" }}
-				url = strings.Replace(url, "{{`{`}}{{ $param.Name | escapeStr }}{{`}`}}", neturl.PathEscape({{ $param.GoName }}), 1)
+		{{/* Required values the schema rules out. Optional ones are checked
+		below, where the check only applies when the flag was set. Both exit 2
+		without a request; x-cli-no-validate opts out a stricter-than-API schema. */}}
+		{{- range .RequiredParams }}
+			{{- if or .Enum .Format }}
+				if err := bartolocli.CheckParam("argument {{ .Name | slug | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} }); err != nil {
+					return nil, nil, err
+				}
 			{{- end }}
 		{{- end }}
 

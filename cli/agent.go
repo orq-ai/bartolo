@@ -157,7 +157,8 @@ func isLoopback(authority string) bool {
 }
 
 // normalizeServerURLWarn is NormalizeServerURL plus the one place the
-// scheme-was-guessed warning is worded.
+// scheme-was-guessed warning is worded. It warns at most once per distinct
+// value, so the per-request ResolveServer path cannot spam stderr.
 func normalizeServerURLWarn(raw string) (string, error) {
 	normalized, added, err := NormalizeServerURL(raw)
 	if err != nil {
@@ -165,10 +166,18 @@ func normalizeServerURLWarn(raw string) (string, error) {
 	}
 
 	if added {
-		log.Warn().Msgf("No scheme detected in %q, using %s", strings.TrimSpace(raw), normalized)
+		warnServerOnce(raw, fmt.Sprintf("No scheme detected in %q, using %s", strings.TrimSpace(raw), normalized))
 	}
 
 	return normalized, nil
+}
+
+var warnedServers sync.Map
+
+func warnServerOnce(key, msg string) {
+	if _, seen := warnedServers.LoadOrStore(key, struct{}{}); !seen {
+		log.Warn().Msg(msg)
+	}
 }
 
 // ResolveServer returns the active server URL, most specific source first:
@@ -201,33 +210,22 @@ func resolveServerRaw() string {
 	return SelectedServer()
 }
 
-// normalizeResolved normalizes a server URL on the read path, warning at most
-// once per distinct value so a per-request resolve does not spam stderr.
+// normalizeResolved is normalizeServerURLWarn for the read path, where an
+// unusable value is returned as-is: a transport error naming the bad URL beats
+// an empty server.
 func normalizeResolved(raw string) string {
 	if raw == "" {
 		return raw
 	}
 
-	normalized, added, err := NormalizeServerURL(raw)
+	normalized, err := normalizeServerURLWarn(raw)
 	if err != nil {
 		warnServerOnce(raw, fmt.Sprintf("Server URL %q is not usable: %v", raw, err))
 
 		return raw
 	}
 
-	if added {
-		warnServerOnce(raw, fmt.Sprintf("No scheme detected in %q, using %s", raw, normalized))
-	}
-
 	return normalized
-}
-
-var warnedServers sync.Map
-
-func warnServerOnce(key, msg string) {
-	if _, seen := warnedServers.LoadOrStore(key, struct{}{}); !seen {
-		log.Warn().Msg(msg)
-	}
 }
 
 // SelectedServer returns the registered OpenAPI server at `server-index`,

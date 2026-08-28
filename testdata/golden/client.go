@@ -40,11 +40,11 @@ func ExampleGetThing(paramId string, params *viper.Viper) (*gentleman.Response, 
 		return nil, nil, bartolocli.NewValueError(errors.Errorf("path parameter id cannot be empty"))
 	}
 
+	url = strings.Replace(url, "{id}", neturl.PathEscape(paramId), 1)
+
 	if err := bartolocli.CheckParam("argument id", paramId, "uuid", []string{}); err != nil {
 		return nil, nil, err
 	}
-
-	url = strings.Replace(url, "{id}", neturl.PathEscape(paramId), 1)
 
 	req := bartolocli.Client.Get().URL(url)
 
