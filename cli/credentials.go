@@ -1007,6 +1007,13 @@ func InitCredentialsFile() {
 // for them once) has made a profile decision", not "this migration ran"; every
 // deliberate write of `profile-selected` sets it alongside, not just this one.
 //
+// Adoption also reverses which credential goes on the wire: previously a
+// `<PREFIX>_API_KEY` in the environment was tried before any profile, so a
+// user with both an env key and a `profiles.default` was sending the env key.
+// After adoption, `default` is authoritative and the env key is no longer
+// consulted. That reversal is silent unless we say so, so this prints a
+// one-time notice — it only ever fires here, because adoption itself is
+// one-shot.
 func adoptLegacyDefaultProfile() {
 	if viper.GetBool("profile-decided") {
 		return
@@ -1027,5 +1034,8 @@ func adoptLegacyDefaultProfile() {
 		"profile-selected": "default",
 	}); err != nil {
 		fmt.Fprintf(Stderr, "warning: could not record profile adoption: %v\n", err)
+		return
 	}
+
+	fmt.Fprintf(Stderr, "Profile %q is now the active authentication profile; the environment API key is no longer consulted while a profile is in force. Run `auth profile clear` to opt out.\n", "default")
 }

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -747,6 +748,50 @@ func TestLegacyDefaultProfileIsAdoptedOnce(t *testing.T) {
 
 	assert.Equal(t, "default", ActiveProfileName())
 	assert.Equal(t, "secret", GetProfile()["api_key"])
+}
+
+// TestLegacyAdoptionPrintsOneTimeNotice is the regression test for the
+// Important defect where an upgrade silently reversed which credential goes
+// on the wire: previously the environment key was tried before any profile,
+// so a user with both `<PREFIX>_API_KEY` set and a `profiles.default` was
+// sending the env key; after adoption, the profile is authoritative and the
+// env key is never consulted. Nothing told the user this happened. Adoption
+// must now print a one-time notice to stderr, and it must not print again on
+// a later run once the decision has already been recorded.
+func TestLegacyAdoptionPrintsOneTimeNotice(t *testing.T) {
+	home := resetAuthState(t)
+	dir := filepath.Join(home, ".test-auth")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"profiles":{"default":{"type":"","api_key":"secret"}}}`
+	if err := os.WriteFile(filepath.Join(dir, "credentials.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	errBuf := new(bytes.Buffer)
+	Stderr = errBuf
+	UseAuth("", stubAuthHandler{})
+
+	assert.Equal(t, "default", ActiveProfileName())
+	assert.Contains(t, errBuf.String(), `"default"`)
+	assert.Contains(t, errBuf.String(), "auth profile clear")
+
+	// A later process, once the decision is recorded, must stay silent.
+	resetAuthSingletons()
+	oldHome := os.Getenv("HOME")
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatalf("set HOME: %v", err)
+	}
+	t.Cleanup(func() { os.Setenv("HOME", oldHome) })
+
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	errBuf2 := new(bytes.Buffer)
+	Stderr = errBuf2
+	UseAuth("", stubAuthHandler{})
+
+	assert.Empty(t, errBuf2.String(), "adoption must warn only once")
 }
 
 func TestFirstProfileBecomesActive(t *testing.T) {
