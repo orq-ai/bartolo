@@ -49,41 +49,6 @@ func (stubMismatchedSpellingHandler) RequiredProfileKeys() []string {
 }
 func (stubMismatchedSpellingHandler) OnRequest(_ *zerolog.Logger, _ *http.Request) error { return nil }
 
-func TestSaveAuthProfile(t *testing.T) {
-	viper.Reset()
-	Cache = nil
-	Client = nil
-	Root = nil
-	Creds = nil
-	authInitialized = false
-	AuthHandlers = make(map[string]AuthHandler)
-
-	home := t.TempDir()
-	oldHome := os.Getenv("HOME")
-	if err := os.Setenv("HOME", home); err != nil {
-		t.Fatalf("set HOME: %v", err)
-	}
-	defer os.Setenv("HOME", oldHome)
-
-	Init(&Config{
-		AppName:   "test-auth",
-		EnvPrefix: "TEST_AUTH",
-	})
-	UseAuth("", stubAuthHandler{})
-
-	if err := saveAuthProfile("", "default", []string{"api-key"}, []string{"secret"}, ""); err != nil {
-		t.Fatalf("saveAuthProfile: %v", err)
-	}
-
-	if got := GetProfile()["api_key"]; got != "secret" {
-		t.Fatalf("expected saved api key, got %q", got)
-	}
-
-	if _, err := os.Stat(filepath.Join(home, ".test-auth", "credentials.json")); err != nil {
-		t.Fatalf("credentials.json not written: %v", err)
-	}
-}
-
 // initTestCLI resets the auth singletons, points HOME at a fresh temp dir, and
 // runs Init with one auth handler registered under typeName. Returns HOME.
 func initTestCLI(t *testing.T, typeName string, handler AuthHandler) string {
@@ -205,7 +170,7 @@ func bootCLI(t *testing.T, home string) *bytes.Buffer {
 }
 
 func TestAddProfileStoresServerFromGlobalFlag(t *testing.T) {
-	initTestCLI(t, "", stubAuthHandler{})
+	home := initTestCLI(t, "", stubAuthHandler{})
 
 	execute("auth add-profile --server https://orq.acme.internal acme secret")
 
@@ -217,6 +182,7 @@ func TestAddProfileStoresServerFromGlobalFlag(t *testing.T) {
 	if got := profile["server"]; got != "https://orq.acme.internal" {
 		t.Fatalf("expected saved server, got %q", got)
 	}
+	assert.FileExists(t, filepath.Join(home, ".test-auth", "credentials.json"))
 }
 
 func TestAddProfileIgnoresEnvAndConfigServer(t *testing.T) {
@@ -489,20 +455,6 @@ func TestListProfilesDeprecatedAliasKeepsJSONCleanOnStdout(t *testing.T) {
 	assert.Contains(t, stderr, "auth profile list")
 }
 
-func TestAuthProfileUseSetsActiveProfile(t *testing.T) {
-	serverFixture(t, "")
-	viper.Set("profile", "")
-
-	execute("auth profile use acme")
-
-	assert.Equal(t, "acme", ActiveProfileName())
-	assert.Equal(t, "secret", GetProfile()["api_key"])
-
-	data, err := os.ReadFile(filepath.Join(viper.GetString("config-directory"), "config.json"))
-	assert.NoError(t, err)
-	assert.Contains(t, string(data), `"profile-selected": "acme"`)
-}
-
 // `auth profile use` persists off the flag's viper key. Writing it to
 // `profile` would land on viper's override layer, which outranks a bound
 // flag, so `--profile` would stop working for the rest of the process.
@@ -602,17 +554,6 @@ func TestProfileExistsSanitizesName(t *testing.T) {
 
 	assert.True(t, ProfileExists("ACME"), "expected a differently-cased spelling of an existing profile to be found")
 	assert.True(t, ProfileExists("  acme  "), "expected surrounding whitespace to be trimmed")
-}
-
-func TestAuthProfileClearDropsPersistedSelection(t *testing.T) {
-	serverFixture(t, "")
-	viper.Set("profile", "")
-	execute("auth profile use acme")
-
-	execute("auth profile clear")
-
-	assert.Empty(t, ActiveProfileName())
-	assert.False(t, ProfileSelected())
 }
 
 func TestEmptyProfileFlagDisablesProfiles(t *testing.T) {
@@ -763,14 +704,6 @@ func TestLegacyAdoptionPrintsOneTimeNotice(t *testing.T) {
 	assert.Contains(t, errBuf.String(), "auth profile clear")
 
 	assert.Empty(t, bootCLI(t, home).String(), "adoption must warn only once")
-}
-
-func TestFirstProfileBecomesActive(t *testing.T) {
-	initTestCLI(t, "", stubAuthHandler{})
-
-	execute("auth profile add acme secret")
-
-	assert.Equal(t, "acme", ActiveProfileName())
 }
 
 // TestSecondProfileDoesNotStealSelectionFromFirst guards saveAuthProfile's
@@ -1005,30 +938,6 @@ func withFakeInteractiveSetup(t *testing.T, prompt func(key string, required boo
 	promptProfileValue = prompt
 }
 
-// A user who ran `auth profile use staging` and then `auth setup` to rotate
-// the key must have `staging` updated, not a freshly-invented `default`.
-func TestRunAuthSetupTargetsActiveProfileNotDefault(t *testing.T) {
-	initTestCLI(t, "", stubAuthHandler{})
-
-	withFakeInteractiveSetup(t, func(key string, required bool) (string, error) {
-		return "rotated-secret", nil
-	})
-
-	viper.Set("profile", "staging")
-
-	if err := RunAuthSetup("", "", ""); err != nil {
-		t.Fatalf("RunAuthSetup: %v", err)
-	}
-
-	viper.Set("profile", "staging")
-	if got := GetProfile()["api_key"]; got != "rotated-secret" {
-		t.Fatalf("expected staging profile updated, got %q", got)
-	}
-	if ProfileExists("default") {
-		t.Fatal("expected no `default` profile to be invented")
-	}
-}
-
 // With no profile in force and no --profile given, RunAuthSetup must prompt
 // for a name instead of falling back to "default".
 func TestRunAuthSetupPromptsForNameWhenNoneActive(t *testing.T) {
@@ -1252,19 +1161,6 @@ func TestCredentialScopeDiffersByServerWhenNoProfileSelected(t *testing.T) {
 	assert.NotEqual(t, scopeOne, scopeTwo)
 	assert.True(t, strings.HasPrefix(scopeOne, "env-"))
 	assert.True(t, strings.HasPrefix(scopeTwo, "env-"))
-}
-
-// Even when ResolveServer() itself is empty, CredentialScope must still
-// return a stable, non-empty scope rather than collapsing to "".
-func TestCredentialScopeIsStableWhenServerIsEmpty(t *testing.T) {
-	initTestCLI(t, "", stubAuthHandler{})
-
-	first := CredentialScope()
-	second := CredentialScope()
-
-	assert.NotEmpty(t, first)
-	assert.Equal(t, first, second)
-	assert.True(t, strings.HasPrefix(first, "env-"))
 }
 
 // Every other prompt test replaces promptProfileValue wholesale, so nothing

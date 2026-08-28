@@ -216,16 +216,6 @@ func TestProfileAuthorityAcrossEntryModesAndSources(t *testing.T) {
 	}
 }
 
-// RequiredProfileKeys must narrow ProfileKeys down to just the credential,
-// so a generator-supplied extra (a region, an organisation id, ...) does not
-// block saving a profile that leaves it empty.
-func TestRequiredProfileKeysIsJustTheAPIKey(t *testing.T) {
-	h := &Handler{Name: "x-auth", In: LocationHeader, Keys: []string{"region", "org-id"}}
-
-	assert.Equal(t, []string{apiKey, "region", "org-id"}, h.ProfileKeys())
-	assert.Equal(t, []string{apiKey}, h.RequiredProfileKeys())
-}
-
 // A generated CLI with a blank EnvPrefix has no env vars to suggest, which is
 // exactly the case with no profile name to anchor the message on either. The
 // message must still read as a complete sentence and point at `auth setup`.

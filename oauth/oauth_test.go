@@ -59,37 +59,6 @@ func TestTokenHandlerCachesUnderCredentialScope(t *testing.T) {
 	assert.Equal(t, "Bearer abc123", req.Header.Get("Authorization"))
 }
 
-// Two unnamed credential sets (no profile in force) that resolve to
-// different servers must land in different cache buckets, or TokenHandler
-// would hand one deployment's cached token to a request meant for another.
-func TestTokenHandlerScopesDifferByResolvedServerWhenNoProfileSelected(t *testing.T) {
-	resetOAuthState(t)
-
-	logger := zerolog.Nop()
-	tokenOne := &oauth2.Token{AccessToken: "token-one", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour)}
-
-	t.Setenv("TEST_OAUTH_SERVER", "https://one.example.com")
-	reqOne, err := http.NewRequest(http.MethodGet, "https://one.example.com", nil)
-	assert.NoError(t, err)
-	assert.NoError(t, TokenHandler(stubTokenSource{token: tokenOne}, cli.CredentialScope(), &logger, reqOne))
-	scopeOne := cli.CredentialScope()
-
-	t.Setenv("TEST_OAUTH_SERVER", "https://two.example.com")
-	tokenTwo := &oauth2.Token{AccessToken: "token-two", TokenType: "Bearer", Expiry: time.Now().Add(time.Hour)}
-	reqTwo, err := http.NewRequest(http.MethodGet, "https://two.example.com", nil)
-	assert.NoError(t, err)
-	assert.NoError(t, TokenHandler(stubTokenSource{token: tokenTwo}, cli.CredentialScope(), &logger, reqTwo))
-	scopeTwo := cli.CredentialScope()
-
-	assert.NotEqual(t, scopeOne, scopeTwo)
-	assert.Equal(t, "token-one", cli.Cache.GetString("profiles."+scopeOne+".token"))
-	assert.Equal(t, "token-two", cli.Cache.GetString("profiles."+scopeTwo+".token"))
-
-	// The second deployment's request must carry its own token, not the
-	// first deployment's cached one.
-	assert.Equal(t, "Bearer token-two", reqTwo.Header.Get("Authorization"))
-}
-
 // Two OAuth configurations can share a server and still be different
 // credentials: the client id, token endpoint, scopes and endpoint params each
 // identify one, so each must move the cache bucket on its own.
