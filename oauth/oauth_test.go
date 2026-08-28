@@ -91,27 +91,15 @@ func TestTokenHandlerScopesDifferByResolvedServerWhenNoProfileSelected(t *testin
 }
 
 // Two OAuth configurations can share a server and still be different
-// credentials: the collision this guards against is the same host fronting
-// two client ids, which is exactly what keying the cache on the server alone
-// could not tell apart.
-func TestCredentialScopeDiffersByClientIDOnSameServer(t *testing.T) {
-	resetOAuthState(t)
-	t.Setenv("TEST_OAUTH_SERVER", "https://one.example.com")
-
-	one := credentialScope("clientcredentials", "https://auth.example.com/token", "client-one", []string{"read"}, url.Values{})
-	two := credentialScope("clientcredentials", "https://auth.example.com/token", "client-two", []string{"read"}, url.Values{})
-
-	assert.NotEqual(t, one, two)
-}
-
-// The token endpoint, the scopes and the endpoint params each identify a
-// credential too, so each must move the cache bucket on its own.
-func TestCredentialScopeDiffersByEndpointScopesAndParams(t *testing.T) {
+// credentials: the client id, token endpoint, scopes and endpoint params each
+// identify one, so each must move the cache bucket on its own.
+func TestCredentialScopeDiffersByCredentialIdentity(t *testing.T) {
 	resetOAuthState(t)
 	t.Setenv("TEST_OAUTH_SERVER", "https://one.example.com")
 
 	base := credentialScope("clientcredentials", "https://auth.example.com/token", "client", []string{"read"}, url.Values{})
 
+	assert.NotEqual(t, base, credentialScope("clientcredentials", "https://auth.example.com/token", "other-client", []string{"read"}, url.Values{}))
 	assert.NotEqual(t, base, credentialScope("clientcredentials", "https://other.example.com/token", "client", []string{"read"}, url.Values{}))
 	assert.NotEqual(t, base, credentialScope("clientcredentials", "https://auth.example.com/token", "client", []string{"read", "write"}, url.Values{}))
 	assert.NotEqual(t, base, credentialScope("clientcredentials", "https://auth.example.com/token", "client", []string{"read"}, url.Values{"audience": {"internal"}}))

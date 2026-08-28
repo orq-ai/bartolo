@@ -413,13 +413,9 @@ func saveJSONConfig(values map[string]interface{}) error {
 	})
 }
 
-// writeFileAtomic writes filename via a temp file in the same directory,
-// created 0600 from birth (no world-readable window) so a permissive process
-// umask never leaks the content, then an os.Rename into place. write fills
-// the temp file at tmp; whatever it writes there either fully replaces
-// filename or, on any failure, is discarded, leaving an existing filename
-// untouched rather than half-written. This is CredentialsFile.Save's write
-// strategy, factored out so config.json gets the same guarantee.
+// writeFileAtomic fills a sibling temp file, created 0600 from birth so a
+// permissive umask never opens a readable window, then renames it into place.
+// A failure discards it, leaving filename untouched rather than half-written.
 func writeFileAtomic(filename string, write func(tmp string) error) error {
 	dir := filepath.Dir(filename)
 	ext := filepath.Ext(filename)

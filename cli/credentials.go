@@ -20,13 +20,8 @@ import (
 	"gopkg.in/h2non/gentleman.v2/context"
 )
 
-// Save persists the credentials file atomically via writeFileAtomic (see
-// cli.go), viper's WriteConfigAs supplying the write.
-//
-// The whole in-memory tree is written, so Save replaces the target rather than
-// merging into it. Build through NewCredentialsFile, which loads what is
-// already on disk; saving an instance that never read it drops every profile
-// the caller did not set.
+// Save atomically replaces filename with the whole in-memory tree, so an
+// instance built outside NewCredentialsFile drops every profile it never read.
 func (c *CredentialsFile) Save(filename string) error {
 	if c == nil || c.viper == nil {
 		return fmt.Errorf("credentials file is not initialized")
@@ -70,13 +65,8 @@ var profileCommand *cobra.Command
 // type).
 var authAddCommands []*cobra.Command
 
-// authAddDeprecationNotices records which of authAddCommands carries a
-// deprecation notice, keyed by the command object itself. Cobra runs the
-// selected leaf's own hooks, not a parent's, so a typed subcommand `UseAuth`
-// hangs off a deprecated parent (e.g. `auth add-profile oauth ...`) needs the
-// same PreRunE attached directly to it, or the notice never fires for that
-// spelling. See UseAuth, which consults this map when building each typed
-// child.
+// authAddDeprecationNotices marks which of authAddCommands is deprecated, so
+// UseAuth can copy the notice onto each typed child it hangs off them.
 var authAddDeprecationNotices = map[*cobra.Command]string{}
 
 // initAuth sets up basic commands and the credentials file so that new auth
@@ -140,13 +130,9 @@ func initAuth() {
 	})
 }
 
-// newAuthAddCommand registers one spelling of the add-profile command.
-// deprecationNotice, when non-empty, hides the command from help and prints
-// a deprecation notice to cli.Stderr before the command runs, rather than
-// relying on cobra's own Deprecated field: cobra prints that notice through
-// Command.OutOrStderr(), which resolves to the *out* writer once one is set
-// (as this package's test harness, and any --json caller, does), so the
-// notice used to land on stdout ahead of the payload.
+// newAuthAddCommand registers one spelling of add-profile. A deprecated one
+// prints its own notice to Stderr; cobra's Deprecated field goes through
+// OutOrStderr, which lands on stdout and corrupts `--json`.
 func newAuthAddCommand(parent *cobra.Command, use string, deprecationNotice string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   use,
@@ -161,10 +147,8 @@ func newAuthAddCommand(parent *cobra.Command, use string, deprecationNotice stri
 	return cmd
 }
 
-// deprecationPreRunE builds the PreRunE that prints notice, naming whichever
-// command cobra actually ran. It is attached to a deprecated parent as well
-// as to any typed child UseAuth hangs off it, since cobra only runs the leaf
-// command's own hooks.
+// deprecationPreRunE prints notice, naming whichever command cobra ran. Cobra
+// runs only the leaf's hooks, so every typed child needs its own copy.
 func deprecationPreRunE(notice string) func(cmd *cobra.Command, args []string) error {
 	return func(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(Stderr, "Command %q is deprecated, %s\n", cmd.Name(), notice)
@@ -199,27 +183,7 @@ func newProfileListCommand(use string, deprecationNotice string) *cobra.Command 
 				if !ok {
 					continue
 				}
-
-				typeName, _ := profile["type"].(string)
-				entry := map[string]interface{}{"name": name, "type": typeName, "active": name == active}
-
-				keys := []string{"server"}
-				if handler := AuthHandlers[typeName]; handler != nil {
-					keys = append(keys, handler.ProfileKeys()...)
-				} else {
-					keys = append(keys, sortedKeys(profile)...)
-				}
-
-				for _, key := range keys {
-					field := strings.Replace(key, "-", "_", -1)
-					if field == "type" {
-						continue
-					}
-					if value, ok := profile[field]; ok {
-						entry[field] = maskIfSecret(field, value)
-					}
-				}
-				listed = append(listed, entry)
+				listed = append(listed, profileListEntry(name, profile, active))
 			}
 
 			// "message" is always present, even when empty, so the object shape
@@ -227,6 +191,34 @@ func newProfileListCommand(use string, deprecationNotice string) *cobra.Command 
 			return Formatter.Format(map[string]interface{}{"profiles": listed, "message": ""})
 		},
 	}
+}
+
+// profileListEntry renders one stored profile for `auth profile list`. A
+// registered handler decides which fields are shown; without one every stored
+// field is listed, so a profile saved by a handler that is no longer
+// registered still shows what it holds.
+func profileListEntry(name string, profile map[string]interface{}, active string) map[string]interface{} {
+	typeName, _ := profile["type"].(string)
+	entry := map[string]interface{}{"name": name, "type": typeName, "active": name == active}
+
+	keys := []string{"server"}
+	if handler := AuthHandlers[typeName]; handler != nil {
+		keys = append(keys, handler.ProfileKeys()...)
+	} else {
+		keys = append(keys, sortedKeys(profile)...)
+	}
+
+	for _, key := range keys {
+		field := strings.Replace(key, "-", "_", -1)
+		if field == "type" {
+			continue
+		}
+		if value, ok := profile[field]; ok {
+			entry[field] = maskIfSecret(field, value)
+		}
+	}
+
+	return entry
 }
 
 func newProfileUseCommand(use string) *cobra.Command {
@@ -250,11 +242,9 @@ func newProfileUseCommand(use string) *cobra.Command {
 	}
 }
 
-// newProfileCurrentCommand is the read-side counterpart to `use`/`clear`: it
-// surfaces a profile in force that is otherwise invisible, such as a
-// `--profile ghost` or a persisted selection whose profile was later removed
-// from credentials.json — both resolve to a name, but neither shows up in
-// `auth profile list`.
+// newProfileCurrentCommand surfaces a profile in force that is otherwise
+// invisible: `--profile ghost`, or a selection whose profile was later
+// removed, resolves to a name that appears nowhere in `auth profile list`.
 func newProfileCurrentCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "current",
@@ -288,14 +278,9 @@ func newProfileClearCommand() *cobra.Command {
 	}
 }
 
-// persistProfileSelection is the only place allowed to write
-// `profile-selected`. It always writes `profile-decided": true` alongside it,
-// so the marker means "the user (or adoptLegacyDefaultProfile, standing in
-// for them once) has made a profile decision" — never "this migration ran" —
-// and adoptLegacyDefaultProfile can tell "no decision has ever been made"
-// from "a profile was chosen and now nothing is selected on purpose" (e.g.
-// after `auth profile clear`). name == "" persists the clear/delete case,
-// removing the key instead of storing an empty string.
+// persistProfileSelection is the only writer of `profile-selected`, always
+// pairing it with `profile-decided` so adoption can tell "never decided" from
+// "deliberately cleared". An empty name removes the key rather than storing "".
 func persistProfileSelection(name string) error {
 	var selected interface{} = name
 	if name == "" {
@@ -363,15 +348,7 @@ func GetAuthStatus() map[string]interface{} {
 		return status
 	}
 
-	types := make([]string, 0, len(AuthHandlers))
-	for name := range AuthHandlers {
-		if name == "" {
-			continue
-		}
-		types = append(types, name)
-	}
-	sort.Strings(types)
-	if len(types) > 0 {
+	if types := registeredAuthTypes(); len(types) > 0 {
 		status["available_types"] = types
 	}
 
@@ -398,13 +375,27 @@ func GetAuthStatus() map[string]interface{} {
 	}
 
 	status["configured"] = len(profile) > 0
+	status["source"] = "missing"
 	if len(profile) > 0 {
 		status["source"] = "profile"
-	} else {
-		status["source"] = "missing"
 	}
 
 	return status
+}
+
+// registeredAuthTypes lists the named auth types, sorted. The anonymous ""
+// type registered by single-auth CLIs has no name to report.
+func registeredAuthTypes() []string {
+	types := make([]string, 0, len(AuthHandlers))
+	for name := range AuthHandlers {
+		if name == "" {
+			continue
+		}
+		types = append(types, name)
+	}
+	sort.Strings(types)
+
+	return types
 }
 
 // UseAuth registers a new auth handler for a given type name. For backward-
@@ -427,18 +418,7 @@ func UseAuth(typeName string, handler AuthHandler) {
 		use += " [<" + strings.Replace(name, "_", "-", -1) + ">]"
 	}
 
-	run := func(cmd *cobra.Command, args []string) error {
-		values := make([]string, 0, len(keys))
-		for i, key := range keys {
-			value, err := resolveProfileValue(cmd, key, args, i, isKeyRequired(handler, keys, key))
-			if err != nil {
-				return err
-			}
-			values = append(values, value)
-		}
-
-		return saveAuthProfile(typeName, sanitizeProfileName(args[0]), keys, values, explicitServer(cmd))
-	}
+	run := addProfileRunE(typeName, handler, keys)
 
 	addKeyFileFlags := func(cmd *cobra.Command) {
 		for _, key := range keys {
@@ -465,13 +445,14 @@ func UseAuth(typeName string, handler AuthHandler) {
 			continue
 		}
 
-		// Add a new type-specific subcommand.
 		typed := &cobra.Command{
 			Use:   typeName + use,
 			Short: "Add a new named " + typeName + " authentication profile",
 			Args:  cobra.RangeArgs(1, 1+len(keys)),
 			RunE:  run,
 		}
+		// Cobra runs only the leaf's hooks, so a typed child of a deprecated
+		// spelling has to carry the notice itself.
 		if notice, deprecated := authAddDeprecationNotices[cmd]; deprecated {
 			typed.PreRunE = deprecationPreRunE(notice)
 		}
@@ -480,14 +461,26 @@ func UseAuth(typeName string, handler AuthHandler) {
 	}
 }
 
-// requireProfileValues rejects a profile that would be saved without a
-// required field. A handler narrows which of its declared keys are required
-// by implementing RequiredKeysHandler (e.g. apikey.Handler requires only its
-// credential, not generator-supplied extras like a region); a handler that
-// does not implement it keeps every declared key required. A profile missing
-// a required key is worse than no profile at all: a profile in force is
-// authoritative, so a missing key surfaces as an error rather than silently
-// falling back to whatever credential is in the environment.
+// addProfileRunE builds the RunE shared by every spelling of add-profile:
+// resolve each declared key, then save the profile under the sanitized name.
+func addProfileRunE(typeName string, handler AuthHandler, keys []string) func(*cobra.Command, []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		values := make([]string, 0, len(keys))
+		for i, key := range keys {
+			value, err := resolveProfileValue(cmd, key, args, i, isKeyRequired(handler, keys, key))
+			if err != nil {
+				return err
+			}
+			values = append(values, value)
+		}
+
+		return saveAuthProfile(typeName, sanitizeProfileName(args[0]), keys, values, explicitServer(cmd))
+	}
+}
+
+// requireProfileValues rejects a profile saved without a required field: a
+// profile in force is authoritative, so a missing key must error rather than
+// fall back to the environment. See requiredProfileKeys for what counts.
 func requireProfileValues(handler AuthHandler, keys []string, values []string) error {
 	required := requiredProfileKeys(handler, keys)
 
@@ -503,20 +496,14 @@ func requireProfileValues(handler AuthHandler, keys []string, values []string) e
 	return nil
 }
 
-// normalizeProfileKeyName canonicalizes a profile key's spelling so `-` and
-// `_` compare equal. saveAuthProfile normalises a key to underscores before
-// writing it to the profile, but a handler is free to spell the same key
-// either way across ProfileKeys and RequiredProfileKeys (in-tree handlers use
-// both: `api_key` in apikey, `client-id` in oauth). Comparing raw strings
-// would let a handler declare a key required under one spelling and optional
-// under the other, silently making its credential optional.
+// normalizeProfileKeyName makes `-` and `_` compare equal: handlers spell the
+// same key both ways (`api_key` in apikey, `client-id` in oauth), and a raw
+// comparison would make a key required under one spelling optional under the other.
 func normalizeProfileKeyName(key string) string {
 	return strings.Replace(key, "-", "_", -1)
 }
 
-// keyRequired reports whether key is among required, comparing both sides
-// through normalizeProfileKeyName so a spelling mismatch cannot make a
-// required key look optional.
+// keyRequired reports whether key is among required, normalizing both sides.
 func keyRequired(required []string, key string) bool {
 	needle := normalizeProfileKeyName(key)
 	for _, candidate := range required {
@@ -602,19 +589,9 @@ func RunAuthSetup(profileName string, preferredType string, server string) error
 		return err
 	}
 
-	profileName = sanitizeProfileName(profileName)
-	if profileName == "" {
-		profileName = ActiveProfileName()
-	}
-	if profileName == "" {
-		name, err := promptProfileValue("profile_name", true)
-		if err != nil {
-			return err
-		}
-		profileName = sanitizeProfileName(name)
-		if profileName == "" {
-			return fmt.Errorf("profile name is required")
-		}
+	profileName, err = resolveSetupProfileName(profileName)
+	if err != nil {
+		return err
 	}
 
 	keys := handler.ProfileKeys()
@@ -628,6 +605,31 @@ func RunAuthSetup(profileName string, preferredType string, server string) error
 	}
 
 	return saveAuthProfile(typeName, profileName, keys, answers, server)
+}
+
+// resolveSetupProfileName picks the profile `auth setup` writes to: the name
+// passed in, else the one in force, else a prompt. It never invents a name —
+// writing to an unchosen `default` left the profile in use holding a stale key.
+func resolveSetupProfileName(profileName string) (string, error) {
+	if name := sanitizeProfileName(profileName); name != "" {
+		return name, nil
+	}
+
+	if name := ActiveProfileName(); name != "" {
+		return name, nil
+	}
+
+	answer, err := promptProfileValue("profile_name", true)
+	if err != nil {
+		return "", err
+	}
+
+	name := sanitizeProfileName(answer)
+	if name == "" {
+		return "", fmt.Errorf("profile name is required")
+	}
+
+	return name, nil
 }
 
 func pickAuthHandler(preferredType string) (string, AuthHandler, error) {
@@ -649,13 +651,23 @@ func pickAuthHandler(preferredType string) (string, AuthHandler, error) {
 		}
 	}
 
+	name, err := promptAuthType()
+	if err != nil {
+		return "", nil, err
+	}
+
+	return name, AuthHandlers[name], nil
+}
+
+// promptAuthType asks which registered auth type to set up. The anonymous ""
+// type is offered as "default", since a menu cannot show an empty option.
+func promptAuthType() (string, error) {
 	names := make([]string, 0, len(AuthHandlers))
 	for name := range AuthHandlers {
-		display := name
-		if display == "" {
-			display = "default"
+		if name == "" {
+			name = "default"
 		}
-		names = append(names, display)
+		names = append(names, name)
 	}
 	sort.Strings(names)
 
@@ -665,15 +677,14 @@ func pickAuthHandler(preferredType string) (string, AuthHandler, error) {
 		Options: names,
 		Default: selected,
 	}, &selected, surveyStderr()); err != nil {
-		return "", nil, err
+		return "", err
 	}
 
-	resolved := selected
-	if resolved == "default" {
-		resolved = ""
+	if selected == "default" {
+		return "", nil
 	}
 
-	return resolved, AuthHandlers[resolved], nil
+	return selected, nil
 }
 
 // resolveProfileValue returns one profile key's value, tried in order:
@@ -703,9 +714,7 @@ func resolveProfileValue(cmd *cobra.Command, key string, args []string, i int, r
 
 	// 3. prompt
 	if !isInteractive() {
-		// An optional key omitted by a scripted caller is simply unset, the same
-		// as pressing Enter on its prompt would leave it. Only a required key
-		// makes the missing TTY an error.
+		// An omitted optional key is unset, as pressing Enter would leave it.
 		if !required {
 			return "", nil
 		}
@@ -768,11 +777,9 @@ var promptProfileValue = func(key string, required bool) (string, error) {
 	return value, nil
 }
 
-// looksSensitiveKey reports whether a field name holds a credential. It is the one
-// definition of "secret" in the package: it decides whether add-profile prompts without
-// echo, whether `auth list-profiles` masks the stored value, and (through
-// looksSensitiveHeader) whether `--verbose` redacts a header or query parameter.
-// Substring matching over-redacts by design — a benign field is worth masking to keep a
+// looksSensitiveKey is the package's one definition of "secret", deciding
+// echo-less prompts, masked listings and redacted headers alike. Substring
+// matching over-redacts by design: a benign field is worth masking to keep a
 // key out of a log.
 func looksSensitiveKey(key string) bool {
 	lower := strings.ToLower(key)
@@ -802,16 +809,8 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 		return err
 	}
 
-	required := requiredProfileKeys(handler, keys)
 	Creds.Set("profiles."+profileName+".type", typeName)
-	for i, key := range keys {
-		if strings.TrimSpace(values[i]) == "" && !keyRequired(required, key) {
-			// An omitted optional field (e.g. a generator-supplied region) is
-			// left out of the profile entirely, rather than stored as "".
-			continue
-		}
-		Creds.Set("profiles."+profileName+"."+strings.Replace(key, "-", "_", -1), values[i])
-	}
+	setProfileValues(profileName, requiredProfileKeys(handler, keys), keys, values)
 
 	if server = strings.TrimSpace(server); server != "" {
 		Creds.Set("profiles."+profileName+".server", server)
@@ -831,6 +830,18 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 	}
 
 	return nil
+}
+
+// setProfileValues stores one profile's fields. An omitted optional field
+// (e.g. a generator-supplied region) is left out entirely rather than stored
+// as "", so a later read cannot tell it apart from one never supplied.
+func setProfileValues(profileName string, required []string, keys []string, values []string) {
+	for i, key := range keys {
+		if strings.TrimSpace(values[i]) == "" && !keyRequired(required, key) {
+			continue
+		}
+		Creds.Set("profiles."+profileName+"."+strings.Replace(key, "-", "_", -1), values[i])
+	}
 }
 
 func hasInteractiveInput() bool {
@@ -934,9 +945,7 @@ func GetProfile() map[string]string {
 }
 
 // ProfileExists reports whether a profile of that name is configured. name is
-// run through sanitizeProfileName, the same as SelectProfile and
-// ActiveProfileName, so a differently-cased or dotted spelling of a profile
-// that does exist does not report false.
+// sanitized, as elsewhere, so a differently-cased spelling still matches.
 func ProfileExists(name string) bool {
 	name = sanitizeProfileName(name)
 	return Creds != nil && name != "" && Creds.IsSet("profiles."+name)
@@ -957,9 +966,8 @@ func ActiveProfileName() string {
 }
 
 // activeProfileNameWithSource is the one precedence chain behind
-// ActiveProfileName. `auth profile current` reports its result directly so
-// there is never a second copy of this ranking to drift from the first.
-// source is one of "flag", "env", "selected", or "none".
+// ActiveProfileName, reported as-is by `auth profile current` so no second
+// copy can drift. source is "flag", "env", "selected" or "none".
 func activeProfileNameWithSource() (name string, source string) {
 	if value, changed := flagValueIfChanged(Root, "profile"); changed {
 		return sanitizeProfileName(value), "flag"
@@ -976,10 +984,8 @@ func activeProfileNameWithSource() (name string, source string) {
 	return "", "none"
 }
 
-// SelectProfile puts a profile in force for this process. An explicit
-// `--profile` on a given command still beats it, per ActiveProfileName's
-// precedence. It is the supported way for an embedding CLI to switch profiles
-// without going through the flag.
+// SelectProfile puts a profile in force for this process — the supported way
+// for an embedder to switch profiles without the flag, which still beats it.
 func SelectProfile(name string) {
 	viper.Set("profile", sanitizeProfileName(name))
 }
@@ -990,16 +996,12 @@ func ProfileSelected() bool {
 }
 
 // CredentialScope returns a stable, non-empty namespace to key per-credential
-// caches (e.g. OAuth tokens) on. With a profile in force the profile name is
-// the whole identity: the profile holds the credential and records its auth
-// type, so nothing else can answer to that name.
+// caches (e.g. OAuth tokens) on. A profile name is the whole identity, since
+// the profile holds the credential and records its auth type.
 //
-// Without a profile the credential comes from the environment, which carries
-// no name, and a shared "" bucket would let one deployment's cached token
-// leak into a request meant for another. Callers pass whatever else tells
-// their credentials apart — token endpoint, client id, scopes — and it is
-// hashed together with the resolved server. Passing nothing keys on the
-// server alone, which only separates credentials that differ by server.
+// An environment credential has no name, so callers pass whatever tells theirs
+// apart — token endpoint, client id, scopes — to be hashed with the resolved
+// server. Passing nothing keys on the server alone.
 func CredentialScope(identity ...string) string {
 	if name := ActiveProfileName(); name != "" {
 		return name
@@ -1026,55 +1028,31 @@ func InitCredentialsFile() {
 	adoptLegacyDefaultProfile()
 }
 
-// adoptLegacyDefaultProfile records a profile named `default` as the chosen one
-// on first run. Older versions resolved that name implicitly whenever nothing
-// else was set; now that nothing is implicit, the selection has to be written
-// down once or an existing install would come up with no profile at all.
+// adoptLegacyDefaultProfile records a profile named `default` as the chosen
+// one on first run, so an install that relied on the old implicit resolution
+// does not come up with no profile at all.
 //
-// It guards on the `profile-decided` marker rather than on `profile-selected`
-// being empty, because those are not the same condition: `auth profile clear`
-// also empties `profile-selected`, and without a separate marker the next
-// process could not tell "no decision has ever been made" from "a profile was
-// chosen (by this migration, `auth profile use`, `auth profile clear`, or the
-// first-profile auto-select), and now nothing is selected on purpose" — it
-// would silently re-adopt `default` and undo the user's own `clear`. See
-// persistProfileSelection for what the marker means.
+// It guards on `profile-decided`, not on `profile-selected` being empty:
+// `auth profile clear` empties the latter too, so without the marker adoption
+// would re-run and undo the user's own clear.
 //
-// Adoption also reverses which credential goes on the wire: previously a
-// `<PREFIX>_API_KEY` in the environment was tried before any profile, so a
-// user with both an env key and a `profiles.default` was sending the env key.
-// After adoption, `default` is authoritative and the env key is no longer
-// consulted. That reversal is silent unless we say so, so this prints a
-// one-time notice — it only ever fires here, because adoption itself is
-// one-shot.
+// Adoption also reverses which credential goes on the wire — `default` becomes
+// authoritative and the environment key is no longer consulted — hence the
+// one-time notice.
 func adoptLegacyDefaultProfile() {
 	if viper.GetBool("profile-decided") {
 		return
 	}
 
-	// The `profile-selected != ""` half of this guard is now reachable only
-	// through a hand-edited config.json (one with `profile-selected` set but
-	// `profile-decided` missing or false): every code path that writes
-	// `profile-selected` goes through persistProfileSelection, which always
-	// sets `profile-decided` alongside it, so that combination cannot occur
-	// from normal use.
+	// The `profile-selected` half is reachable only through a hand-edited
+	// config.json; every writer pairs it with `profile-decided`.
 	if !Creds.IsSet("profiles.default") || viper.GetString("profile-selected") != "" {
 		return
 	}
 
-	// saveJSONConfig calls viper.Set before it writes to disk, so a write
-	// failure there still leaves the in-memory selection in place; adoption
-	// would just be retried (and warn again) on the next run. A malformed
-	// existing config.json is different: saveJSONConfig returns before that
-	// viper.Set loop runs, so in that case the in-memory selection does not
-	// land either.
 	if err := persistProfileSelection("default"); err != nil {
-		// persistProfileSelection's underlying viper.Set loop may already have
-		// run (see the comment above): when it has, `default` is authoritative
-		// for this process even though the write to disk failed, so the
-		// reversal sentence still needs to reach the user — folded into the
-		// warning rather than a separate notice, since the disk write itself
-		// did not succeed.
+		// A failed disk write can still have set the selection in memory, so
+		// the reversal warning has to reach the user in that case too.
 		if ActiveProfileName() == "default" {
 			fmt.Fprintf(Stderr, "warning: could not record profile adoption: %v; %q is nonetheless the active authentication profile for this run, and the environment API key is not consulted while a profile is in force.\n", err, "default")
 		} else {

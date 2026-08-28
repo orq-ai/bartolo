@@ -12,12 +12,9 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// executeArgsStreams runs a command against the configured CLI using an
-// explicit argument vector and returns stdout, stderr, and whatever error
-// Root.Execute() returned. An explicit vector is the real shell path: a
-// caller that needs an actual empty argument (e.g. a quoted "" on a real
-// command line) passes it as its own slice element, rather than relying on
-// how a string happens to split.
+// executeArgsStreams runs an explicit argument vector and returns stdout,
+// stderr and Root.Execute()'s error. A test needing a genuine empty argument
+// passes it as its own element rather than relying on how a string splits.
 func executeArgsStreams(args []string) (stdout string, stderr string, err error) {
 	outBuf := new(bytes.Buffer)
 	errBuf := new(bytes.Buffer)
@@ -30,14 +27,9 @@ func executeArgsStreams(args []string) (stdout string, stderr string, err error)
 	return outBuf.String(), errBuf.String(), err
 }
 
-// executeStreams is a convenience wrapper over executeArgsStreams for the
-// common case of a plain, space-separated command line with no empty
-// arguments. strings.Fields collapses repeated or trailing whitespace, so
-// unlike strings.Split it cannot manufacture an empty argument a real shell
-// would never send — a test that needs one (a genuine empty positional) must
-// call executeArgsStreams directly with an explicit slice instead. It
-// discards the execution error, same as before; a test that needs to assert
-// on it should also call executeArgsStreams directly.
+// executeStreams wraps executeArgsStreams for a plain command line, splitting
+// on strings.Fields so it cannot manufacture an empty argument the way
+// strings.Split did. It discards the execution error.
 func executeStreams(cmd string) (stdout string, stderr string) {
 	stdout, stderr, _ = executeArgsStreams(strings.Fields(cmd))
 	return stdout, stderr

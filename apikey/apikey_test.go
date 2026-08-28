@@ -132,13 +132,9 @@ func runCLI(t *testing.T, cmd string) (stdout, stderr string) {
 	return outBuf.String(), errBuf.String()
 }
 
-// putProfileInForce puts a profile named "acme" in force through one of the
-// three ways it can happen in real use: an explicit --profile flag, a
-// PREFIX_PROFILE environment variable, or the selection persisted by
-// `auth profile use`. missing indicates the profile itself was never saved,
-// which `auth profile use` refuses (it validates existence), so that case is
-// simulated the other way the task brief allows: writing the real config
-// file directly and letting viper re-read it.
+// putProfileInForce puts "acme" in force each of the three real ways: the
+// flag, PREFIX_PROFILE, or a persisted selection. A missing profile is
+// written straight to the config file, since `auth profile use` refuses one.
 func putProfileInForce(t *testing.T, via string, name string, missing bool) {
 	t.Helper()
 
@@ -165,13 +161,9 @@ func putProfileInForce(t *testing.T, via string, name string, missing bool) {
 	}
 }
 
-// TestProfileAuthorityAcrossEntryModesAndSources is the one table the task
-// brief asks for over how a profile enters force (flag / env / the
-// selection `auth profile use` persists), the profile's own state, and
-// whether an ambient PREFIX_API_KEY is present. A profile in force must be
-// authoritative for the outgoing key in every combination: it must never
-// fall back to an ambient key, whether that profile supplies one, is
-// missing one, or does not exist at all.
+// A profile in force is authoritative for the outgoing key in every
+// combination of how it entered force, its own state, and whether an ambient
+// PREFIX_API_KEY is set. It must never fall back to that ambient key.
 func TestProfileAuthorityAcrossEntryModesAndSources(t *testing.T) {
 	entryModes := []string{"flag", "env", "persisted"}
 

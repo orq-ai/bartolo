@@ -62,11 +62,9 @@ func TokenMiddleware(source oauth2.TokenSource, ctx *context.Context, h context.
 	}
 }
 
-// credentialScope keys the token cache on everything that identifies this
-// credential. With no profile in force the resolved server alone does not
-// tell two OAuth configurations apart: differing only by client id, token
-// endpoint, scopes or endpoint params is enough to make one deployment's
-// cached token useless — or dangerous — on the other.
+// credentialScope keys the token cache on everything identifying this
+// credential: with no profile in force, two OAuth configurations behind one
+// server would otherwise share a token bucket.
 func credentialScope(flow, tokenURL, clientID string, scopes []string, params url.Values) string {
 	return cli.CredentialScope(flow, tokenURL, clientID, strings.Join(scopes, " "), params.Encode())
 }

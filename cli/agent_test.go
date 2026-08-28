@@ -43,17 +43,12 @@ func TestDoctorCommand(t *testing.T) {
 		assert.Equal(t, "https://example.com", config["selected_server"])
 	})
 
-	// The persisted selection is deliberately kept off the flag-bound
-	// `profile` viper key (see ActiveProfileName), so this exercises doctor
-	// through the same rung a revert to viper.GetString("profile") would
-	// miss: `config.profile`, `config.profile_server` and
-	// `config.selected_server` must all agree with the credentials fixture.
+	// Exercises doctor through the persisted rung, which a revert to
+	// viper.GetString("profile") would miss.
 	t.Run("persisted profile selection is authoritative", func(t *testing.T) {
 		serverFixture(t, "https://profile.example.com")
-		// serverFixture leaves the profile in force via the flag-bound
-		// `profile` viper key (as cli.SelectProfile does); clear that and
-		// persist the selection the way `auth profile use` does instead, so
-		// this test can tell the two apart.
+		// serverFixture uses the flag-bound key; swap it for a persisted
+		// selection so this test can tell the two rungs apart.
 		viper.Set("profile", "")
 		execute("auth profile use acme")
 

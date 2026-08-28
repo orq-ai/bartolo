@@ -58,7 +58,14 @@ func (h *Handler) OnRequest(log *zerolog.Logger, request *http.Request) error {
 	}
 
 	log.Debug().Str("auth-source", source).Msg("Using API key authentication")
+	h.applyKey(request, key)
 
+	return nil
+}
+
+// applyKey writes the key wherever the spec says it belongs, leaving a value
+// the caller already set in place.
+func (h *Handler) applyKey(request *http.Request, key string) {
 	switch h.In {
 	case LocationHeader:
 		if request.Header.Get(h.Name) == "" {
@@ -78,8 +85,6 @@ func (h *Handler) OnRequest(log *zerolog.Logger, request *http.Request) error {
 			})
 		}
 	}
-
-	return nil
 }
 
 // AuthStatus describes whether auth is configured for `doctor`.
