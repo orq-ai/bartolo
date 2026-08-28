@@ -50,10 +50,8 @@ func GetServers() []map[string]string {
 // key together: ranking them separately is what lets a command reach one
 // deployment holding another one's credentials.
 func ResolveServer() string {
-	if FlagChanged(Root, "server") {
-		if override := strings.TrimSpace(Root.Flag("server").Value.String()); override != "" {
-			return override
-		}
+	if override, _ := flagValueIfChanged(Root, "server"); override != "" {
+		return override
 	}
 
 	if server := ProfileServer(); server != "" {

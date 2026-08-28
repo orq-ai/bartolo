@@ -197,7 +197,7 @@ func TestRequiredProfileKeysIsJustTheAPIKey(t *testing.T) {
 func TestMissingKeyErrorWithNoEnvVarsIsACompleteSentence(t *testing.T) {
 	h := &Handler{Name: "x-auth", In: LocationHeader}
 
-	err := h.missingKeyError("missing")
+	err := h.missingKeyError("", "missing")
 
 	assert.ErrorContains(t, err, "auth setup")
 	assert.NotContains(t, err.Error(), "set one of")

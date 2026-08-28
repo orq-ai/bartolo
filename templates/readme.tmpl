@@ -82,15 +82,16 @@ Pick the profile every command uses, so `--profile` does not have to be repeated
 ```
 
 There is no implicit profile. Until one is named or chosen, credentials come
-from the environment variables above, which is the usual shape in CI. The first
-profile you add is selected for you.
+from the environment variables above, which is the usual shape in CI. A profile
+you add is auto-selected whenever no profile is currently active — including
+right after `auth profile clear`, so adding another profile silently
+re-enables profiles.
 
-Once a profile is in force it pins a server and a key together and outranks
-those variables for both, so `--profile staging` cannot end up sending a key or
-reaching a host that came from the environment. The environment is read only
-for what the profile does not supply. A profile that cannot supply a key is an
-error rather than a silent fallback, and `--profile ""` turns profiles off for
-one command.
+Once a profile is in force it outranks the environment for its key, so
+`--profile staging` cannot end up sending a key that came from the
+environment — see "Server resolution order" below for how a profile's server
+fits in. A profile that cannot supply a key is an error rather than a silent
+fallback, and `--profile ""` turns profiles off for one command.
 
 Server resolution order, most specific first: an explicit `--server` flag, the
 profile's bound server, the `<PREFIX>_SERVER` environment variable (same prefix

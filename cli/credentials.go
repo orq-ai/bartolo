@@ -83,10 +83,9 @@ var authInitialized bool
 var authCommand *cobra.Command
 var profileCommand *cobra.Command
 
-// authAddCommands holds every registered spelling of the add-profile command.
-// `UseAuth` fills in the argument list and handler on each of them, because the
-// grouped `auth profile add` and the original `auth add-profile` are separate
-// cobra commands sharing one implementation.
+// authAddCommands holds every registered spelling of the add-profile command,
+// which `UseAuth` fills in (or hangs a typed subcommand off, for a named auth
+// type).
 var authAddCommands []*cobra.Command
 
 // initAuth sets up basic commands and the credentials file so that new auth
@@ -500,23 +499,25 @@ func isKeyRequired(handler AuthHandler, keys []string, key string) bool {
 // explicitServer returns `--server` only when passed on this invocation, so an
 // env var or persisted default is never baked into a profile.
 func explicitServer(cmd *cobra.Command) string {
-	if !FlagChanged(cmd, "server") {
-		return ""
-	}
-
-	return strings.TrimSpace(cmd.Flag("server").Value.String())
+	value, _ := flagValueIfChanged(cmd, "server")
+	return value
 }
 
-// FlagChanged reports whether a flag was passed on this invocation, as opposed
-// to carrying an environment, config or default value. Viper cannot answer this:
-// it merges all of those into one value.
-func FlagChanged(cmd *cobra.Command, name string) bool {
+// flagValueIfChanged reports whether a flag was passed on this invocation, as
+// opposed to carrying an environment, config or default value (viper cannot
+// answer this: it merges all of those into one value), and returns its
+// trimmed value when it was.
+func flagValueIfChanged(cmd *cobra.Command, name string) (value string, changed bool) {
 	if cmd == nil {
-		return false
+		return "", false
 	}
 
 	flag := cmd.Flag(name)
-	return flag != nil && flag.Changed
+	if flag == nil || !flag.Changed {
+		return "", false
+	}
+
+	return strings.TrimSpace(flag.Value.String()), true
 }
 
 func newAuthSetupCommand() *cobra.Command {
@@ -903,8 +904,8 @@ func ActiveProfileName() string {
 // there is never a second copy of this ranking to drift from the first.
 // source is one of "flag", "env", "selected", or "none".
 func activeProfileNameWithSource() (name string, source string) {
-	if FlagChanged(Root, "profile") {
-		return sanitizeProfileName(Root.Flag("profile").Value.String()), "flag"
+	if value, changed := flagValueIfChanged(Root, "profile"); changed {
+		return sanitizeProfileName(value), "flag"
 	}
 
 	if name := sanitizeProfileName(viper.GetString("profile")); name != "" {
@@ -918,16 +919,15 @@ func activeProfileNameWithSource() (name string, source string) {
 	return "", "none"
 }
 
-// SelectProfile puts a profile in force for this process, as `--profile` does
-// for one command. It is the supported way for an embedding CLI to switch
-// profiles without going through the flag.
+// SelectProfile puts a profile in force for this process. An explicit
+// `--profile` on a given command still beats it, per ActiveProfileName's
+// precedence. It is the supported way for an embedding CLI to switch profiles
+// without going through the flag.
 func SelectProfile(name string) {
 	viper.Set("profile", sanitizeProfileName(name))
 }
 
-// ProfileSelected reports whether a profile is in force. Such a profile is
-// authoritative: its credentials and server outrank the environment, and it is
-// an error rather than a silent fallback when it cannot supply them.
+// ProfileSelected reports whether a profile is in force.
 func ProfileSelected() bool {
 	return ActiveProfileName() != ""
 }
@@ -985,10 +985,12 @@ func adoptLegacyDefaultProfile() {
 		return
 	}
 
-	// saveJSONConfig calls viper.Set before it writes, so the in-memory
-	// selection lands regardless of whether the write to disk below succeeds;
-	// only the persisted record would be missing, and adoption would be
-	// retried (and would warn again) on the next run.
+	// saveJSONConfig calls viper.Set before it writes to disk, so a write
+	// failure there still leaves the in-memory selection in place; adoption
+	// would just be retried (and warn again) on the next run. A malformed
+	// existing config.json is different: saveJSONConfig returns before that
+	// viper.Set loop runs, so in that case the in-memory selection does not
+	// land either.
 	if err := saveJSONConfig(map[string]interface{}{
 		"profile-adopted":  true,
 		"profile-selected": "default",

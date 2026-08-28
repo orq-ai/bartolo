@@ -51,9 +51,10 @@ func (h *Handler) RequiredProfileKeys() []string {
 // OnRequest gets run before the request goes out on the wire.
 func (h *Handler) OnRequest(log *zerolog.Logger, request *http.Request) error {
 	profile := cli.GetProfile()
-	key, source := h.lookupKey(profile)
+	activeProfile := cli.ActiveProfileName()
+	key, source := h.lookupKey(profile, activeProfile)
 	if key == "" {
-		return h.missingKeyError(source)
+		return h.missingKeyError(activeProfile, source)
 	}
 
 	log.Debug().Str("auth-source", source).Msg("Using API key authentication")
@@ -83,7 +84,7 @@ func (h *Handler) OnRequest(log *zerolog.Logger, request *http.Request) error {
 
 // AuthStatus describes whether auth is configured for `doctor`.
 func (h *Handler) AuthStatus(profile map[string]string) map[string]interface{} {
-	key, source := h.lookupKey(profile)
+	key, source := h.lookupKey(profile, cli.ActiveProfileName())
 	status := map[string]interface{}{
 		"configured": key != "",
 		"source":     source,
@@ -96,7 +97,7 @@ func (h *Handler) AuthStatus(profile map[string]string) map[string]interface{} {
 	return status
 }
 
-func (h *Handler) lookupKey(profile map[string]string) (string, string) {
+func (h *Handler) lookupKey(profile map[string]string, activeProfile string) (string, string) {
 	if key := strings.TrimSpace(profile[apiKey]); key != "" {
 		return h.applyPrefix(key), "profile"
 	}
@@ -104,8 +105,8 @@ func (h *Handler) lookupKey(profile map[string]string) (string, string) {
 	// A chosen profile is authoritative. Falling back to an ambient key here is
 	// how `--profile staging` ends up sending the production key it was passed
 	// to avoid, so an incomplete or unknown profile is an error instead.
-	if cli.ProfileSelected() {
-		if cli.ProfileExists(cli.ActiveProfileName()) {
+	if activeProfile != "" {
+		if cli.ProfileExists(activeProfile) {
 			return "", "profile-incomplete"
 		}
 		return "", "profile-unknown"
@@ -120,9 +121,7 @@ func (h *Handler) lookupKey(profile map[string]string) (string, string) {
 	return "", "missing"
 }
 
-func (h *Handler) missingKeyError(source string) error {
-	name := cli.ActiveProfileName()
-
+func (h *Handler) missingKeyError(name string, source string) error {
 	switch source {
 	case "profile-unknown":
 		return fmt.Errorf("profile %q is not configured; run `auth setup --profile %s` or pick one with `auth profile list`", name, name)

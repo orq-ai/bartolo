@@ -67,10 +67,9 @@ Every generated CLI starts with a useful operator surface:
 
 - `doctor` shows config, auth source, and selected server.
 - `auth profile add --server` and `auth setup --server` bind a profile to its own API base URL, so staging, self-hosted, and local profiles resolve without repeating the flag.
-- `auth profile use` and `auth profile clear` pick and drop the active profile, so `--profile` does not have to be repeated.
-- There is no implicit profile: credentials come from the environment until one is named or chosen, and the first profile a CLI saves is selected automatically.
-- A profile in force outranks the environment for both its key and its server, so a command cannot reach one deployment holding another one's credentials. `--profile ""` turns profiles off for a single call.
-- `doctor`, `auth profile list`, and the OAuth token cache all resolve the active profile through one function, so they cannot disagree about which profile is in force.
+- `auth profile use`, `auth profile clear`, and `auth profile current` pick, drop, and show the active profile, so `--profile` does not have to be repeated.
+- There is no implicit profile: credentials come from the environment until one is named or chosen, and a profile is auto-selected whenever none is currently active — including right after `auth profile clear`.
+- A profile in force is authoritative and takes precedence over the environment; see the generated CLI's own README for the exact resolution order, which differs for the key and the server.
 - `request` provides a raw escape hatch for unmodeled endpoints.
 - `default-format` shows or persists the preferred default output format.
 - `--json`, `--output-format`, and `-j`/`--jmespath` make automation and projection straightforward.
