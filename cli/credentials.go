@@ -759,10 +759,20 @@ func readKeyFile(path string) (string, error) {
 }
 
 // promptProfileValue is a var so tests can replace the prompt. required
-// decides whether the prompt rejects an empty answer: survey.Required must
-// only apply to a key the handler in play actually requires, or an optional
-// field (e.g. a generator-supplied region) could never be skipped by
-// pressing Enter.
+// decides whether the prompt rejects an empty answer, per
+// profilePromptValidator.
+// profilePromptValidator returns the validator a profile prompt runs its
+// answer through, or nil for an optional key: survey.Required must reach only
+// keys the handler in play requires, or pressing Enter on an optional field
+// (e.g. a generator-supplied region) can never leave it unset.
+func profilePromptValidator(required bool) survey.Validator {
+	if !required {
+		return nil
+	}
+
+	return survey.Required
+}
+
 var promptProfileValue = func(key string, required bool) (string, error) {
 	message := strings.ReplaceAll(key, "_", " ")
 	message = strings.Title(message)
@@ -771,8 +781,8 @@ var promptProfileValue = func(key string, required bool) (string, error) {
 	}
 
 	opts := []survey.AskOpt{surveyStderr()}
-	if required {
-		opts = append(opts, survey.WithValidator(survey.Required))
+	if validator := profilePromptValidator(required); validator != nil {
+		opts = append(opts, survey.WithValidator(validator))
 	}
 
 	if looksSensitiveKey(key) {

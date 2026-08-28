@@ -1081,13 +1081,22 @@ func TestSaveJSONConfigRejectsMalformedExistingFile(t *testing.T) {
 
 // `auth setup` used to default its `--profile` flag to the literal string
 // "default", reinventing the implicit profile this branch removed.
-func TestAuthSetupProfileFlagDefaultsEmpty(t *testing.T) {
-	cmd := newAuthSetupCommand()
-	flag := cmd.Flags().Lookup("profile")
-	if flag == nil {
-		t.Fatal("expected a --profile flag")
-	}
-	assert.Equal(t, "", flag.DefValue)
+func TestAuthSetupWithoutProfileFlagTargetsTheActiveProfile(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	withFakeInteractiveSetup(t, func(key string, required bool) (string, error) {
+		return "rotated-secret", nil
+	})
+	viper.Set("profile", "staging")
+
+	_, _, err := executeArgsStreams([]string{"auth", "setup"})
+	assert.NoError(t, err)
+
+	viper.Set("profile", "staging")
+	assert.Equal(t, "rotated-secret", GetProfile()["api_key"], "expected `auth setup` to rotate the active profile")
+	assert.False(t, ProfileExists("default"), "a --profile default would invent a profile nobody asked for")
 }
 
 // `auth setup` registers a local `--profile` that shadows the persistent root
@@ -1487,4 +1496,18 @@ func TestCredentialScopeIsStableWhenServerIsEmpty(t *testing.T) {
 	assert.NotEmpty(t, first)
 	assert.Equal(t, first, second)
 	assert.True(t, strings.HasPrefix(first, "env-"))
+}
+
+// Every other prompt test replaces promptProfileValue wholesale, so nothing
+// reaches the validator it actually installs. This is the assertion that
+// survives that stub: an optional key must run no validator at all, or
+// survey.Required rejects the empty answer that leaves the field unset.
+func TestProfilePromptValidatorRunsOnlyForRequiredKeys(t *testing.T) {
+	assert.Nil(t, profilePromptValidator(false), "an optional key must accept an empty answer")
+
+	validator := profilePromptValidator(true)
+	if assert.NotNil(t, validator, "a required key must be validated") {
+		assert.Error(t, validator(""), "a required key must reject an empty answer")
+		assert.NoError(t, validator("secret"))
+	}
 }
