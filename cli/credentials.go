@@ -208,7 +208,7 @@ func newProfileUseCommand(use string, deprecated string) *cobra.Command {
 				return fmt.Errorf("unknown profile %q", args[0])
 			}
 
-			if err := saveJSONConfig(map[string]interface{}{"profile-default": name}); err != nil {
+			if err := saveJSONConfig(map[string]interface{}{"profile-selected": name}); err != nil {
 				return err
 			}
 
@@ -223,7 +223,7 @@ func newProfileClearCommand() *cobra.Command {
 		Short: "Stop using a persisted active profile",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := saveJSONConfig(map[string]interface{}{"profile-default": nil}); err != nil {
+			if err := saveJSONConfig(map[string]interface{}{"profile-selected": nil}); err != nil {
 				return err
 			}
 
@@ -660,7 +660,7 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 	// A first profile nobody has chosen yet would otherwise sit unused until the
 	// next `auth profile use`.
 	if !ProfileSelected() {
-		return saveJSONConfig(map[string]interface{}{"profile-default": profileName})
+		return saveJSONConfig(map[string]interface{}{"profile-selected": profileName})
 	}
 
 	return nil
@@ -789,7 +789,7 @@ func ActiveProfileName() string {
 		return name
 	}
 
-	return sanitizeProfileName(viper.GetString("profile-default"))
+	return sanitizeProfileName(viper.GetString("profile-selected"))
 }
 
 // SelectProfile puts a profile in force for this process, as `--profile` does
@@ -827,11 +827,29 @@ func InitCredentialsFile() {
 // on first run. Older versions resolved that name implicitly whenever nothing
 // else was set; now that nothing is implicit, the selection has to be written
 // down once or an existing install would come up with no profile at all.
+//
+// It guards on a dedicated `profile-adopted` marker rather than on
+// `profile-selected` being empty, because those are not the same condition:
+// `auth profile clear` also empties `profile-selected`, and without a separate
+// marker the next process could not tell "never adopted" from "adopted, then
+// deliberately cleared" and would silently re-adopt `default`.
 func adoptLegacyDefaultProfile() {
-	if !Creds.IsSet("profiles.default") || viper.GetString("profile-default") != "" {
+	if viper.GetBool("profile-adopted") {
 		return
 	}
 
-	// A failure here leaves the CLI usable with an explicit `--profile`.
-	_ = saveJSONConfig(map[string]interface{}{"profile-default": "default"})
+	if !Creds.IsSet("profiles.default") || viper.GetString("profile-selected") != "" {
+		return
+	}
+
+	// saveJSONConfig calls viper.Set before it writes, so the in-memory
+	// selection lands regardless of whether the write to disk below succeeds;
+	// only the persisted record would be missing, and adoption would be
+	// retried (and would warn again) on the next run.
+	if err := saveJSONConfig(map[string]interface{}{
+		"profile-adopted":  true,
+		"profile-selected": "default",
+	}); err != nil {
+		fmt.Fprintf(Stderr, "warning: could not record profile adoption: %v\n", err)
+	}
 }

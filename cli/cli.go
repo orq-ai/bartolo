@@ -385,7 +385,9 @@ func saveJSONConfig(values map[string]interface{}) error {
 	merged := map[string]interface{}{}
 
 	if data, err := ioutil.ReadFile(filename); err == nil {
-		_ = json.Unmarshal(data, &merged)
+		if err := json.Unmarshal(data, &merged); err != nil {
+			return fmt.Errorf("config.json is not valid JSON; fix or delete it: %w", err)
+		}
 	}
 
 	for key, value := range values {

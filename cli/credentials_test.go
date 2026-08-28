@@ -53,10 +53,10 @@ func TestSaveAuthProfile(t *testing.T) {
 	}
 }
 
-// resetAuthState clears the auth singletons and points HOME at a temp dir.
-func resetAuthState(t *testing.T) string {
-	t.Helper()
-
+// resetAuthSingletons clears the package-level auth state so a fresh Init can
+// run without tripping over flags or commands registered by a prior test (or,
+// within one test, a prior simulated process).
+func resetAuthSingletons() {
 	viper.Reset()
 	Cache = nil
 	Client = nil
@@ -68,6 +68,13 @@ func resetAuthState(t *testing.T) string {
 	authAddCommands = nil
 	AuthHandlers = make(map[string]AuthHandler)
 	registeredServers = nil
+}
+
+// resetAuthState clears the auth singletons and points HOME at a temp dir.
+func resetAuthState(t *testing.T) string {
+	t.Helper()
+
+	resetAuthSingletons()
 
 	home := t.TempDir()
 	oldHome := os.Getenv("HOME")
@@ -365,7 +372,7 @@ func TestAuthUseSetsActiveProfile(t *testing.T) {
 
 	data, err := os.ReadFile(filepath.Join(viper.GetString("config-directory"), "config.json"))
 	assert.NoError(t, err)
-	assert.Contains(t, string(data), `"profile-default": "acme"`)
+	assert.Contains(t, string(data), `"profile-selected": "acme"`)
 }
 
 // `auth use` persists off the flag's viper key. Writing it to `profile` would
@@ -454,4 +461,163 @@ func TestFirstProfileBecomesActive(t *testing.T) {
 	execute("auth profile add acme secret")
 
 	assert.Equal(t, "acme", ActiveProfileName())
+}
+
+// TestClearedLegacyProfileStaysClearedAcrossRestart is the regression test for
+// the Critical defect where `auth profile clear` was silently undone. Adoption
+// used to guard only on `profile-selected` being empty, so deleting that key
+// looked identical to never having adopted anything, and the very next process
+// re-adopted `default` and rewrote config.json.
+func TestClearedLegacyProfileStaysClearedAcrossRestart(t *testing.T) {
+	home := resetAuthState(t)
+	dir := filepath.Join(home, ".test-auth")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"profiles":{"default":{"type":"","api_key":"secret"}}}`
+	if err := os.WriteFile(filepath.Join(dir, "credentials.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// First process: adoption fires on init, then the user turns profiles off.
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+	if got := ActiveProfileName(); got != "default" {
+		t.Fatalf("expected adoption to select %q, got %q", "default", got)
+	}
+
+	execute("auth profile clear")
+	if got := ActiveProfileName(); got != "" {
+		t.Fatalf("expected clear to empty the active profile, got %q", got)
+	}
+
+	// Second process against the same HOME: re-run init from scratch.
+	resetAuthSingletons()
+	oldHome := os.Getenv("HOME")
+	if err := os.Setenv("HOME", home); err != nil {
+		t.Fatalf("set HOME: %v", err)
+	}
+	t.Cleanup(func() { os.Setenv("HOME", oldHome) })
+
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	assert.Empty(t, ActiveProfileName(), "clearing an adopted legacy profile must survive a restart")
+}
+
+// TestAdoptLegacyDefaultProfile tables the first-run adoption behaviour across
+// the states that matter: no profiles, only `default`, a non-default profile,
+// and a selection already persisted. Each entry runs init twice and asserts
+// config.json after both runs.
+func TestAdoptLegacyDefaultProfile(t *testing.T) {
+	tests := []struct {
+		name              string
+		credentialsBody   string
+		seedConfig        string
+		wantSelectedAfter string
+		wantAdoptedAfter  bool
+	}{
+		{
+			name:              "no profiles: nothing adopted",
+			credentialsBody:   `{}`,
+			wantSelectedAfter: "",
+			wantAdoptedAfter:  false,
+		},
+		{
+			name:              "profiles.default: adopted once",
+			credentialsBody:   `{"profiles":{"default":{"type":"","api_key":"secret"}}}`,
+			wantSelectedAfter: "default",
+			wantAdoptedAfter:  true,
+		},
+		{
+			name:              "profiles.work only: nothing adopted",
+			credentialsBody:   `{"profiles":{"work":{"type":"","api_key":"secret"}}}`,
+			wantSelectedAfter: "",
+			wantAdoptedAfter:  false,
+		},
+		{
+			name:              "profiles.default with a selection already persisted: not overwritten",
+			credentialsBody:   `{"profiles":{"default":{"type":"","api_key":"secret"},"work":{"type":"","api_key":"secret2"}}}`,
+			seedConfig:        `{"profile-selected":"work"}`,
+			wantSelectedAfter: "work",
+			wantAdoptedAfter:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := resetAuthState(t)
+			dir := filepath.Join(home, ".test-auth")
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "credentials.json"), []byte(tt.credentialsBody), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tt.seedConfig != "" {
+				writeConfig(t, home, tt.seedConfig)
+			}
+
+			Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+			UseAuth("", stubAuthHandler{})
+
+			assert.Equal(t, tt.wantSelectedAfter, sanitizeProfileName(viper.GetString("profile-selected")))
+			assert.Equal(t, tt.wantAdoptedAfter, viper.GetBool("profile-adopted"))
+
+			firstRun, err := os.ReadFile(filepath.Join(dir, "config.json"))
+			if tt.wantAdoptedAfter || tt.seedConfig != "" {
+				if err != nil {
+					t.Fatalf("read config.json after first init: %v", err)
+				}
+			}
+
+			// Re-run init against the same HOME: the second run must not rewrite
+			// what the first run already settled.
+			resetAuthSingletons()
+			oldHome := os.Getenv("HOME")
+			if setErr := os.Setenv("HOME", home); setErr != nil {
+				t.Fatalf("set HOME: %v", setErr)
+			}
+			t.Cleanup(func() { os.Setenv("HOME", oldHome) })
+
+			Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+			UseAuth("", stubAuthHandler{})
+
+			assert.Equal(t, tt.wantSelectedAfter, sanitizeProfileName(viper.GetString("profile-selected")))
+			assert.Equal(t, tt.wantAdoptedAfter, viper.GetBool("profile-adopted"))
+
+			secondRun, err := os.ReadFile(filepath.Join(dir, "config.json"))
+			if err == nil && firstRun != nil {
+				assert.Equal(t, string(firstRun), string(secondRun), "second init must not rewrite a settled config.json")
+			}
+		})
+	}
+}
+
+// TestSaveJSONConfigRejectsMalformedExistingFile is the regression test for
+// the Critical defect where a corrupt config.json got silently replaced by an
+// empty one, destroying every other key it held.
+func TestSaveJSONConfigRejectsMalformedExistingFile(t *testing.T) {
+	home := resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+
+	dir := filepath.Join(home, ".test-auth")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	filename := filepath.Join(dir, "config.json")
+	const malformed = `{"server-default": "https://acme.example.com",`
+	if err := os.WriteFile(filename, []byte(malformed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := saveJSONConfig(map[string]interface{}{"profile-selected": "acme"})
+
+	assert.Error(t, err)
+
+	data, readErr := os.ReadFile(filename)
+	if readErr != nil {
+		t.Fatalf("read config.json: %v", readErr)
+	}
+	assert.Equal(t, malformed, string(data), "a malformed config.json must be left untouched")
 }
