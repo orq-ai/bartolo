@@ -94,7 +94,7 @@ stricter than its API opts out with x-cli-no-validate.
 		{{- range $param := .RequiredParams }}
 			{{- if eq $param.In "path" }}
 				if {{ $param.GoName }} == "" {
-					return nil, nil, bartolocli.NewUsageError(errors.Errorf("path parameter {{ $param.Name }} cannot be empty"))
+					return nil, nil, bartolocli.NewValueError(errors.Errorf("path parameter {{ $param.Name }} cannot be empty"))
 				}
 			{{- end }}
 		{{- end }}

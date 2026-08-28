@@ -19,14 +19,27 @@ const (
 	ExitUsage = 2
 )
 
-// UsageError marks an error as bad command-line input (unknown command, bad
-// flag, wrong argument count) rather than a failed operation.
+// UsageError marks an error as bad command-line input rather than a failed
+// operation, so it exits ExitUsage. Whether the command's usage block is worth
+// printing alongside it depends on which kind of bad input it is — see the two
+// constructors.
 type UsageError struct {
-	err error
+	err       error
+	showUsage bool
 }
 
-// NewUsageError wraps err so it maps to ExitUsage.
+// NewUsageError wraps err as an invocation the CLI could not make sense of: an
+// unknown command, an unknown flag, a value cobra could not parse into the
+// flag's type. The usage block is the answer to those, so it is printed.
 func NewUsageError(err error) *UsageError {
+	return &UsageError{err: err, showUsage: true}
+}
+
+// NewValueError wraps err as a well-formed invocation carrying a value the CLI
+// will not accept — outside an enum, the wrong format, missing where it is
+// required. The usage block is noise here: the reader knows how to call the
+// command, and the message already names the offending value.
+func NewValueError(err error) *UsageError {
 	return &UsageError{err: err}
 }
 
@@ -68,7 +81,7 @@ func ExecuteContext(ctx context.Context) int {
 	}
 
 	var usage *UsageError
-	if errors.As(err, &usage) && cmd != nil {
+	if errors.As(err, &usage) && usage.showUsage && cmd != nil {
 		fmt.Fprintln(Stderr, cmd.UsageString())
 	}
 

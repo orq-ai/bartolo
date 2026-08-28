@@ -100,7 +100,7 @@ func Init(config *Config) {
 			format := viper.GetString("output-format")
 			normalized, ok := parseOutputFormat(format)
 			if !ok {
-				return NewUsageError(fmt.Errorf("--output-format: %q is not one of [%s]", format, outputFormatList()))
+				return NewValueError(fmt.Errorf("--output-format: %q is not one of [%s]", format, outputFormatList()))
 			}
 			viper.Set("output-format", normalized)
 
@@ -116,7 +116,7 @@ func Init(config *Config) {
 						label = "--server"
 					}
 
-					return NewUsageError(fmt.Errorf("%s: %w", label, err))
+					return NewValueError(fmt.Errorf("%s: %w", label, err))
 				}
 				viper.Set("server", normalized)
 			}
@@ -319,7 +319,7 @@ func newDefaultFormatCommand() *cobra.Command {
 
 			next, ok := parseOutputFormat(args[0])
 			if !ok {
-				return NewUsageError(fmt.Errorf("%q is not one of [%s]", args[0], outputFormatList()))
+				return NewValueError(fmt.Errorf("%q is not one of [%s]", args[0], outputFormatList()))
 			}
 			if err := saveJSONConfig(map[string]interface{}{"output-format": next}); err != nil {
 				return err

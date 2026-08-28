@@ -470,7 +470,7 @@ func resolveProfileValue(cmd *cobra.Command, key string, args []string, i int) (
 
 	// 3. prompt
 	if !isInteractive() {
-		return "", NewUsageError(fmt.Errorf("no %s provided; use --%s-file <path> or run in an interactive terminal", label, label))
+		return "", NewValueError(fmt.Errorf("no %s provided; use --%s-file <path> or run in an interactive terminal", label, label))
 	}
 	v, err := promptProfileValue(key)
 	if err != nil {
@@ -596,7 +596,7 @@ func ConfirmDestructive(cmd *cobra.Command, args []string) error {
 	action := strings.TrimSpace(cmd.CommandPath() + " " + strings.Join(args, " "))
 
 	if !isInteractive() {
-		return NewUsageError(fmt.Errorf("refusing to run %q without --force in a non-interactive shell", action))
+		return NewValueError(fmt.Errorf("refusing to run %q without --force in a non-interactive shell", action))
 	}
 	proceed, err := askConfirm(action)
 	if err != nil {

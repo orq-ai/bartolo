@@ -37,7 +37,7 @@ func ExampleGetThing(paramId string, params *viper.Viper) (*gentleman.Response, 
 
 	url := server + "/{id}"
 	if paramId == "" {
-		return nil, nil, bartolocli.NewUsageError(errors.Errorf("path parameter id cannot be empty"))
+		return nil, nil, bartolocli.NewValueError(errors.Errorf("path parameter id cannot be empty"))
 	}
 
 	if err := bartolocli.CheckParam("argument id", paramId, "uuid", []string{}); err != nil {
@@ -148,7 +148,7 @@ func ExampleDeleteWidget(paramId string, params *viper.Viper) (*gentleman.Respon
 
 	url := server + "/widgets/{id}"
 	if paramId == "" {
-		return nil, nil, bartolocli.NewUsageError(errors.Errorf("path parameter id cannot be empty"))
+		return nil, nil, bartolocli.NewValueError(errors.Errorf("path parameter id cannot be empty"))
 	}
 
 	url = strings.Replace(url, "{id}", neturl.PathEscape(paramId), 1)

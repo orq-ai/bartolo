@@ -62,11 +62,11 @@ func ValidateFormat(label, value, format string) error {
 // there is no runtime branch to get wrong.
 func CheckParam(label, value, format string, allowed []string) error {
 	if err := ValidateEnum(label, value, allowed); err != nil {
-		return NewUsageError(err)
+		return NewValueError(err)
 	}
 
 	if err := ValidateFormat(label, value, format); err != nil {
-		return NewUsageError(err)
+		return NewValueError(err)
 	}
 
 	return nil

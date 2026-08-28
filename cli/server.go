@@ -105,7 +105,7 @@ func newServerSetCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			url, err := normalizeServerURLWarn(args[0])
 			if err != nil {
-				return NewUsageError(err)
+				return NewValueError(err)
 			}
 
 			if err := saveJSONConfig(map[string]interface{}{

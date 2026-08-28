@@ -173,7 +173,7 @@ func GetBodyWithFlags(cmd *cobra.Command, mediaType string, args []string, param
 		// shorthand expression, a --from-file path, malformed JSON — so it is a
 		// usage error and exits 2, not an operation failure. Classifying it here
 		// rather than at each return keeps the generated caller a plain wrap.
-		return "", NewUsageError(err)
+		return "", NewValueError(err)
 	}
 
 	return body, nil

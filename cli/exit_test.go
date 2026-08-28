@@ -56,6 +56,14 @@ func initExitTestCLI(t *testing.T) {
 	Root.AddCommand(group)
 
 	Root.AddCommand(&cobra.Command{
+		Use:  "reject",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return NewValueError(errors.New(`--kind: "external" is not one of [internal, a2a]`))
+		},
+	})
+
+	Root.AddCommand(&cobra.Command{
 		Use:  "boom",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -209,4 +217,21 @@ func TestOperationErrorLeavesUsageErrorsUnlabelled(t *testing.T) {
 	if OperationError(nil) != nil {
 		t.Error("OperationError(nil) should stay nil")
 	}
+}
+
+// A value error and a malformed invocation both exit 2, but only one of them is
+// answered by the usage block: if the reader already got the command right and
+// only the value is wrong, repeating the syntax buries the message that names
+// the offending value.
+func TestUsageBlockOnlyPrintsForMalformedInvocations(t *testing.T) {
+	initExitTestCLI(t)
+	_, stderr, code := executeForExit("reject")
+	assert.Equal(t, ExitUsage, code)
+	assert.Contains(t, stderr, `--kind: "external" is not one of [internal, a2a]`)
+	assert.NotContains(t, stderr, "Usage:")
+
+	initExitTestCLI(t)
+	_, stderr, code = executeForExit("group leaf --nope")
+	assert.Equal(t, ExitUsage, code)
+	assert.Contains(t, stderr, "Usage:")
 }
