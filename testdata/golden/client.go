@@ -49,30 +49,30 @@ func ExampleGetThing(paramId string, params *viper.Viper) (*gentleman.Response, 
 	req := bartolocli.Client.Get().URL(url)
 
 	paramDetailed := params.GetBool("detailed")
-	if paramDetailed != false {
+	if bartolocli.FlagPassed(params, "detailed") || paramDetailed != false {
 		req = req.AddQuery("detailed", fmt.Sprintf("%v", paramDetailed))
 	}
 	paramLimit := params.GetInt64("limit")
-	if paramLimit != 0 {
+	if bartolocli.FlagPassed(params, "limit") || paramLimit != 0 {
 		req = req.AddQuery("limit", fmt.Sprintf("%v", paramLimit))
 	}
 	paramRatio := params.GetFloat64("ratio")
-	if paramRatio != 0.0 {
+	if bartolocli.FlagPassed(params, "ratio") || paramRatio != 0.0 {
 		req = req.AddQuery("ratio", fmt.Sprintf("%v", paramRatio))
 	}
 	paramKind := params.GetString("kind")
-	if paramKind != "" {
+	if bartolocli.FlagPassed(params, "kind") || paramKind != "" {
 		if err := bartolocli.CheckParam("--kind", paramKind, "", []string{"internal", "a2a"}); err != nil {
 			return nil, nil, err
 		}
 		req = req.AddQuery("kind", fmt.Sprintf("%v", paramKind))
 	}
 	paramCursor := params.GetString("cursor")
-	if paramCursor != "" {
+	if bartolocli.FlagPassed(params, "cursor") || paramCursor != "" {
 		req = req.AddQuery("cursor", fmt.Sprintf("%v", paramCursor))
 	}
 	paramSess := params.GetString("sess")
-	if paramSess != "" {
+	if bartolocli.FlagPassed(params, "sess") || paramSess != "" {
 		if err := bartolocli.CheckParam("--sess", paramSess, "", []string{"a", "b"}); err != nil {
 			return nil, nil, err
 		}

@@ -153,3 +153,36 @@ func TestSweepIntoOtherHelpSectionSkipsUnsectionedCLIs(t *testing.T) {
 		t.Fatalf("expected no sections for a CLI that uses none, got %d", len(root.Groups()))
 	}
 }
+
+// A flag the user typed is "set" even when its value is the zero value, so
+// `--detailed=false` against a server-side default of true reaches the API.
+// Body fields already worked this way via ApplyBodyFlags; parameters did not.
+func TestFlagPassedDistinguishesZeroValueFromUnset(t *testing.T) {
+	params := viper.New()
+	cmd := &cobra.Command{Use: "list"}
+	cmd.Flags().Bool("detailed", false, "")
+	cmd.Flags().String("kind", "", "")
+	if err := cmd.Flags().Parse([]string{"--detailed=false"}); err != nil {
+		t.Fatalf("parse flags: %v", err)
+	}
+
+	MarkPassedFlags(cmd, params)
+
+	if !FlagPassed(params, "detailed") {
+		t.Error("an explicitly-passed --detailed=false should count as passed")
+	}
+	if FlagPassed(params, "kind") {
+		t.Error("an untouched flag should not count as passed")
+	}
+
+	// The bookkeeping stays out of the settings map waiter matchers read.
+	if _, found := RequestParams(params)["__passed_flags"]; found {
+		t.Error("RequestParams should not expose the passed-flag bookkeeping")
+	}
+
+	// A params built by hand has no flags at all, so nothing is "passed" and
+	// generated code falls back to sending whatever is non-zero.
+	if FlagPassed(viper.New(), "detailed") {
+		t.Error("a hand-built params should report nothing as passed")
+	}
+}

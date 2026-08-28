@@ -36,6 +36,7 @@ func registerwidgetsCommands(root *cobra.Command) {
 			Args:    cobra.MinimumNArgs(0),
 			RunE: func(cmd *cobra.Command, args []string) error {
 
+				bartolocli.MarkPassedFlags(cmd, params)
 				if bartolocli.PrintBodyExample(params, "{\n  \"status\": \"active\"\n}") {
 					return nil
 				}
@@ -112,6 +113,7 @@ func registerwidgetsCommands(root *cobra.Command) {
 			Args:    cobra.MinimumNArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
 
+				bartolocli.MarkPassedFlags(cmd, params)
 				if err := bartolocli.ConfirmDestructive(cmd, args); err != nil {
 					return err
 				}

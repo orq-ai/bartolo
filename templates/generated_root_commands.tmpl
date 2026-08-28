@@ -46,6 +46,8 @@ func registerRootCommands(root *cobra.Command) {
 					Long:  bartolocli.Markdown("{{ .Long }}"),
 					Args:  cobra.MinimumNArgs({{ len .Operation.RequiredParams }}),
 					RunE: func(cmd *cobra.Command, args []string) error {
+						bartolocli.MarkPassedFlags(cmd, params)
+
 						if err := {{ $apiPublic }}{{ .GoName }}({{ range $x, $param := .Operation.RequiredParams }}args[{{ $x }}], {{ end }}params); err != nil {
 							return errors.Wrap(err, "error waiting")
 						}

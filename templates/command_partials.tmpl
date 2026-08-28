@@ -119,7 +119,11 @@ stricter than its API opts out with x-cli-no-validate.
 
 		{{- range .OptionalParams }}
 			{{ .GoName }} := params.Get{{ .Type | title }}("{{ .CLIName | escapeStr }}")
-			if {{ .GoName }} != {{ .TypeNil }} {
+			{{- /* A flag the user typed is sent even when its value is the zero
+			value: `--flag=false` against a server-side default of true has to
+			reach the API. The zero-value clause is the fallback for a params
+			built by hand, where no flag was passed at all. */}}
+			if bartolocli.FlagPassed(params, "{{ .CLIName | escapeStr }}") || {{ .GoName }} != {{ .TypeNil }} {
 				{{- if or .Enum .Format }}
 					{{- /* Enum and Format are only resolved for string params (see
 					getParams), so the value needs no fmt.Sprintf — which matters,
@@ -176,6 +180,8 @@ rather than calling log.Fatal so cobra can classify them — a usage error exits
 */}}
 {{ define "operationRun" }}
 	{{- $op := . }}
+	bartolocli.MarkPassedFlags(cmd, params)
+
 	{{- if .CanHaveBody }}
 	{{- if .BodyExample }}
 	if bartolocli.PrintBodyExample(params, "{{ .BodyExample | escapeStr }}") {
@@ -204,7 +210,7 @@ rather than calling log.Fatal so cobra can classify them — a usage error exits
 	}
 
 	{{ if .Waiters }}
-		reqParams := params.AllSettings()
+		reqParams := bartolocli.RequestParams(params)
 
 		{{ range $i, $param := $op.RequiredParams }}
 			reqParams["{{ $param.Name }}"] = args[{{ $i }}]

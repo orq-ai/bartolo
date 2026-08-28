@@ -27,6 +27,8 @@ func registerRootCommands(root *cobra.Command) {
 			Args:    cobra.MinimumNArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
 
+				bartolocli.MarkPassedFlags(cmd, params)
+
 				_, decoded, err := ExampleGetThing(args[0], params)
 				if err != nil {
 					return errors.Wrap(err, "error calling operation")
