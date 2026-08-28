@@ -87,7 +87,7 @@ Bartolo will synthesize a decent CLI from a plain schema, but it gets significan
 | `x-cli-ignore` | Exclude a path, operation, or parameter entirely. |
 | `x-cli-list-fields` | Set the default columns for an interactive collection response. |
 | `x-cli-name` | Override a generated CLI name for an API, operation, or parameter. |
-| `x-cli-no-validate` | Set to `true` to skip the client-side `enum`/`format` check for a parameter. |
+| `x-cli-no-validate` | Set to `true` to skip the client-side `enum`/`format` check for a parameter, for a schema that is stricter than the API it describes. |
 | `x-cli-help-section` | Put a top-level command under a titled section in `--help`. |
 | `x-cli-waiters` | Add polling-based waiter commands and follow-up flags. |
 

@@ -65,17 +65,19 @@ blocks need is a field on the operation itself (see Operation.PublicPrefix).
 {{ end }}
 
 {{/*
-checkParams warns about *required* parameter values the schema says the API
-will reject. Optional parameters are checked inline in operationFunc, since
-there the check only applies when the flag was actually set.
+checkParams refuses *required* parameter values the schema says the API will
+reject. Optional parameters are checked inline in operationFunc, since there the
+check only applies when the flag was actually set.
 
-It only warns: an OpenAPI `enum` or `format` is frequently aspirational or
-stale, so the server stays the authority on what it accepts.
+Both emit a usage error, so a bad value exits 2 without a request. A schema
+stricter than its API opts out with x-cli-no-validate.
 */}}
 {{ define "checkParams" }}
 	{{- range .RequiredParams }}
 		{{- if or .Enum .Format }}
-			bartolocli.WarnIfInvalid(bartolocli.ValidateParam("argument {{ .Name | slug | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} }))
+			if err := bartolocli.CheckParam("argument {{ .Name | slug | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} }); err != nil {
+				return nil, nil, err
+			}
 		{{- end }}
 	{{- end }}
 {{ end }}
@@ -123,7 +125,9 @@ stale, so the server stays the authority on what it accepts.
 					getParams), so the value needs no fmt.Sprintf — which matters,
 					because Imports.Fmt is set from the param's `in`, not from this
 					block. */}}
-					bartolocli.WarnIfInvalid(bartolocli.ValidateParam("--{{ .CLIName | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} }))
+					if err := bartolocli.CheckParam("--{{ .CLIName | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} }); err != nil {
+						return nil, nil, err
+					}
 				{{- end }}
 				{{- if eq .In "query" }}
 					req = req.AddQuery("{{ .Name | escapeStr }}", fmt.Sprintf("%v", {{ .GoName }}))

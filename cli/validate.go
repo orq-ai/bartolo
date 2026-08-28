@@ -5,8 +5,6 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-
-	"github.com/rs/zerolog/log"
 )
 
 // Deliberately looser than openapi3.FormatOfStringForUUIDOfRFC4122, which pins
@@ -52,23 +50,24 @@ func ValidateFormat(label, value, format string) error {
 	return nil
 }
 
-// ValidateParam applies whichever constraints the schema declared for a
-// parameter.
-func ValidateParam(label, value, format string, allowed []string) error {
+// CheckParam applies whichever constraints the schema declared for a parameter
+// and refuses the request if the value does not meet them, as a usage error so
+// the CLI exits 2. Request-body fields are checked the same way, in
+// ApplyBodyFlags.
+//
+// A schema that is stricter than the API it describes — `format: uuid` on an
+// API that issues prefixed IDs, an enum list that lags the deployed server —
+// would make this reject a request the server would have accepted. That is what
+// `x-cli-no-validate` is for: it drops the constraint at generation time, so
+// there is no runtime branch to get wrong.
+func CheckParam(label, value, format string, allowed []string) error {
 	if err := ValidateEnum(label, value, allowed); err != nil {
-		return err
+		return NewUsageError(err)
 	}
 
-	return ValidateFormat(label, value, format)
-}
-
-// WarnIfInvalid logs a schema-validation failure as a warning instead of
-// returning it. Generated commands send the request anyway: an OpenAPI `enum`
-// or `format` is often aspirational — `format: uuid` on an API that issues
-// prefixed IDs, an enum list that lags the deployed server — so the server, not
-// the schema, decides what is valid.
-func WarnIfInvalid(err error) {
-	if err != nil {
-		log.Warn().Msg(err.Error())
+	if err := ValidateFormat(label, value, format); err != nil {
+		return NewUsageError(err)
 	}
+
+	return nil
 }

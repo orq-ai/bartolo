@@ -1,0 +1,126 @@
+package main
+
+import (
+	"flag"
+	"go/format"
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+var updateGolden = flag.Bool("update", false, "rewrite the golden template renders")
+
+// goldenSpec exercises the parts of the command templates that drifted when the
+// same blocks were copy-pasted per file: a grouped and an ungrouped operation,
+// every optional parameter type, enum/format/x-cli-no-validate parameters, a
+// body with an enum field, and a destructive operation.
+const goldenSpec = `
+openapi: 3.0.3
+info:
+  title: Golden API
+  version: "1"
+servers:
+  - url: https://api.example.com
+paths:
+  /{id}:
+    get:
+      operationId: GetThing
+      summary: Get a thing
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+        - {name: detailed, in: query, schema: {type: boolean}}
+        - {name: limit, in: query, schema: {type: integer}}
+        - {name: ratio, in: query, schema: {type: number}}
+        - {name: kind, in: query, schema: {type: string, enum: [internal, a2a]}}
+        - name: cursor
+          in: query
+          x-cli-no-validate: true
+          schema: {type: string, format: uuid}
+        # in: cookie does not set Imports.Fmt, so this pins that the validation
+        # block emits no fmt.Sprintf.
+        - {name: sess, in: cookie, schema: {type: string, enum: [a, b]}}
+      responses:
+        "200": {description: ok}
+  /widgets:
+    post:
+      operationId: CreateWidget
+      summary: Create a widget
+      x-cli-help-section: Writes
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: {type: string, enum: [active, archived]}
+      responses:
+        "200": {description: ok}
+  /widgets/{id}:
+    delete:
+      operationId: DeleteWidget
+      summary: Delete a widget
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "204": {description: gone}
+`
+
+// TestGeneratedOutputMatchesGolden pins the full rendered output of every
+// command template. The substring assertions elsewhere only catch drift someone
+// thought to assert; this catches the rest — a dropped enum, a missing
+// completion, a validation call that stopped being emitted all compile cleanly
+// and are invisible to `make smoke`.
+//
+// Run `go test . -update` after an intentional template change, and read the
+// diff rather than trusting it.
+func TestGeneratedOutputMatchesGolden(t *testing.T) {
+	api := ProcessAPI("example", loadTestSpec(t, goldenSpec))
+
+	renders := map[string]string{
+		"root_commands.go": renderCommandTemplate("templates/generated_root_commands.tmpl", &CommandsTemplateData{
+			API:        api,
+			Operations: api.Operations,
+			Waiters:    api.Waiters,
+			NeedsFmt:   commandFileNeedsFmt(api.Operations),
+		}),
+		"client.go": renderCommandTemplate("templates/generated_client.tmpl", api),
+	}
+
+	for _, group := range api.Groups {
+		renders["group_"+group.CLIName+"_commands.go"] = renderCommandTemplate("templates/generated_group_commands.tmpl", &CommandsTemplateData{
+			API:        api,
+			Group:      group,
+			Operations: group.Operations,
+			NeedsFmt:   commandFileNeedsFmt(group.Operations),
+		})
+	}
+
+	for name, rendered := range renders {
+		// Golden files hold what the generator actually writes, which is the
+		// gofmt'd render — otherwise `gofmt -l .` flags testdata forever.
+		formatted, err := format.Source([]byte(rendered))
+		if err != nil {
+			t.Fatalf("%s does not parse as Go: %v", name, err)
+		}
+
+		got := string(formatted)
+		path := filepath.Join("testdata", "golden", name)
+
+		if *updateGolden {
+			if err := os.WriteFile(path, []byte(got), 0o644); err != nil {
+				t.Fatalf("write %s: %v", path, err)
+			}
+
+			continue
+		}
+
+		want, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s (run `go test . -update` to create it): %v", path, err)
+		}
+
+		if string(want) != got {
+			t.Errorf("%s differs from its golden file. If the change is intended, run `go test . -update` and review the diff.", name)
+		}
+	}
+}

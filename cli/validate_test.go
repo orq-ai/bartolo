@@ -1,6 +1,9 @@
 package cli
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestValidateEnum(t *testing.T) {
 	allowed := []string{"active", "archived"}
@@ -52,9 +55,22 @@ func TestValidateFormat(t *testing.T) {
 	}
 }
 
-func TestValidateParamChecksBoth(t *testing.T) {
-	err := ValidateParam("--id", "cus_1", "uuid", []string{"cus_1"})
+func TestCheckParamChecksBoth(t *testing.T) {
+	err := CheckParam("--id", "cus_1", "uuid", []string{"cus_1"})
 	if err == nil {
-		t.Fatal("ValidateParam = nil, want a format error even when the enum matches")
+		t.Fatal("CheckParam = nil, want a format error even when the enum matches")
+	}
+}
+
+// A schema mismatch is the user's mistake, so it exits 2 like any other bad
+// input rather than 1, which means the request failed.
+func TestCheckParamIsUsageError(t *testing.T) {
+	var usage *UsageError
+	if err := CheckParam("--kind", "external", "", []string{"internal", "a2a"}); !errors.As(err, &usage) {
+		t.Errorf("CheckParam returned %#v, want a *UsageError", err)
+	}
+
+	if err := CheckParam("--kind", "internal", "", []string{"internal", "a2a"}); err != nil {
+		t.Errorf("CheckParam on a matching value = %v, want nil", err)
 	}
 }

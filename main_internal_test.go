@@ -1321,7 +1321,7 @@ paths:
 
 	rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", doc))
 
-	if !strings.Contains(rendered, `bartolocli.ValidateParam("argument agent-id", paramAgentId, "uuid"`) {
+	if !strings.Contains(rendered, `bartolocli.CheckParam("argument agent-id", paramAgentId, "uuid"`) {
 		t.Error("required path param with format: uuid should be checked")
 	}
 
@@ -1337,7 +1337,7 @@ paths:
 	if !strings.Contains(rendered, "opaque-cursor") {
 		t.Fatalf("the opted-out param should still be a flag, got:\n%s", rendered)
 	}
-	if strings.Contains(rendered, `ValidateParam("--opaque-cursor"`) {
+	if strings.Contains(rendered, `CheckParam("--opaque-cursor"`) {
 		t.Error("x-cli-no-validate should suppress the check")
 	}
 }
@@ -1366,11 +1366,11 @@ paths:
           description: ok
 `
 
-	if rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(spec, "false")))); !strings.Contains(rendered, `ValidateParam("--cursor"`) {
+	if rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(spec, "false")))); !strings.Contains(rendered, `CheckParam("--cursor"`) {
 		t.Errorf("x-cli-no-validate: false should leave the check in place, got:\n%s", rendered)
 	}
 
-	if rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(spec, "true")))); strings.Contains(rendered, `ValidateParam("--cursor"`) {
+	if rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(spec, "true")))); strings.Contains(rendered, `CheckParam("--cursor"`) {
 		t.Errorf("x-cli-no-validate: true should suppress the check, got:\n%s", rendered)
 	}
 }
