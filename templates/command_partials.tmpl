@@ -119,16 +119,10 @@ stricter than its API opts out with x-cli-no-validate.
 
 		{{- range .OptionalParams }}
 			{{ .GoName }} := params.Get{{ .Type | title }}("{{ .CLIName | escapeStr }}")
-			{{- /* A flag the user typed is sent even when its value is the zero
-			value: `--flag=false` against a server-side default of true has to
-			reach the API. The zero-value clause is the fallback for a params
-			built by hand, where no flag was passed at all. */}}
+			{{- /* A typed flag is sent even at its zero value; the zero-value clause covers a params built by hand. */}}
 			if bartolocli.FlagPassed(params, "{{ .CLIName | escapeStr }}") || {{ .GoName }} != {{ .TypeNil }} {
 				{{- if or .Enum .Format }}
-					{{- /* Enum and Format are only resolved for string params (see
-					getParams), so the value needs no fmt.Sprintf — which matters,
-					because Imports.Fmt is set from the param's `in`, not from this
-					block. */}}
+					{{- /* Enum and Format are string-only (see getParams), so no fmt.Sprintf — Imports.Fmt is set from `in`, not here. */}}
 					if err := bartolocli.CheckParam("--{{ .CLIName | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} }); err != nil {
 						return nil, nil, err
 					}

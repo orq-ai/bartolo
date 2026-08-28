@@ -72,31 +72,37 @@ func NormalizeServerURL(raw string) (string, bool, error) {
 		return "", false, fmt.Errorf("server URL %q is not a valid URL: %w", trimmed, err)
 	}
 
-	switch {
-	case !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https"):
-		return "", false, fmt.Errorf("server URL %q must start with http:// or https://", trimmed)
-	case parsed.Hostname() == "":
-		return "", false, fmt.Errorf("server URL %q is missing a host", trimmed)
-	case added && parsed.User != nil:
-		// `user@host.com` reads as a bare host, and prepending a scheme would
-		// silently turn the local part into URL credentials.
-		return "", false, fmt.Errorf("server URL %q is ambiguous: write it as https://%s", trimmed, trimmed)
-	case parsed.RawQuery != "" || parsed.Fragment != "":
-		// The generated client builds request URLs as server+path, so a query or
-		// fragment here would end up in the middle of the URL.
-		return "", false, fmt.Errorf("server URL %q must not carry a query or fragment", trimmed)
+	if err := checkParsedServer(trimmed, parsed, added); err != nil {
+		return "", false, err
 	}
 
 	// Same reason: a trailing slash would produce `https://host//things`.
 	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
 
-	// Scheme and host are case-insensitive, but `server list` and ResolveServer
-	// compare URLs as plain strings, so an uppercase value would never match the
-	// server it names.
+	// Lowered because `server list` and ResolveServer compare URLs as strings.
 	parsed.Scheme = strings.ToLower(parsed.Scheme)
 	parsed.Host = strings.ToLower(parsed.Host)
 
 	return parsed.String(), added, nil
+}
+
+// checkParsedServer holds the rules that need the parsed URL rather than the
+// raw text.
+func checkParsedServer(trimmed string, parsed *url.URL, added bool) error {
+	switch {
+	case !strings.EqualFold(parsed.Scheme, "http") && !strings.EqualFold(parsed.Scheme, "https"):
+		return fmt.Errorf("server URL %q must start with http:// or https://", trimmed)
+	case parsed.Hostname() == "":
+		return fmt.Errorf("server URL %q is missing a host", trimmed)
+	case added && parsed.User != nil:
+		// `user@host.com` reads as a bare host; a prepended scheme would turn the local part into credentials.
+		return fmt.Errorf("server URL %q is ambiguous: write it as https://%s", trimmed, trimmed)
+	case parsed.RawQuery != "" || parsed.Fragment != "":
+		// server+path concatenation would put a query or fragment mid-URL.
+		return fmt.Errorf("server URL %q must not carry a query or fragment", trimmed)
+	}
+
+	return nil
 }
 
 var schemePrefix = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.\-]*://`)
@@ -111,18 +117,17 @@ func withScheme(trimmed string) (string, bool, error) {
 		return trimmed, false, nil
 	}
 
-	// Protocol-relative, e.g. `//api.example.com`. Strip the prefix so the
-	// loopback rule below sees the same authority it would for a bare host.
+	// Protocol-relative: strip `//` so the loopback rule below sees a bare authority.
 	authority := strings.TrimPrefix(trimmed, "//")
 
-	// `https:/api.example.com` is a mistyped scheme, not a host. Without this it
-	// would be read as a bare host and become `https://https:/api.example.com`,
-	// a syntactically valid URL pointing at the host `https`.
-	if host, _, _ := strings.Cut(authority, "/"); schemeTypo.MatchString(host) {
+	// A mistyped scheme is not a host: `https:/x` would otherwise become `https://https:/x`.
+	host, _, _ := strings.Cut(authority, "/")
+
+	if schemeTypo.MatchString(host) {
 		return "", false, fmt.Errorf("server URL %q is not a valid URL: write it as http://... or https://...", trimmed)
 	}
 
-	if host, _, _ := strings.Cut(authority, "/"); isLoopback(host) {
+	if isLoopback(host) {
 		return "", false, fmt.Errorf("server URL %q is ambiguous: write it as http://%s or https://%s", trimmed, authority, authority)
 	}
 

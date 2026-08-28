@@ -180,8 +180,7 @@ func TestFlagPassedDistinguishesZeroValueFromUnset(t *testing.T) {
 		t.Error("RequestParams should not expose the passed-flag bookkeeping")
 	}
 
-	// A params built by hand has no flags at all, so nothing is "passed" and
-	// generated code falls back to sending whatever is non-zero.
+	// A params built by hand has no flags, so generated code falls back to sending non-zero values.
 	if FlagPassed(viper.New(), "detailed") {
 		t.Error("a hand-built params should report nothing as passed")
 	}

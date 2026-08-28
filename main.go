@@ -1217,10 +1217,7 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 				}
 			}
 
-			// The schema's `enum` and `format` only describe a string flag, and
-			// `x-cli-no-validate` opts a parameter out when the schema says more
-			// than the API actually enforces. Resolved here rather than at render
-			// time so there is nothing to skip further down.
+			// Resolved here, not at render time, so there is nothing to skip further down.
 			var enum []string
 			var format string
 			if t == "string" && !extBool(p.Value.Extensions[ExtNoValidate]) && p.Value.Schema != nil {
@@ -2155,8 +2152,7 @@ func renderTemplate(name string, funcs template.FuncMap, data interface{}, parti
 		tmpl = tmpl.Funcs(funcs)
 	}
 
-	// Partials are parsed into the same namespace so their `define` blocks are
-	// callable from the named template.
+	// Same namespace, so the partials' `define` blocks are callable from the named template.
 	for _, partial := range partials {
 		if _, err := tmpl.Parse(string(loadTemplate(partial))); err != nil {
 			panic(err)

@@ -108,9 +108,7 @@ func TestNormalizeServerURL(t *testing.T) {
 		"api.example.com:8443/v2": "https://api.example.com:8443/v2",
 		"//api.example.com":       "https://api.example.com",
 	}
-	// A trailing slash is dropped: the generated client builds request URLs as
-	// server+path, so keeping it would produce `https://host//things` and would
-	// also break the string-equality comparison in `server list`.
+	// A trailing slash is dropped: server+path would otherwise produce `https://host//things`.
 	rewritten["https://api.example.com/v2/"] = "https://api.example.com/v2"
 	for in, want := range rewritten {
 		got, _, err := NormalizeServerURL(in)
@@ -119,8 +117,7 @@ func TestNormalizeServerURL(t *testing.T) {
 		}
 	}
 
-	// Scheme and host are case-insensitive, so they are lowered to keep server
-	// URLs comparable by string equality.
+	// Scheme and host are lowered to keep server URLs comparable by string equality.
 	canonicalized := map[string]string{
 		"HTTPS://API.example.com":    "https://api.example.com",
 		"https://API.example.com/V2": "https://api.example.com/V2",
@@ -145,8 +142,7 @@ func TestNormalizeServerURL(t *testing.T) {
 		"dev.localhost:3000",
 		// Protocol-relative values reach the same loopback rule as bare hosts.
 		"//localhost:8080",
-		// A mistyped scheme is not a host: without this it would be read as one
-		// and become `https://https:/api.example.com`.
+		// A mistyped scheme is not a host: it would otherwise become `https://https:/x`.
 		"https:/api.example.com",
 		"https:api.example.com",
 		// A bare host with a local part would silently become URL credentials.
@@ -183,8 +179,7 @@ func TestResolveServerNormalizesPersistedValues(t *testing.T) {
 		}
 	}
 
-	// An unusable value is returned as-is rather than swallowed: this is the
-	// request path, and a transport error naming the bad URL beats an empty one.
+	// Returned as-is: on the request path a transport error naming the bad URL beats an empty one.
 	viper.Reset()
 	Init(&Config{AppName: "test"})
 	viper.Set("server-default", "ftp://api.example.com")

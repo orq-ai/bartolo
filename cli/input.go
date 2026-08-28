@@ -169,10 +169,7 @@ func GetBody(mediaType string, args []string, params *viper.Viper) (string, erro
 func GetBodyWithFlags(cmd *cobra.Command, mediaType string, args []string, params *viper.Viper, fields []BodyField) (string, error) {
 	body, err := getBodyWithFlags(cmd, mediaType, args, params, fields)
 	if err != nil {
-		// Everything this can fail on is the user's own input — a flag value, a
-		// shorthand expression, a --from-file path, malformed JSON — so it is a
-		// usage error and exits 2, not an operation failure. Classifying it here
-		// rather than at each return keeps the generated caller a plain wrap.
+		// Every failure here is the user's own input, so it exits 2, and classifying it once keeps the generated caller a plain wrap.
 		return "", NewValueError(err)
 	}
 
