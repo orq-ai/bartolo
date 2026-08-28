@@ -1410,7 +1410,15 @@ func TestAuthProfileAddPromptSkipsOptionalKey(t *testing.T) {
 	if !sawRequired["api-key"] {
 		t.Error("expected api-key to be threaded through as required")
 	}
-	if sawRequired["region"] {
+	// Asserting the prompt was reached, not just that it reported the key as
+	// optional: skipping an optional prompt outright would leave the profile
+	// looking identical while silently removing the operator's chance to fill
+	// the field in.
+	promptedRegion, ok := sawRequired["region"]
+	if !ok {
+		t.Error("expected region to be prompted for")
+	}
+	if promptedRegion {
 		t.Error("expected region to be threaded through as optional")
 	}
 

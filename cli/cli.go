@@ -373,7 +373,9 @@ func migrateLegacyServerConfig(configDir string) {
 		return
 	}
 
-	if err := ioutil.WriteFile(filename, migrated, 0600); err != nil {
+	if err := writeFileAtomic(filename, func(tmp string) error {
+		return ioutil.WriteFile(tmp, migrated, 0600)
+	}); err != nil {
 		return
 	}
 

@@ -702,15 +702,13 @@ func resolveProfileValue(cmd *cobra.Command, key string, args []string, i int, r
 	}
 
 	// 3. prompt
-	if !required {
-		// An optional key left off every route (file, positional, and now the
-		// prompt) is simply unset, the same as pressing Enter on it would
-		// produce — this must not depend on a TTY being present, or a scripted
-		// caller that omits an optional trailing argument fails for a field it
-		// never needed to supply.
-		return "", nil
-	}
 	if !isInteractive() {
+		// An optional key omitted by a scripted caller is simply unset, the same
+		// as pressing Enter on its prompt would leave it. Only a required key
+		// makes the missing TTY an error.
+		if !required {
+			return "", nil
+		}
 		return "", NewUsageError(fmt.Errorf("no %s provided; use --%s-file <path> or run in an interactive terminal", label, label))
 	}
 	v, err := promptProfileValue(key, required)
