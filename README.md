@@ -55,7 +55,11 @@ go build -o my-cli
 ./my-cli --help
 ```
 
-Set a default output format for the generated CLI:
+List commands render a table on a terminal. Everything else — a piped or
+redirected run, a non-list command, an explicit `-o json` — uses the CLI's
+serialization format, set through `--default-format` at generation time.
+
+Pick a different default, or opt out of tables entirely:
 
 ```sh
 ./my-cli default-format yaml
@@ -72,6 +76,7 @@ Every generated CLI starts with a useful operator surface:
 - A profile in force is authoritative for its key and takes precedence over the environment; the server is not held to the same rule — a profile saved without `--server` still falls through to `<PREFIX>_SERVER`. See the generated CLI's own README for the exact resolution order, which differs for the key and the server.
 - `request` provides a raw escape hatch for unmodeled endpoints.
 - `default-format` shows or persists the preferred default output format.
+- `-o table` (the default) renders list commands as a table on a terminal; `-o json|yaml|toon`, `--json`, and `--columns` pick the format and columns instead.
 - `--json`, `--output-format`, and `-j`/`--jmespath` make automation and projection straightforward.
 - Generated flags never shadow a global: a body field or parameter named after one (`raw`, `profile`, `output-format`, ...) is exposed as `--body-<name>` or `--param-<name>`.
 - Grouped nouns like `prompts`, `files`, or `human-evals` feel closer to a product CLI than a path translator.

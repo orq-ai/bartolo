@@ -31,6 +31,7 @@ import (
 // a fix) cannot disagree about a name without knowing each command's method.
 var reservedFlagNames = map[string]string{
 	// Global flags, registered by Init and InitCredentialsFile.
+	"columns":       "global flag",
 	"jmespath":      "global flag",
 	"json":          "global flag",
 	"output-format": "global flag",

@@ -32,13 +32,9 @@ func TestDefaultFormatterHandlesNilQueryResult(t *testing.T) {
 
 func TestDefaultFormatterRendersListAsTableOnTTY(t *testing.T) {
 	viper.Reset()
-	viper.Set("output-format", "json")
+	viper.Set("output-format", tableFormat)
 	viper.Set("jmespath", "")
 	viper.Set("raw", false)
-	originalRoot := Root
-	Root = nil
-	t.Cleanup(func() { Root = originalRoot })
-
 	out := new(bytes.Buffer)
 	original := Stdout
 	Stdout = out
@@ -56,13 +52,9 @@ func TestDefaultFormatterRendersListAsTableOnTTY(t *testing.T) {
 
 func TestDefaultFormatterKeepsListJSONWhenNotInteractive(t *testing.T) {
 	viper.Reset()
-	viper.Set("output-format", "json")
+	viper.Set("output-format", tableFormat)
 	viper.Set("jmespath", "")
 	viper.Set("raw", false)
-	originalRoot := Root
-	Root = nil
-	t.Cleanup(func() { Root = originalRoot })
-
 	out := new(bytes.Buffer)
 	original := Stdout
 	Stdout = out
@@ -77,13 +69,9 @@ func TestDefaultFormatterKeepsListJSONWhenNotInteractive(t *testing.T) {
 
 func TestDefaultFormatterRendersListEnvelopeMetadata(t *testing.T) {
 	viper.Reset()
-	viper.Set("output-format", "json")
+	viper.Set("output-format", tableFormat)
 	viper.Set("jmespath", "")
 	viper.Set("raw", false)
-	originalRoot := Root
-	Root = nil
-	t.Cleanup(func() { Root = originalRoot })
-
 	out := new(bytes.Buffer)
 	original := Stdout
 	Stdout = out
@@ -102,13 +90,9 @@ func TestDefaultFormatterRendersListEnvelopeMetadata(t *testing.T) {
 
 func TestDefaultFormatterRendersEmptyListWithConfiguredColumns(t *testing.T) {
 	viper.Reset()
-	viper.Set("output-format", "json")
+	viper.Set("output-format", tableFormat)
 	viper.Set("jmespath", "")
 	viper.Set("raw", false)
-	originalRoot := Root
-	Root = nil
-	t.Cleanup(func() { Root = originalRoot })
-
 	out := new(bytes.Buffer)
 	original := Stdout
 	Stdout = out
@@ -121,13 +105,9 @@ func TestDefaultFormatterRendersEmptyListWithConfiguredColumns(t *testing.T) {
 
 func TestDefaultFormatterSkipsNestedColumnsAndTruncatesCells(t *testing.T) {
 	viper.Reset()
-	viper.Set("output-format", "json")
+	viper.Set("output-format", tableFormat)
 	viper.Set("jmespath", "")
 	viper.Set("raw", false)
-	originalRoot := Root
-	Root = nil
-	t.Cleanup(func() { Root = originalRoot })
-
 	out := new(bytes.Buffer)
 	original := Stdout
 	Stdout = out
@@ -151,13 +131,9 @@ func TestDefaultFormatterSkipsNestedColumnsAndTruncatesCells(t *testing.T) {
 
 func TestDefaultFormatterRendersResourceNamedWrapper(t *testing.T) {
 	viper.Reset()
-	viper.Set("output-format", "json")
+	viper.Set("output-format", tableFormat)
 	viper.Set("jmespath", "")
 	viper.Set("raw", false)
-	originalRoot := Root
-	Root = nil
-	t.Cleanup(func() { Root = originalRoot })
-
 	out := new(bytes.Buffer)
 	original := Stdout
 	Stdout = out
@@ -173,13 +149,9 @@ func TestDefaultFormatterRendersResourceNamedWrapper(t *testing.T) {
 
 func TestDefaultFormatterKeepsAmbiguousObjectAsJSON(t *testing.T) {
 	viper.Reset()
-	viper.Set("output-format", "json")
+	viper.Set("output-format", tableFormat)
 	viper.Set("jmespath", "")
 	viper.Set("raw", false)
-	originalRoot := Root
-	Root = nil
-	t.Cleanup(func() { Root = originalRoot })
-
 	out := new(bytes.Buffer)
 	original := Stdout
 	Stdout = out
@@ -196,13 +168,9 @@ func TestDefaultFormatterKeepsAmbiguousObjectAsJSON(t *testing.T) {
 
 func TestDefaultFormatterReportsEmptyCollection(t *testing.T) {
 	viper.Reset()
-	viper.Set("output-format", "json")
+	viper.Set("output-format", tableFormat)
 	viper.Set("jmespath", "")
 	viper.Set("raw", false)
-	originalRoot := Root
-	Root = nil
-	t.Cleanup(func() { Root = originalRoot })
-
 	out := new(bytes.Buffer)
 	original := Stdout
 	Stdout = out
@@ -227,13 +195,9 @@ func TestFitColumnsDropsTrailingColumns(t *testing.T) {
 
 func TestDefaultFormatterSummarizesEnvelopeInFooter(t *testing.T) {
 	viper.Reset()
-	viper.Set("output-format", "json")
+	viper.Set("output-format", tableFormat)
 	viper.Set("jmespath", "")
 	viper.Set("raw", false)
-	originalRoot := Root
-	Root = nil
-	t.Cleanup(func() { Root = originalRoot })
-
 	out := new(bytes.Buffer)
 	original := Stdout
 	Stdout = out
@@ -251,13 +215,9 @@ func TestDefaultFormatterSummarizesEnvelopeInFooter(t *testing.T) {
 
 func TestDefaultFormatterFooterCountsAgainstTotal(t *testing.T) {
 	viper.Reset()
-	viper.Set("output-format", "json")
+	viper.Set("output-format", tableFormat)
 	viper.Set("jmespath", "")
 	viper.Set("raw", false)
-	originalRoot := Root
-	Root = nil
-	t.Cleanup(func() { Root = originalRoot })
-
 	out := new(bytes.Buffer)
 	original := Stdout
 	Stdout = out
@@ -285,4 +245,105 @@ func TestTableFooterKeepsUnrecognizedEnvelopeFields(t *testing.T) {
 	})
 	assert.NoError(t, err)
 	assert.Equal(t, "enabled: true · id: pol_1 · name: PII guard", footer)
+}
+
+func TestDefaultFormatterSerializesTableFormatWhenNotATerminal(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	originalSerialization := defaultSerialization
+	defaultSerialization = "toon"
+	t.Cleanup(func() { defaultSerialization = originalSerialization })
+
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(false).FormatList([]interface{}{
+		map[string]interface{}{"id": "one"},
+	})
+	assert.NoError(t, err)
+	assert.NotContains(t, out.String(), "│")
+	assert.Contains(t, out.String(), "id")
+}
+
+// Forced color makes tty true on a pipe, which must not be enough to turn a
+// redirect into a table.
+func TestDefaultFormatterSerializesForColorForcedOntoAPipe(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	formatter := &DefaultFormatter{tty: true, terminal: false}
+	err := formatter.FormatList([]interface{}{map[string]interface{}{"id": "one"}})
+	assert.NoError(t, err)
+	assert.NotContains(t, out.String(), "│")
+}
+
+func TestDefaultFormatterKeepsExplicitFormatOnATerminal(t *testing.T) {
+	for _, format := range []string{"json", "yaml", "toon"} {
+		t.Run(format, func(t *testing.T) {
+			viper.Reset()
+			viper.Set("output-format", format)
+			viper.Set("jmespath", "")
+			viper.Set("raw", false)
+
+			out := new(bytes.Buffer)
+			original := Stdout
+			Stdout = out
+			t.Cleanup(func() { Stdout = original })
+
+			err := NewDefaultFormatter(true).FormatList([]interface{}{
+				map[string]interface{}{"id": "one"},
+			})
+			assert.NoError(t, err)
+			assert.NotContains(t, out.String(), "│")
+		})
+	}
+}
+
+func TestDefaultFormatterRawWinsOverTable(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "[].id")
+	viper.Set("raw", true)
+
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true).FormatList([]interface{}{
+		map[string]interface{}{"id": "one"},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, "one\n", out.String())
+}
+
+func TestDefaultFormatterColumnsFlagSelectsColumns(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	viper.Set("columns", " name , id ")
+
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true).FormatList([]interface{}{
+		map[string]interface{}{"id": "one", "name": "first", "note": "hidden"},
+	}, "id")
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "│ NAME  │ ID  │")
+	assert.NotContains(t, out.String(), "NOTE")
 }

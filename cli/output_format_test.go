@@ -16,7 +16,7 @@ func TestInvalidOutputFormatIsRejected(t *testing.T) {
 	stdout, stderr, code := executeForExit("group leaf -o not-a-format")
 
 	assert.Equal(t, ExitUsage, code)
-	assert.Contains(t, stderr, `--output-format: "not-a-format" is not one of [json, yaml, toon]`)
+	assert.Contains(t, stderr, `--output-format: "not-a-format" is not one of [json, yaml, toon, table]`)
 	// Nothing may reach stdout: the whole point is that the caller does not
 	// get output in a format it did not ask for.
 	assert.Empty(t, stdout)
@@ -30,6 +30,7 @@ func TestValidOutputFormatIsAccepted(t *testing.T) {
 		{"group leaf -o json", "json"},
 		{"group leaf -o yaml", "yaml"},
 		{"group leaf -o toon", "toon"},
+		{"group leaf -o table", "table"},
 		// Values are normalized the same way the persisted default is.
 		{"group leaf -o YAML", "yaml"},
 		// The --json alias still wins over an explicit format.
@@ -59,7 +60,7 @@ func TestInvalidOutputFormatFromEnvIsRejected(t *testing.T) {
 	_, stderr, code := executeForExit("")
 
 	assert.Equal(t, ExitUsage, code)
-	assert.Contains(t, stderr, `--output-format: "not-a-format" is not one of [json, yaml, toon]`)
+	assert.Contains(t, stderr, `--output-format: "not-a-format" is not one of [json, yaml, toon, table]`)
 }
 
 func TestDefaultFormatCommandRejectsUnknownFormat(t *testing.T) {
@@ -71,8 +72,33 @@ func TestDefaultFormatCommandRejectsUnknownFormat(t *testing.T) {
 	_, stderr, code := executeForExit("default-format not-a-format")
 
 	assert.Equal(t, ExitUsage, code)
-	assert.Contains(t, stderr, `"not-a-format" is not one of [json, yaml, toon]`)
+	assert.Contains(t, stderr, `"not-a-format" is not one of [json, yaml, toon, table]`)
 
 	_, err := os.Stat(filepath.Join(home, ".test", "config.json"))
 	assert.True(t, os.IsNotExist(err), "a rejected format must not be persisted")
+}
+
+func TestOutputFormatDefaultsToTableAndEnvOverridesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  string
+		want string
+	}{
+		{"default", "", "table"},
+		{"from env", "toon", "toon"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			viper.Reset()
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("TEST_OUTPUT_FORMAT", tc.env)
+
+			Init(&Config{AppName: "test", EnvPrefix: "TEST", DefaultOutputFormat: "toon"})
+			Root.RunE = func(cmd *cobra.Command, args []string) error { return nil }
+
+			_, _, code := executeForExit("")
+
+			assert.Equal(t, ExitOK, code)
+			assert.Equal(t, tc.want, viper.GetString("output-format"))
+		})
+	}
 }

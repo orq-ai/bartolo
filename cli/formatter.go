@@ -73,17 +73,21 @@ func FormatList(data interface{}, columns ...string) error {
 // DefaultFormatter can apply JMESPath queries and can output prettyfied JSON,
 // YAML, or TOON output. If Stdout is a TTY, then colorized output is provided.
 // The default formatter uses the `jmespath` and `output-format` configuration
-// values to perform JMESPath queries and set JSON (default), YAML, or TOON
-// output.
+// values to perform JMESPath queries and render a table (default), JSON, YAML,
+// or TOON output.
 type DefaultFormatter struct {
-	tty bool
+	// tty enables colorized output; terminal reports whether stdout really is a
+	// terminal. They differ when color is forced onto a pipe.
+	tty      bool
+	terminal bool
 }
 
 // NewDefaultFormatter creates a new formatted with autodetected TTY
 // capabilities.
 func NewDefaultFormatter(tty bool) *DefaultFormatter {
 	return &DefaultFormatter{
-		tty: tty,
+		tty:      tty,
+		terminal: tty,
 	}
 }
 
@@ -114,6 +118,12 @@ func (f *DefaultFormatter) format(data interface{}, list bool, columns []string)
 		}
 
 		data = result
+	}
+
+	if list {
+		if override := viper.GetString("columns"); override != "" {
+			columns = splitColumns(override)
+		}
 	}
 
 	if list && f.shouldRenderTable() {
@@ -176,7 +186,7 @@ func (f *DefaultFormatter) format(data interface{}, list bool, columns []string)
 	}
 
 	if !handled {
-		switch viper.GetString("output-format") {
+		switch serializationFormat() {
 		case "yaml":
 			encoded, err = yaml.Marshal(data)
 
@@ -222,22 +232,31 @@ func (f *DefaultFormatter) format(data interface{}, list bool, columns []string)
 	return nil
 }
 
-func (f *DefaultFormatter) shouldRenderTable() bool {
-	if !f.tty || viper.GetBool("raw") || viper.GetString("output-format") != "json" {
-		return false
+// serializationFormat is the format to encode with. `table` is a rendering
+// choice rather than a serialization, so it defers to the app's configured one.
+func serializationFormat() string {
+	if format := viper.GetString("output-format"); format != tableFormat {
+		return format
 	}
 
-	// An explicit --json or -o wins over the interactive table default.
-	if viper.GetBool("json") {
-		return false
-	}
-	if Root != nil {
-		if flag := Root.PersistentFlags().Lookup("output-format"); flag != nil && flag.Changed {
-			return false
+	return defaultSerialization
+}
+
+// splitColumns parses the `--columns` value. A JMESPath projection is the tool
+// for reshaping data; this only picks which of the existing fields to show.
+func splitColumns(value string) []string {
+	columns := make([]string, 0, 1)
+	for _, column := range strings.Split(value, ",") {
+		if trimmed := strings.TrimSpace(column); trimmed != "" {
+			columns = append(columns, trimmed)
 		}
 	}
 
-	return true
+	return columns
+}
+
+func (f *DefaultFormatter) shouldRenderTable() bool {
+	return f.terminal && !viper.GetBool("raw") && viper.GetString("output-format") == tableFormat
 }
 
 // renderTable reports false for anything that is not a collection so callers

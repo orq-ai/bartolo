@@ -48,6 +48,16 @@ var Stderr io.Writer = os.Stderr
 
 var tty bool
 
+// stdoutIsTerminal reports whether stdout is a real terminal, as opposed to tty
+// above, which is also true when colored output is forced onto a pipe. Table
+// rendering keys off this one so `--color ... | cat` keeps emitting the
+// serialized format.
+var stdoutIsTerminal bool
+
+// defaultSerialization is the format used whenever output is not a table: the
+// app's configured DefaultOutputFormat.
+var defaultSerialization = "json"
+
 // Config is used to pass settings to the CLI.
 type Config struct {
 	AppName             string
@@ -63,11 +73,10 @@ func Init(config *Config) {
 	initCache(config.AppName)
 	authInitialized = false
 
+	stdoutIsTerminal = isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+
 	// Determine if we are using a TTY or colored output is forced-on.
-	tty = false
-	if isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()) || viper.GetBool("color") {
-		tty = true
-	}
+	tty = stdoutIsTerminal || viper.GetBool("color")
 
 	if viper.GetBool("nocolor") {
 		// If forced off, ignore all of the above!
@@ -87,7 +96,7 @@ func Init(config *Config) {
 	UserAgentMiddleware()
 	LogMiddleware(tty)
 
-	Formatter = NewDefaultFormatter(tty)
+	Formatter = &DefaultFormatter{tty: tty, terminal: stdoutIsTerminal}
 
 	Root = &cobra.Command{
 		Use:     filepath.Base(os.Args[0]),
@@ -161,7 +170,8 @@ func Init(config *Config) {
 	initAgentCommands()
 
 	AddGlobalFlag("verbose", "", "Enable verbose log output", false)
-	AddGlobalFlag("output-format", "o", fmt.Sprintf("Output format [%s]", outputFormatList()), outputFormatOrDefault(config.DefaultOutputFormat))
+	AddGlobalFlag("output-format", "o", fmt.Sprintf("Output format [%s]", outputFormatList()), tableFormat)
+	AddGlobalFlag("columns", "", "Comma-separated columns to show in table output", "")
 	AddGlobalFlag("json", "", "Alias for --output-format json", false)
 	// Named `jmespath` rather than `query` so it cannot collide with the many
 	// endpoints whose request body or query string has a `query` field. The old
@@ -263,20 +273,28 @@ func initConfig(appName, envPrefix, apiKeyEnvVar, defaultOutputFormat string) {
 
 	migrateLegacyServerConfig(configDir)
 	viper.SetDefault("api-key-env-var", apiKeyEnvVar)
-	viper.SetDefault("output-format", outputFormatOrDefault(defaultOutputFormat))
+	defaultSerialization = serializationOrDefault(defaultOutputFormat)
+	viper.SetDefault("output-format", tableFormat)
 }
+
+// tableFormat renders a list command as a table for a human at a terminal, and
+// falls back to defaultSerialization for everything else: a piped or redirected
+// run, a non-list command, and a payload that is not a collection.
+const tableFormat = "table"
 
 // outputFormats are the values accepted by `--output-format` / `-o` and by the
 // `default-format` command. Help text and error messages are built from this
 // list so they cannot drift apart from what is actually accepted.
-var outputFormats = []string{"json", "yaml", "toon"}
+var outputFormats = []string{"json", "yaml", "toon", tableFormat}
 
 func outputFormatList() string {
 	return strings.Join(outputFormats, ", ")
 }
 
-func outputFormatOrDefault(value string) string {
-	if format, ok := parseOutputFormat(value); ok {
+// serializationOrDefault normalizes a Config.DefaultOutputFormat. `table` is not
+// a serialization, so it cannot stand in as the fallback for itself.
+func serializationOrDefault(value string) string {
+	if format, ok := parseOutputFormat(value); ok && format != tableFormat {
 		return format
 	}
 	return "json"
