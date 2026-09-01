@@ -335,7 +335,9 @@ func TestLooksSensitiveKey(t *testing.T) {
 			t.Errorf("looksSensitiveKey(%q) = false, want true (must not echo)", key)
 		}
 	}
-	for _, key := range []string{"client_id", "username", "region", "endpoint"} {
+	// A name that ends in an address suffix is a location, not a credential,
+	// even though the hints above appear in it.
+	for _, key := range []string{"client_id", "username", "region", "endpoint", "auth_url", "auth-url", "token_uri", "token_endpoint", "session_host", "authorization_server"} {
 		if looksSensitiveKey(key) {
 			t.Errorf("looksSensitiveKey(%q) = true, want false (should echo)", key)
 		}
@@ -539,9 +541,14 @@ func TestNarrowConfigDirPermissions(t *testing.T) {
 			t.Fatalf("seed %s: %v", name, err)
 		}
 	}
-	// A file the CLI does not know about is covered by the directory instead.
+	// A backup of a credential file is a credential file: the live one gets
+	// rewritten 0600 by the next write, the copy beside it never does.
 	if err := os.WriteFile(filepath.Join(dir, "config.json.bak"), []byte("{}"), 0o644); err != nil {
 		t.Fatalf("seed backup: %v", err)
+	}
+	// A file the CLI knows nothing about is covered by the directory instead.
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatalf("seed stranger: %v", err)
 	}
 
 	narrowConfigDirPermissions(dir)
@@ -553,7 +560,7 @@ func TestNarrowConfigDirPermissions(t *testing.T) {
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		t.Errorf("config directory mode = %o, want no group/other bits", perm)
 	}
-	for _, name := range []string{"credentials.json", "config.json", "cache.json"} {
+	for _, name := range []string{"credentials.json", "config.json", "cache.json", "config.json.bak"} {
 		info, err := os.Stat(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatalf("stat %s: %v", name, err)

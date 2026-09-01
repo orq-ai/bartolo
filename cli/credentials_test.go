@@ -373,13 +373,15 @@ func TestMaskIfSecret(t *testing.T) {
 	}
 
 	// How much of the ends survives scales with the length: four either side
-	// of a middling secret gives away too much of it, and a short enough one
-	// shows nothing at all. The mask width never tracks the real length.
+	// of a middling secret gives away too much of it, and a short one keeps
+	// only a tail -- enough to tell two profiles' keys apart, not enough to
+	// rebuild either.
 	assert.Equal(t, "sk****cd", maskIfSecret("api_key", "sk-orq-abcd"))           // 11 runes
 	assert.Equal(t, "sk****op", maskIfSecret("api_key", "sk-orq-abcdefop"))       // 15 runes
 	assert.Equal(t, "sk-o****mnop", maskIfSecret("api_key", "sk-orq-abcdefmnop")) // 16 runes
-	assert.Equal(t, "****", maskIfSecret("api_key", "sk-orq"))                    // 6 runes
-	assert.Equal(t, "sk****-a", maskIfSecret("api_key", "sk-orq-a"))              // 8 runes: the boundary
+	assert.Equal(t, "****-a", maskIfSecret("api_key", "sk-orq-a"))                // 8 runes: tail only
+	assert.Equal(t, "****rq", maskIfSecret("api_key", "sk-orq"))                  // 6 runes
+	assert.Equal(t, "****", maskIfSecret("api_key", "sk"))                        // 2 runes: a tail would be all of it
 
 	// Multi-byte secrets are cut on rune boundaries, not bytes.
 	assert.Equal(t, "日本****すね", maskIfSecret("password", "日本語ですごく長い秘密ですね"))
@@ -391,6 +393,12 @@ func TestMaskIfSecret(t *testing.T) {
 
 	// An empty secret has nothing to hide, and a mask would imply it is set.
 	assert.Equal(t, "", maskIfSecret("api_key", ""))
+
+	// An address is not a credential: an OAuth auth_url is where a key is
+	// exchanged, and masking it makes the dump useless for diagnosing which
+	// endpoint was called.
+	assert.Equal(t, "https://id.orq.ai/authorize", maskIfSecret("auth_url", "https://id.orq.ai/authorize"))
+	assert.Equal(t, "https://id.orq.ai/token", maskIfSecret("token_endpoint", "https://id.orq.ai/token"))
 
 	// Non-secret fields pass through untouched.
 	assert.Equal(t, "https://api.orq.ai", maskIfSecret("base_url", "https://api.orq.ai"))

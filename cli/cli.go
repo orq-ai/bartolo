@@ -286,6 +286,13 @@ func narrowConfigDirPermissions(configDir string) {
 	// an older version or a neighbouring tool left there is still live.
 	for _, name := range []string{"credentials.json", "config.json", "config.yaml", "config.yml", "cache.json", "cache.yaml", "cache.yml"} {
 		narrowPermissions(path.Join(configDir, name), 0600)
+
+		// A copy of a credential file is a credential file. Backups are how a
+		// key outlives the profile it belonged to: the live file gets
+		// rewritten 0600 by the next write, the copy beside it does not.
+		for _, suffix := range []string{".bak", ".old", ".orig", ".save"} {
+			narrowPermissions(path.Join(configDir, name+suffix), 0600)
+		}
 	}
 }
 

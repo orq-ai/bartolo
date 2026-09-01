@@ -329,13 +329,16 @@ func maskIfSecret(name string, value interface{}) interface{} {
 
 	// The middle is a fixed width rather than the real one, so the output does
 	// not disclose the secret's length either. How much of the ends survives
-	// scales with the secret: showing four characters either side of a short
-	// value gives away most of it, and a value short enough that even two
-	// would is not worth identifying.
+	// scales with the secret: four characters either side of a short value
+	// gives away most of it, so a short one keeps only a tail, enough to tell
+	// two profiles' keys apart without reconstructing either.
 	runes := []rune(s)
 	switch {
-	case len(runes) < 8:
+	case len(runes) <= 2:
+		// A tail here would be the whole secret.
 		return "****"
+	case len(runes) <= 8:
+		return "****" + string(runes[len(runes)-2:])
 	case len(runes) < 16:
 		return string(runes[:2]) + "****" + string(runes[len(runes)-2:])
 	default:
@@ -871,12 +874,35 @@ var promptProfileValue = func(key string, required bool) (string, error) {
 // configuration ones rather than in a separate header-only predicate. Two
 // lists meant a name that was redacted in a header printed in full in a
 // profile, and profile key names come from the OpenAPI generator, so they are
-// not a fixed set we can check by eye. The cost is that a non-secret like
-// `auth_url` is masked too; a masked URL beats a printed credential.
+// not a fixed set we can check by eye.
 func looksSensitiveKey(key string) bool {
 	lower := strings.ToLower(key)
+	if namesALocation(lower) {
+		return false
+	}
 	for _, hint := range []string{"key", "token", "secret", "password", "passphrase", "credential", "signature", "auth", "session", "cookie"} {
 		if strings.Contains(lower, hint) {
+			return true
+		}
+	}
+	return false
+}
+
+// namesALocation exempts the address fields that the hints above would
+// otherwise catch: an OAuth `auth_url` or `token_endpoint` is where a
+// credential is exchanged, not a credential, and masking it makes `doctor`
+// and the verbose dump useless for diagnosing the endpoint that is actually
+// being called.
+//
+// The exemption is by suffix, so it covers `auth_url` without touching
+// `authorization`. A URL that carries its credential inline (a presigned one,
+// say) is masked in the only place it is likely to appear -- the request line,
+// which redactURL masks per query parameter -- but would print in full from a
+// config field named `..._url`. Naming a field that holds a secret after its
+// shape rather than its contents is the narrow case this trades away.
+func namesALocation(lower string) bool {
+	for _, suffix := range []string{"url", "uri", "endpoint", "host", "server"} {
+		if strings.HasSuffix(lower, suffix) {
 			return true
 		}
 	}
