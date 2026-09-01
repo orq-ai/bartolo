@@ -42,7 +42,7 @@ func TestValidOutputFormatIsAccepted(t *testing.T) {
 			_, _, code := executeForExit(tc.args)
 
 			assert.Equal(t, ExitOK, code)
-			assert.Equal(t, tc.want, viper.GetString("output-format"))
+			assert.Equal(t, tc.want, outputFormat())
 		})
 	}
 }
@@ -80,25 +80,41 @@ func TestDefaultFormatCommandRejectsUnknownFormat(t *testing.T) {
 
 func TestOutputFormatDefaultsToTableAndEnvOverridesIt(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		env  string
-		want string
+		name       string
+		configured string
+		env        string
+		want       string
 	}{
-		{"default", "", "table"},
-		{"from env", "toon", "toon"},
+		{"unconfigured", "", "", "table"},
+		{"configured", "toon", "", "toon"},
+		{"from env", "", "yaml", "yaml"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			viper.Reset()
 			t.Setenv("HOME", t.TempDir())
 			t.Setenv("TEST_OUTPUT_FORMAT", tc.env)
 
-			Init(&Config{AppName: "test", EnvPrefix: "TEST", DefaultOutputFormat: "toon"})
+			Init(&Config{AppName: "test", EnvPrefix: "TEST", DefaultOutputFormat: tc.configured})
 			Root.RunE = func(cmd *cobra.Command, args []string) error { return nil }
 
 			_, _, code := executeForExit("")
 
 			assert.Equal(t, ExitOK, code)
-			assert.Equal(t, tc.want, viper.GetString("output-format"))
+			assert.Equal(t, tc.want, outputFormat())
 		})
 	}
+}
+
+// The normalized format is written to its own key, so the first command run in
+// a process cannot pin the format for the ones after it.
+func TestOutputFormatIsResolvedPerCommand(t *testing.T) {
+	initExitTestCLI(t)
+
+	_, _, code := executeForExit("group leaf")
+	assert.Equal(t, ExitOK, code)
+	assert.Equal(t, tableFormat, outputFormat())
+
+	_, _, code = executeForExit("group leaf -o yaml")
+	assert.Equal(t, ExitOK, code)
+	assert.Equal(t, "yaml", outputFormat())
 }

@@ -2411,7 +2411,7 @@ func promptInterrupted(err error) bool {
 
 // outputFormats are the values accepted by `--default-format`, mirroring the
 // formats the generated CLIs support.
-var outputFormats = []string{"json", "yaml", "toon"}
+var outputFormats = []string{"json", "yaml", "toon", "table"}
 
 func parseOutputFormat(value string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(value))
@@ -2652,6 +2652,7 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 
 		printWizardStep(color, 3, 3, "Output format", "Choose the default rendering style for generated CLIs. Use the arrow keys to move and Enter to confirm.")
 		defaultFormat, err = promptSelect("Default output format", []selectOption{
+			{Value: "table", Label: "table", Description: "List commands render a table on a terminal, toon elsewhere."},
 			{Value: "json", Label: "json", Description: "Best for agents and automation."},
 			{Value: "yaml", Label: "yaml", Description: "Easy to scan in terminals."},
 			{Value: "toon", Label: "toon", Description: "Human-oriented serialization of data for LLMs."},
@@ -2797,7 +2798,7 @@ func buildREADMEExamples(api *OpenAPI) []*READMEExample {
 		{
 			Title:       "Persist the default output format",
 			Command:     binary + " default-format json",
-			Description: "Write the preferred output format into the CLI config so future commands use it automatically.",
+			Description: "Write the preferred output format into the CLI config so future commands use it automatically. Anything other than `table` turns off the tables that list commands render on a terminal.",
 		},
 	}
 
@@ -3195,7 +3196,7 @@ func main() {
 	initCommand.Flags().String("module-path", "", "Go module path for the generated CLI project")
 	initCommand.Flags().String("bartolo-path", "", "Local path to the bartolo repo to use via go.mod replace during development")
 	initCommand.Flags().String("api-key-env-var", "", "Custom API key environment variable for generated CLIs")
-	initCommand.Flags().String("default-format", "json", fmt.Sprintf("Default output format for generated CLIs [%s]", strings.Join(outputFormats, ", ")))
+	initCommand.Flags().String("default-format", "table", fmt.Sprintf("Default output format for generated CLIs [%s]", strings.Join(outputFormats, ", ")))
 	root.AddCommand(initCommand)
 
 	root.AddCommand(&cobra.Command{

@@ -82,12 +82,14 @@ type DefaultFormatter struct {
 	terminal bool
 }
 
-// NewDefaultFormatter creates a new formatted with autodetected TTY
-// capabilities.
-func NewDefaultFormatter(tty bool) *DefaultFormatter {
+// NewDefaultFormatter creates a new formatter. tty enables colorized output;
+// terminal reports whether stdout really is a terminal. They are separate
+// arguments because forcing color on makes the first true on a pipe, and a pipe
+// must never render a table.
+func NewDefaultFormatter(tty, terminal bool) *DefaultFormatter {
 	return &DefaultFormatter{
 		tty:      tty,
-		terminal: tty,
+		terminal: terminal,
 	}
 }
 
@@ -120,18 +122,31 @@ func (f *DefaultFormatter) format(data interface{}, list bool, columns []string)
 		data = result
 	}
 
+	// Columns named on the command line replace the ones the spec asked for, and
+	// unlike those are dropped from the right when the table does not fit: a
+	// human typing a dozen names should not get an overflowing table.
+	pinned := len(columns) > 0
 	if list {
 		if override := viper.GetString("columns"); override != "" {
-			columns = splitColumns(override)
+			selected, err := splitColumns(override)
+			if err != nil {
+				return err
+			}
+
+			columns, pinned = selected, false
 		}
 	}
 
 	if list && f.shouldRenderTable() {
-		if rendered, err := renderTable(data, columns); err != nil {
+		if rendered, err := renderTable(data, columns, pinned); err != nil {
 			return err
 		} else if rendered {
 			return nil
 		}
+
+		// Falling back silently is indistinguishable from the table feature
+		// being broken, which is the bug this whole path exists to fix.
+		fmt.Fprintf(Stderr, "Not shown as a table: this response is not a recognizable collection. Showing %s instead.\n", tableFallbackFormat)
 	}
 
 	// Encode to the requested output format using nice formatting.
@@ -232,19 +247,27 @@ func (f *DefaultFormatter) format(data interface{}, list bool, columns []string)
 	return nil
 }
 
+// tableFormat renders a list command as a table for a human at a terminal.
+// tableFallbackFormat is what it serializes to everywhere else: a piped or
+// redirected run, a non-list command, and a payload that is not a collection.
+const (
+	tableFormat         = "table"
+	tableFallbackFormat = "toon"
+)
+
 // serializationFormat is the format to encode with. `table` is a rendering
-// choice rather than a serialization, so it defers to the app's configured one.
+// choice rather than a serialization, so it stands in for one.
 func serializationFormat() string {
-	if format := viper.GetString("output-format"); format != tableFormat {
+	if format := outputFormat(); format != tableFormat {
 		return format
 	}
 
-	return defaultSerialization
+	return tableFallbackFormat
 }
 
 // splitColumns parses the `--columns` value. A JMESPath projection is the tool
 // for reshaping data; this only picks which of the existing fields to show.
-func splitColumns(value string) []string {
+func splitColumns(value string) ([]string, error) {
 	columns := make([]string, 0, 1)
 	for _, column := range strings.Split(value, ",") {
 		if trimmed := strings.TrimSpace(column); trimmed != "" {
@@ -252,19 +275,53 @@ func splitColumns(value string) []string {
 		}
 	}
 
-	return columns
+	if len(columns) == 0 {
+		return nil, NewValueError(fmt.Errorf("--columns: %q names no columns", value))
+	}
+
+	return columns, nil
 }
 
 func (f *DefaultFormatter) shouldRenderTable() bool {
-	return f.terminal && !viper.GetBool("raw") && viper.GetString("output-format") == tableFormat
+	return f.terminal && !viper.GetBool("raw") && outputFormat() == tableFormat
+}
+
+// checkColumns rejects a column no row has. A misspelled name would otherwise
+// render as a blank column, which reads as missing data rather than a typo.
+func checkColumns(requestedColumns []string, rows []map[string]interface{}) error {
+	if len(requestedColumns) == 0 || len(rows) == 0 {
+		return nil
+	}
+
+	for _, column := range requestedColumns {
+		found := false
+		for _, row := range rows {
+			if _, ok := row[column]; ok {
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			return NewValueError(fmt.Errorf("--columns: %q is not a field of the returned items", column))
+		}
+	}
+
+	return nil
 }
 
 // renderTable reports false for anything that is not a collection so callers
 // can fall back to the requested serialization format.
-func renderTable(data interface{}, requestedColumns []string) (bool, error) {
+func renderTable(data interface{}, requestedColumns []string, pinned bool) (bool, error) {
 	rows, label, metadata, ok := tableRows(data, requestedColumns)
 	if !ok {
 		return false, nil
+	}
+
+	if !pinned {
+		if err := checkColumns(requestedColumns, rows); err != nil {
+			return false, err
+		}
 	}
 
 	headers := append([]string(nil), requestedColumns...)
@@ -294,7 +351,7 @@ func renderTable(data interface{}, requestedColumns []string) (bool, error) {
 	}
 
 	// Columns the schema asked for are never dropped.
-	if len(requestedColumns) == 0 {
+	if !pinned {
 		headers, values = fitColumns(headers, values, terminalWidth())
 	}
 

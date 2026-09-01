@@ -121,10 +121,7 @@ func TestDefaultFormatCommandPersistsConfig(t *testing.T) {
 		DefaultOutputFormat: "yaml",
 	})
 
-	// The app default is the serialization to fall back to; the output format
-	// itself defaults to a table so list commands render one on a terminal.
-	assert.Equal(t, tableFormat, viper.GetString("output-format"))
-	assert.Equal(t, "yaml", defaultSerialization)
+	assert.Equal(t, "yaml", viper.GetString("output-format"))
 
 	out := execute("default-format toon")
 	assert.Contains(t, out, "output_format: toon")

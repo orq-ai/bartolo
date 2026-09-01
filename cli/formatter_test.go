@@ -24,7 +24,7 @@ func TestDefaultFormatterHandlesNilQueryResult(t *testing.T) {
 		Stdout = os.Stdout
 	}()
 
-	formatter := NewDefaultFormatter(false)
+	formatter := NewDefaultFormatter(false, false)
 	err := formatter.Format(map[string]interface{}{"hello": "world"})
 	assert.NoError(t, err)
 	assert.Equal(t, "null\n", out.String())
@@ -40,7 +40,7 @@ func TestDefaultFormatterRendersListAsTableOnTTY(t *testing.T) {
 	Stdout = out
 	t.Cleanup(func() { Stdout = original })
 
-	err := NewDefaultFormatter(true).FormatList([]interface{}{
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
 		map[string]interface{}{"id": "one", "active": true},
 		map[string]interface{}{"id": "two", "active": false},
 	}, "id", "active")
@@ -52,7 +52,7 @@ func TestDefaultFormatterRendersListAsTableOnTTY(t *testing.T) {
 
 func TestDefaultFormatterKeepsListJSONWhenNotInteractive(t *testing.T) {
 	viper.Reset()
-	viper.Set("output-format", tableFormat)
+	viper.Set("output-format", "json")
 	viper.Set("jmespath", "")
 	viper.Set("raw", false)
 	out := new(bytes.Buffer)
@@ -60,7 +60,7 @@ func TestDefaultFormatterKeepsListJSONWhenNotInteractive(t *testing.T) {
 	Stdout = out
 	t.Cleanup(func() { Stdout = original })
 
-	err := NewDefaultFormatter(false).FormatList([]interface{}{
+	err := NewDefaultFormatter(false, false).FormatList([]interface{}{
 		map[string]interface{}{"id": "one"},
 	})
 	assert.NoError(t, err)
@@ -77,7 +77,7 @@ func TestDefaultFormatterRendersListEnvelopeMetadata(t *testing.T) {
 	Stdout = out
 	t.Cleanup(func() { Stdout = original })
 
-	err := NewDefaultFormatter(true).FormatList(map[string]interface{}{
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
 		"selected_server": "https://example.test",
 		"servers": []map[string]interface{}{
 			{"url": "https://example.test", "selected": true},
@@ -98,7 +98,7 @@ func TestDefaultFormatterRendersEmptyListWithConfiguredColumns(t *testing.T) {
 	Stdout = out
 	t.Cleanup(func() { Stdout = original })
 
-	err := NewDefaultFormatter(true).FormatList([]interface{}{}, "id", "name")
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{}, "id", "name")
 	assert.NoError(t, err)
 	assert.Contains(t, out.String(), "│ ID │ NAME │")
 }
@@ -113,7 +113,7 @@ func TestDefaultFormatterSkipsNestedColumnsAndTruncatesCells(t *testing.T) {
 	Stdout = out
 	t.Cleanup(func() { Stdout = original })
 
-	err := NewDefaultFormatter(true).FormatList([]interface{}{
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
 		map[string]interface{}{
 			"id":       "one",
 			"prompt":   map[string]interface{}{"messages": []interface{}{"long"}},
@@ -139,7 +139,7 @@ func TestDefaultFormatterRendersResourceNamedWrapper(t *testing.T) {
 	Stdout = out
 	t.Cleanup(func() { Stdout = original })
 
-	err := NewDefaultFormatter(true).FormatList(map[string]interface{}{
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
 		"schedules": []interface{}{map[string]interface{}{"id": "one"}},
 	})
 	assert.NoError(t, err)
@@ -149,7 +149,7 @@ func TestDefaultFormatterRendersResourceNamedWrapper(t *testing.T) {
 
 func TestDefaultFormatterKeepsAmbiguousObjectAsJSON(t *testing.T) {
 	viper.Reset()
-	viper.Set("output-format", tableFormat)
+	viper.Set("output-format", "json")
 	viper.Set("jmespath", "")
 	viper.Set("raw", false)
 	out := new(bytes.Buffer)
@@ -157,7 +157,7 @@ func TestDefaultFormatterKeepsAmbiguousObjectAsJSON(t *testing.T) {
 	Stdout = out
 	t.Cleanup(func() { Stdout = original })
 
-	err := NewDefaultFormatter(true).FormatList(map[string]interface{}{
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
 		"input":  []interface{}{map[string]interface{}{"id": "one"}},
 		"output": []interface{}{map[string]interface{}{"id": "two"}},
 	})
@@ -176,7 +176,7 @@ func TestDefaultFormatterReportsEmptyCollection(t *testing.T) {
 	Stdout = out
 	t.Cleanup(func() { Stdout = original })
 
-	err := NewDefaultFormatter(true).FormatList(map[string]interface{}{
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
 		"data":     []interface{}{},
 		"has_more": false,
 	})
@@ -203,7 +203,7 @@ func TestDefaultFormatterSummarizesEnvelopeInFooter(t *testing.T) {
 	Stdout = out
 	t.Cleanup(func() { Stdout = original })
 
-	err := NewDefaultFormatter(true).FormatList(map[string]interface{}{
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
 		"object":   "list",
 		"has_more": true,
 		"data":     []interface{}{map[string]interface{}{"id": "one"}},
@@ -223,7 +223,7 @@ func TestDefaultFormatterFooterCountsAgainstTotal(t *testing.T) {
 	Stdout = out
 	t.Cleanup(func() { Stdout = original })
 
-	err := NewDefaultFormatter(true).FormatList(map[string]interface{}{
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
 		"data":     []interface{}{map[string]interface{}{"id": "one"}},
 		"total":    float64(47),
 		"limit":    float64(1),
@@ -252,16 +252,12 @@ func TestDefaultFormatterSerializesTableFormatWhenNotATerminal(t *testing.T) {
 	viper.Set("output-format", tableFormat)
 	viper.Set("jmespath", "")
 	viper.Set("raw", false)
-	originalSerialization := defaultSerialization
-	defaultSerialization = "toon"
-	t.Cleanup(func() { defaultSerialization = originalSerialization })
-
 	out := new(bytes.Buffer)
 	original := Stdout
 	Stdout = out
 	t.Cleanup(func() { Stdout = original })
 
-	err := NewDefaultFormatter(false).FormatList([]interface{}{
+	err := NewDefaultFormatter(false, false).FormatList([]interface{}{
 		map[string]interface{}{"id": "one"},
 	})
 	assert.NoError(t, err)
@@ -282,7 +278,7 @@ func TestDefaultFormatterSerializesForColorForcedOntoAPipe(t *testing.T) {
 	Stdout = out
 	t.Cleanup(func() { Stdout = original })
 
-	formatter := &DefaultFormatter{tty: true, terminal: false}
+	formatter := NewDefaultFormatter(true, false)
 	err := formatter.FormatList([]interface{}{map[string]interface{}{"id": "one"}})
 	assert.NoError(t, err)
 	assert.NotContains(t, out.String(), "│")
@@ -301,7 +297,7 @@ func TestDefaultFormatterKeepsExplicitFormatOnATerminal(t *testing.T) {
 			Stdout = out
 			t.Cleanup(func() { Stdout = original })
 
-			err := NewDefaultFormatter(true).FormatList([]interface{}{
+			err := NewDefaultFormatter(true, true).FormatList([]interface{}{
 				map[string]interface{}{"id": "one"},
 			})
 			assert.NoError(t, err)
@@ -321,7 +317,7 @@ func TestDefaultFormatterRawWinsOverTable(t *testing.T) {
 	Stdout = out
 	t.Cleanup(func() { Stdout = original })
 
-	err := NewDefaultFormatter(true).FormatList([]interface{}{
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
 		map[string]interface{}{"id": "one"},
 	})
 	assert.NoError(t, err)
@@ -340,10 +336,63 @@ func TestDefaultFormatterColumnsFlagSelectsColumns(t *testing.T) {
 	Stdout = out
 	t.Cleanup(func() { Stdout = original })
 
-	err := NewDefaultFormatter(true).FormatList([]interface{}{
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
 		map[string]interface{}{"id": "one", "name": "first", "note": "hidden"},
 	}, "id")
 	assert.NoError(t, err)
 	assert.Contains(t, out.String(), "│ NAME  │ ID  │")
 	assert.NotContains(t, out.String(), "NOTE")
+}
+
+func TestDefaultFormatterWarnsWhenAListCannotBeTabulated(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+
+	out, errOut := new(bytes.Buffer), new(bytes.Buffer)
+	originalOut, originalErr := Stdout, Stderr
+	Stdout, Stderr = out, errOut
+	t.Cleanup(func() { Stdout, Stderr = originalOut, originalErr })
+
+	// Two candidate arrays: nothing to tabulate without being told which.
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
+		"input":  []interface{}{map[string]interface{}{"id": "one"}},
+		"output": []interface{}{map[string]interface{}{"id": "two"}},
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, errOut.String(), "Not shown as a table")
+	assert.Contains(t, out.String(), "input")
+}
+
+func TestDefaultFormatterRejectsUnknownColumn(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	viper.Set("columns", "id,nmae")
+
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{"id": "one", "name": "first"},
+	})
+	assert.ErrorContains(t, err, `--columns: "nmae" is not a field of the returned items`)
+	assert.Empty(t, out.String())
+}
+
+func TestDefaultFormatterRejectsEmptyColumnList(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	viper.Set("columns", " , ")
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{"id": "one"},
+	})
+	assert.ErrorContains(t, err, "names no columns")
 }

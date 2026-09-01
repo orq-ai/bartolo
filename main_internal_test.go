@@ -378,7 +378,7 @@ func TestResolveInitConfigRejectsUnknownDefaultFormat(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected unknown default format error")
 	}
-	if !strings.Contains(err.Error(), "is not one of [json, yaml, toon]") {
+	if !strings.Contains(err.Error(), "is not one of [json, yaml, toon, table]") {
 		t.Fatalf("expected the error to name the allowed formats, got %q", err)
 	}
 }

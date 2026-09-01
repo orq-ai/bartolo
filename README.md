@@ -55,11 +55,14 @@ go build -o my-cli
 ./my-cli --help
 ```
 
-List commands render a table on a terminal. Everything else — a piped or
-redirected run, a non-list command, an explicit `-o json` — uses the CLI's
-serialization format, set through `--default-format` at generation time.
+The default output format is `table`: list commands render a table on a
+terminal, and everything else — a piped or redirected run, a non-list command,
+a response that is not a collection — serializes to TOON instead. A list that
+cannot be tabulated at a terminal says so on stderr rather than quietly
+serializing.
 
-Pick a different default, or opt out of tables entirely:
+Pick a different default at generation time with `bartolo init --default-format`,
+or persist one per machine, which also opts out of tables:
 
 ```sh
 ./my-cli default-format yaml
@@ -76,7 +79,7 @@ Every generated CLI starts with a useful operator surface:
 - A profile in force is authoritative for its key and takes precedence over the environment; the server is not held to the same rule — a profile saved without `--server` still falls through to `<PREFIX>_SERVER`. See the generated CLI's own README for the exact resolution order, which differs for the key and the server.
 - `request` provides a raw escape hatch for unmodeled endpoints.
 - `default-format` shows or persists the preferred default output format.
-- `-o table` (the default) renders list commands as a table on a terminal; `-o json|yaml|toon`, `--json`, and `--columns` pick the format and columns instead.
+- `-o table` (the default) renders list commands as a table on a terminal, and falls back to TOON elsewhere; `-o json|yaml|toon` and `--json` pick a serialization, and `--columns id,name` picks the table's columns.
 - `--json`, `--output-format`, and `-j`/`--jmespath` make automation and projection straightforward.
 - Generated flags never shadow a global: a body field or parameter named after one (`raw`, `profile`, `output-format`, ...) is exposed as `--body-<name>` or `--param-<name>`.
 - Grouped nouns like `prompts`, `files`, or `human-evals` feel closer to a product CLI than a path translator.

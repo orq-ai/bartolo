@@ -48,23 +48,18 @@ var Stderr io.Writer = os.Stderr
 
 var tty bool
 
-// stdoutIsTerminal reports whether stdout is a real terminal, as opposed to tty
-// above, which is also true when colored output is forced onto a pipe. Table
-// rendering keys off this one so `--color ... | cat` keeps emitting the
-// serialized format.
-var stdoutIsTerminal bool
-
-// defaultSerialization is the format used whenever output is not a table: the
-// app's configured DefaultOutputFormat.
-var defaultSerialization = "json"
-
 // Config is used to pass settings to the CLI.
 type Config struct {
-	AppName             string
-	EnvPrefix           string
-	APIKeyEnvVar        string
+	AppName      string
+	EnvPrefix    string
+	APIKeyEnvVar string
+
+	// DefaultOutputFormat is the initial value of `--output-format`, one of
+	// outputFormats. It defaults to `table`, which renders a list command as a
+	// table for a human at a terminal and serializes everywhere else.
 	DefaultOutputFormat string
-	Version             string
+
+	Version string
 }
 
 // Init will set up the CLI.
@@ -73,9 +68,9 @@ func Init(config *Config) {
 	initCache(config.AppName)
 	authInitialized = false
 
-	stdoutIsTerminal = isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
-
-	// Determine if we are using a TTY or colored output is forced-on.
+	// A forced color makes tty true on a pipe, so table rendering keys off the
+	// terminal check on its own: `--color ... | cat` stays serialized.
+	stdoutIsTerminal := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
 	tty = stdoutIsTerminal || viper.GetBool("color")
 
 	if viper.GetBool("nocolor") {
@@ -96,7 +91,7 @@ func Init(config *Config) {
 	UserAgentMiddleware()
 	LogMiddleware(tty)
 
-	Formatter = &DefaultFormatter{tty: tty, terminal: stdoutIsTerminal}
+	Formatter = NewDefaultFormatter(tty, stdoutIsTerminal)
 
 	Root = &cobra.Command{
 		Use:     filepath.Base(os.Args[0]),
@@ -111,14 +106,14 @@ func Init(config *Config) {
 			if !ok {
 				return NewValueError(fmt.Errorf("--output-format: %q is not one of [%s]", format, outputFormatList()))
 			}
-			viper.Set("output-format", normalized)
+			viper.Set(resolvedOutputFormatKey, normalized)
 
 			if err := applyServerSetting(cmd); err != nil {
 				return err
 			}
 
 			if viper.GetBool("json") {
-				viper.Set("output-format", "json")
+				viper.Set(resolvedOutputFormatKey, "json")
 			}
 
 			if viper.GetBool("verbose") {
@@ -170,7 +165,7 @@ func Init(config *Config) {
 	initAgentCommands()
 
 	AddGlobalFlag("verbose", "", "Enable verbose log output", false)
-	AddGlobalFlag("output-format", "o", fmt.Sprintf("Output format [%s]", outputFormatList()), tableFormat)
+	AddGlobalFlag("output-format", "o", fmt.Sprintf("Output format [%s]", outputFormatList()), outputFormatOrDefault(config.DefaultOutputFormat))
 	AddGlobalFlag("columns", "", "Comma-separated columns to show in table output", "")
 	AddGlobalFlag("json", "", "Alias for --output-format json", false)
 	// Named `jmespath` rather than `query` so it cannot collide with the many
@@ -273,14 +268,8 @@ func initConfig(appName, envPrefix, apiKeyEnvVar, defaultOutputFormat string) {
 
 	migrateLegacyServerConfig(configDir)
 	viper.SetDefault("api-key-env-var", apiKeyEnvVar)
-	defaultSerialization = serializationOrDefault(defaultOutputFormat)
-	viper.SetDefault("output-format", tableFormat)
+	viper.SetDefault("output-format", outputFormatOrDefault(defaultOutputFormat))
 }
-
-// tableFormat renders a list command as a table for a human at a terminal, and
-// falls back to defaultSerialization for everything else: a piped or redirected
-// run, a non-list command, and a payload that is not a collection.
-const tableFormat = "table"
 
 // outputFormats are the values accepted by `--output-format` / `-o` and by the
 // `default-format` command. Help text and error messages are built from this
@@ -291,13 +280,26 @@ func outputFormatList() string {
 	return strings.Join(outputFormats, ", ")
 }
 
-// serializationOrDefault normalizes a Config.DefaultOutputFormat. `table` is not
-// a serialization, so it cannot stand in as the fallback for itself.
-func serializationOrDefault(value string) string {
-	if format, ok := parseOutputFormat(value); ok && format != tableFormat {
+// resolvedOutputFormatKey holds the format resolved for the command being run.
+// Writing the normalized value back to `output-format` would make it a viper
+// override, which outranks the flag, so the first command run in a process
+// would pin the format for every later one.
+const resolvedOutputFormatKey = "output-format-resolved"
+
+// outputFormat is the format the running command should produce.
+func outputFormat() string {
+	if resolved := viper.GetString(resolvedOutputFormatKey); resolved != "" {
+		return resolved
+	}
+
+	return outputFormatOrDefault(viper.GetString("output-format"))
+}
+
+func outputFormatOrDefault(value string) string {
+	if format, ok := parseOutputFormat(value); ok {
 		return format
 	}
-	return "json"
+	return tableFormat
 }
 
 func parseOutputFormat(value string) (string, bool) {
@@ -344,7 +346,7 @@ func newDefaultFormatCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return Formatter.Format(map[string]interface{}{
-					"output_format": viper.GetString("output-format"),
+					"output_format": outputFormat(),
 				})
 			}
 

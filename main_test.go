@@ -71,7 +71,9 @@ func TestEchoSuccess(t *testing.T) {
 	}
 
 	// Call the compiled executable CLI to hit our test server.
-	out, err := exec.Command(cliPath, "echo", "hello:", "world", "--echo-query=foo", "--x-request-id", "bar").CombinedOutput()
+	// -o json because the assertion parses the response; the default renders a
+	// table for a human and serializes to toon everywhere else.
+	out, err := exec.Command(cliPath, "echo", "hello:", "world", "--echo-query=foo", "--x-request-id", "bar", "-o", "json").CombinedOutput()
 	if err != nil {
 		fmt.Println(string(out))
 		panic(err)
@@ -103,7 +105,7 @@ func TestEchoExamplePrintsAndExitsZero(t *testing.T) {
 		t.Fatalf("write body file: %v", err)
 	}
 
-	out, err = exec.Command(cliPath, "echo", "--from-file", bodyFile).CombinedOutput()
+	out, err = exec.Command(cliPath, "echo", "--from-file", bodyFile, "-o", "json").CombinedOutput()
 	if err != nil {
 		t.Fatalf("echo --from-file: %v\n%s", err, string(out))
 	}
