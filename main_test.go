@@ -70,9 +70,9 @@ func TestEchoSuccess(t *testing.T) {
 		t.Fatalf("build example-cli: %v\n%s", err, string(out))
 	}
 
-	// Call the compiled executable CLI to hit our test server.
-	// -o json because the assertion parses the response; the default is table/toon.
-	out, err := exec.Command(cliPath, "echo", "hello:", "world", "--echo-query=foo", "--x-request-id", "bar", "-o", "json").CombinedOutput()
+	// Call the compiled executable CLI to hit our test server. No -o: this is
+	// also the end-to-end check that a piped run serializes rather than tabulates.
+	out, err := exec.Command(cliPath, "echo", "hello:", "world", "--echo-query=foo", "--x-request-id", "bar").CombinedOutput()
 	if err != nil {
 		fmt.Println(string(out))
 		panic(err)
@@ -104,28 +104,9 @@ func TestEchoExamplePrintsAndExitsZero(t *testing.T) {
 		t.Fatalf("write body file: %v", err)
 	}
 
-	out, err = exec.Command(cliPath, "echo", "--from-file", bodyFile, "-o", "json").CombinedOutput()
+	out, err = exec.Command(cliPath, "echo", "--from-file", bodyFile).CombinedOutput()
 	if err != nil {
 		t.Fatalf("echo --from-file: %v\n%s", err, string(out))
 	}
 	assert.JSONEq(t, "{\"hello\": \"world\"}", string(out))
-}
-
-// The one guarantee the ticket called non-negotiable: a pipe is unchanged by
-// the table default. CombinedOutput is a pipe, so no table may reach it.
-func TestPipedDefaultOutputIsNotATable(t *testing.T) {
-	cliPath := filepath.Join(os.TempDir(), "bartolo-example-cli")
-	build := exec.Command("go", "build", "-o", cliPath, "./example-cli")
-	build.Dir = "."
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build example-cli: %v\n%s", err, string(out))
-	}
-
-	out, err := exec.Command(cliPath, "echo", "hello:", "world").CombinedOutput()
-	if err != nil {
-		t.Fatalf("echo: %v\n%s", err, string(out))
-	}
-
-	assert.NotContains(t, string(out), "│")
-	assert.Contains(t, string(out), "hello")
 }

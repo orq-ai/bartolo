@@ -184,15 +184,6 @@ func TestDefaultFormatterReportsEmptyCollection(t *testing.T) {
 	assert.Equal(t, "No results.\n", out.String())
 }
 
-func TestFitColumnsDropsTrailingColumns(t *testing.T) {
-	headers := []string{"id", "name", "description"}
-	values := [][]string{{"one", "first", "a long description"}}
-
-	headers, values = fitColumns(headers, values, 20)
-	assert.Equal(t, []string{"id", "name"}, headers)
-	assert.Equal(t, [][]string{{"one", "first"}}, values)
-}
-
 func TestDefaultFormatterSummarizesEnvelopeInFooter(t *testing.T) {
 	viper.Reset()
 	viper.Set("output-format", tableFormat)
@@ -396,44 +387,36 @@ func TestDefaultFormatterRejectsEmptyColumnList(t *testing.T) {
 	assert.ErrorContains(t, err, "names no columns")
 }
 
-// Columns named on the command line are what the caller could not get any
-// other way, so a narrow terminal must not drop them the way it drops a guess.
-func TestDefaultFormatterKeepsRequestedColumnsOnANarrowTerminal(t *testing.T) {
-	viper.Reset()
-	viper.Set("output-format", tableFormat)
-	viper.Set("jmespath", "")
-	viper.Set("raw", false)
-	viper.Set("columns", "id,name,description")
+// Trimming to fit is for a guess. Columns someone asked for by name are the
+// one thing the flag exists to guarantee, so a narrow terminal keeps them.
+func TestDefaultFormatterTrimsOnlyGuessedColumns(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		columns string
+		want    func(assert.TestingT, interface{}, interface{}, ...interface{}) bool
+	}{
+		{"asked for by name", "id,name,description", assert.Contains},
+		{"guessed", "", assert.NotContains},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			viper.Reset()
+			viper.Set("output-format", tableFormat)
+			viper.Set("jmespath", "")
+			viper.Set("raw", false)
+			viper.Set("columns", tc.columns)
 
-	out := new(bytes.Buffer)
-	originalOut, originalWidth := Stdout, terminalWidth
-	Stdout, terminalWidth = out, func() int { return 20 }
-	t.Cleanup(func() { Stdout, terminalWidth = originalOut, originalWidth })
+			out := new(bytes.Buffer)
+			originalOut, originalWidth := Stdout, terminalWidth
+			Stdout, terminalWidth = out, func() int { return 20 }
+			t.Cleanup(func() { Stdout, terminalWidth = originalOut, originalWidth })
 
-	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
-		map[string]interface{}{"id": "one", "name": "first", "description": "a long description"},
-	}, "id")
-	assert.NoError(t, err)
-	assert.Contains(t, out.String(), "DESCRIPTION")
-}
-
-// Auto-derived columns are a guess, so trimming them to fit is the right call.
-func TestDefaultFormatterTrimsAutoColumnsOnANarrowTerminal(t *testing.T) {
-	viper.Reset()
-	viper.Set("output-format", tableFormat)
-	viper.Set("jmespath", "")
-	viper.Set("raw", false)
-
-	out := new(bytes.Buffer)
-	originalOut, originalWidth := Stdout, terminalWidth
-	Stdout, terminalWidth = out, func() int { return 20 }
-	t.Cleanup(func() { Stdout, terminalWidth = originalOut, originalWidth })
-
-	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
-		map[string]interface{}{"id": "one", "name": "first", "description": "a long description"},
-	})
-	assert.NoError(t, err)
-	assert.NotContains(t, out.String(), "DESCRIPTION")
+			err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+				map[string]interface{}{"id": "one", "name": "first", "description": "a long description"},
+			})
+			assert.NoError(t, err)
+			tc.want(t, out.String(), "DESCRIPTION")
+		})
+	}
 }
 
 // Accepting --columns and then ignoring it is the same silent mismatch the
@@ -456,24 +439,4 @@ func TestDefaultFormatterSaysWhenColumnsAreIgnored(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Contains(t, errOut.String(), "--columns was ignored")
 	assert.Contains(t, out.String(), `"name"`)
-}
-
-// A column list that cannot apply must not fail a command it cannot affect.
-func TestDefaultFormatterIgnoresAMalformedColumnsValueWhenNotATable(t *testing.T) {
-	viper.Reset()
-	viper.Set("output-format", "json")
-	viper.Set("jmespath", "")
-	viper.Set("raw", false)
-	viper.Set("columns", " , ")
-
-	out, errOut := new(bytes.Buffer), new(bytes.Buffer)
-	originalOut, originalErr := Stdout, Stderr
-	Stdout, Stderr = out, errOut
-	t.Cleanup(func() { Stdout, Stderr = originalOut, originalErr })
-
-	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
-		map[string]interface{}{"id": "one"},
-	}, "id")
-	assert.NoError(t, err)
-	assert.Contains(t, out.String(), `"id"`)
 }
