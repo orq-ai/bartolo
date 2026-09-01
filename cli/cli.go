@@ -68,8 +68,7 @@ func Init(config *Config) {
 	initCache(config.AppName)
 	authInitialized = false
 
-	// A forced color makes tty true on a pipe, so table rendering keys off the
-	// terminal check on its own: `--color ... | cat` stays serialized.
+	// Forced color makes tty true on a pipe, so tables key off terminal alone.
 	stdoutIsTerminal := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
 	tty = stdoutIsTerminal || viper.GetBool("color")
 
@@ -167,10 +166,7 @@ func Init(config *Config) {
 	// endpoints whose request body or query string has a `query` field. The old
 	// `-q` shorthand went with it: it abbreviated a name that no longer exists.
 	AddGlobalFlag("jmespath", "j", "Filter / project results using JMESPath", "")
-	// Unwraps a scalar result rather than choosing a format: a string prints
-	// unquoted and a list of scalars prints one per line, which is what a shell
-	// wants from a --jmespath projection. Anything else is unaffected, and the
-	// format still comes from --output-format.
+	// Unwraps a scalar result for the shell rather than choosing a format; the format still comes from --output-format.
 	AddGlobalFlag("raw", "", "Print a string or scalar list result unquoted, one item per line, instead of serializing it", false)
 	AddGlobalFlag("server", "", "API base URL, e.g. https://api.example.com", "")
 }

@@ -71,8 +71,7 @@ func TestEchoSuccess(t *testing.T) {
 	}
 
 	// Call the compiled executable CLI to hit our test server.
-	// -o json because the assertion parses the response; the default renders a
-	// table for a human and serializes to toon everywhere else.
+	// -o json because the assertion parses the response; the default is table/toon.
 	out, err := exec.Command(cliPath, "echo", "hello:", "world", "--echo-query=foo", "--x-request-id", "bar", "-o", "json").CombinedOutput()
 	if err != nil {
 		fmt.Println(string(out))

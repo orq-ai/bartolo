@@ -70,14 +70,10 @@ func FormatList(data interface{}, columns ...string) error {
 	return Formatter.Format(data)
 }
 
-// DefaultFormatter can apply JMESPath queries and can output prettyfied JSON,
-// YAML, or TOON output. If Stdout is a TTY, then colorized output is provided.
-// The default formatter uses the `jmespath` and `output-format` configuration
-// values to perform JMESPath queries and render a table (default), JSON, YAML,
-// or TOON output.
+// DefaultFormatter can apply JMESPath queries and can render a table or output
+// prettyfied JSON, YAML, or TOON. If Stdout is a TTY, colorized output is provided.
 type DefaultFormatter struct {
-	// tty enables colorized output; terminal reports whether stdout really is a
-	// terminal. They differ when color is forced onto a pipe.
+	// tty and terminal differ when color is forced onto a pipe.
 	tty      bool
 	terminal bool
 }
@@ -122,9 +118,7 @@ func (f *DefaultFormatter) format(data interface{}, list bool, columns []string)
 		data = result
 	}
 
-	// Columns named on the command line replace the ones the spec asked for, and
-	// unlike those are dropped from the right when the table does not fit: a
-	// human typing a dozen names should not get an overflowing table.
+	// Unlike the spec's columns, ones named on the command line are dropped from the right when the table does not fit.
 	pinned := len(columns) > 0
 	if list {
 		if override := viper.GetString("columns"); override != "" {
@@ -144,8 +138,7 @@ func (f *DefaultFormatter) format(data interface{}, list bool, columns []string)
 			return nil
 		}
 
-		// Falling back silently is indistinguishable from the table feature
-		// being broken, which is the bug this whole path exists to fix.
+		// Falling back silently looks exactly like the bug this path exists to fix.
 		fmt.Fprintf(Stderr, "Not shown as a table: this response is not a recognizable collection. Showing %s instead.\n", tableFallbackFormat)
 	}
 

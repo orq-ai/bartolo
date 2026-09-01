@@ -265,8 +265,7 @@ func TestDefaultFormatterSerializesTableFormatWhenNotATerminal(t *testing.T) {
 	assert.Contains(t, out.String(), "id")
 }
 
-// Forced color makes tty true on a pipe, which must not be enough to turn a
-// redirect into a table.
+// Forced color makes tty true on a pipe, which must not turn a redirect into a table.
 func TestDefaultFormatterSerializesForColorForcedOntoAPipe(t *testing.T) {
 	viper.Reset()
 	viper.Set("output-format", tableFormat)

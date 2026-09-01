@@ -22,9 +22,7 @@ func TestInvalidOutputFormatIsRejected(t *testing.T) {
 	assert.Empty(t, stdout)
 }
 
-// --json used to force JSON past an explicit --output-format, so it was never
-// the alias its help text claimed. `-o json` says the same thing in the one
-// place formats are chosen.
+// --json forced JSON past an explicit --output-format, so it was never the alias it claimed.
 func TestJSONFlagIsGone(t *testing.T) {
 	initExitTestCLI(t)
 
@@ -115,8 +113,7 @@ func TestOutputFormatDefaultsToTableAndEnvOverridesIt(t *testing.T) {
 	}
 }
 
-// The normalized format is written to its own key, so the first command run in
-// a process cannot pin the format for the ones after it.
+// The normalized format goes to its own key so one command cannot pin the next.
 func TestOutputFormatIsResolvedPerCommand(t *testing.T) {
 	initExitTestCLI(t)
 
