@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rs/zerolog"
+	zlog "github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	gentleman "gopkg.in/h2non/gentleman.v2"
@@ -762,5 +764,37 @@ func TestResponseErrorRedactsTheBody(t *testing.T) {
 		if !strings.Contains(msg, "invalid audience") {
 			t.Errorf("%s dropped the error message: %s", name, msg)
 		}
+	}
+}
+
+// The request body reaches readStdin before any of http.go's redactors, so a
+// debug log of it there prints the credential the wire logging masks.
+func TestReadStdinDoesNotLogTheBody(t *testing.T) {
+	const secret = "sk-orq-thisisnottherealkey"
+
+	name := filepath.Join(t.TempDir(), "body.json")
+	if err := os.WriteFile(name, []byte(`{"api_key":"`+secret+`"}`), 0o600); err != nil {
+		t.Fatalf("seed body: %v", err)
+	}
+	stdin, err := os.Open(name)
+	if err != nil {
+		t.Fatalf("open body: %v", err)
+	}
+	defer stdin.Close()
+
+	logged := new(bytes.Buffer)
+	previous := zlog.Logger
+	zlog.Logger = zerolog.New(logged).Level(zerolog.DebugLevel)
+	t.Cleanup(func() { zlog.Logger = previous })
+
+	body, err := readStdin(stdin)
+	if err != nil {
+		t.Fatalf("readStdin: %v", err)
+	}
+	if !strings.Contains(body, secret) {
+		t.Fatalf("readStdin returned %q, want the body itself", body)
+	}
+	if out := logged.String(); strings.Contains(out, secret) {
+		t.Fatalf("the debug log printed the body:\n%s", out)
 	}
 }
