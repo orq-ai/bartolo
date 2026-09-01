@@ -460,7 +460,9 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				// Only advertised where a field actually normalizes: a nullable,
 				// enum or array date-time keeps its own flag type and is sent as
 				// typed, so promising the syntax there would be wrong.
-				if slices.ContainsFunc(bodyFields, func(f *BodyField) bool { return f != nil && f.Type == "datetime" }) {
+				if slices.ContainsFunc(bodyFields, func(f *BodyField) bool {
+					return f != nil && (f.Type == "datetime" || f.Type == "datetime-nullable")
+				}) {
 					description += " Timestamp fields (`format: date-time`) also accept a bare date or a relative value such as `24h`, `7d` or `now-24h`."
 				}
 			}
@@ -1227,10 +1229,20 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 			// Resolved here, not at render time, so there is nothing to skip further down.
 			var enum []string
 			var format string
-			if t == "string" && !extBool(p.Value.Extensions[ExtNoValidate]) && p.Value.Schema != nil {
-				enum = enumStrings(p.Value.Schema.Value)
+			if t == "string" && p.Value.Schema != nil {
+				noValidate := extBool(p.Value.Extensions[ExtNoValidate])
+				if !noValidate {
+					enum = enumStrings(p.Value.Schema.Value)
+				}
 				if effective, _ := effectiveBodySchema(p.Value.Schema.Value); effective != nil {
-					format = effective.Format
+					// x-cli-no-validate opts out of a constraint that is stricter
+					// than the API. date-time is not one: it widens what the flag
+					// takes and rejects nothing the server would have accepted, so
+					// it survives the opt-out along with the flag help that
+					// advertises it.
+					if !noValidate || effective.Format == "date-time" {
+						format = effective.Format
+					}
 				}
 			}
 
@@ -1567,19 +1579,24 @@ func bodyFieldType(schema *openapi3.Schema) string {
 	if base == "" {
 		return "json"
 	}
-	if nullable {
-		// A nullable date-time stays nullable-string: sending JSON null matters
-		// more there, and one token cannot do both.
-		return base + "-nullable"
-	}
 	if base == "string" && isDateTimeSchema(effective, schema) {
+		// Nullable keeps both behaviours: the "null" sentinel is a value
+		// NormalizeDateTime always rejects, so checking it first cannot shadow a
+		// timestamp.
+		if nullable {
+			return "datetime-nullable"
+		}
 		return "datetime"
+	}
+	if nullable {
+		return base + "-nullable"
 	}
 	return base
 }
 
 // isDateTimeSchema takes both the effective schema and the original, since a
-// nullability wrapper may carry `format` rather than its branch.
+// single-branch anyOf/oneOf wrapper may carry `format` while its branch does
+// not, and effectiveBodySchema returns the branch.
 func isDateTimeSchema(schemas ...*openapi3.Schema) bool {
 	for _, schema := range schemas {
 		if schema != nil && schema.Format == "date-time" {

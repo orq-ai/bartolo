@@ -77,34 +77,38 @@ blocks need is a field on the operation itself (see Operation.PublicPrefix).
 				if {{ $param.GoName }} == "" {
 					return nil, nil, bartolocli.NewValueError(errors.Errorf("path parameter {{ $param.Name }} cannot be empty"))
 				}
-
-				url = strings.Replace(url, "{{`{`}}{{ $param.Name | escapeStr }}{{`}`}}", neturl.PathEscape({{ $param.GoName }}), 1)
 			{{- end }}
 		{{- end }}
 
-		{{/* Required values the schema rules out. Optional ones are checked
-		below, where the check only applies when the flag was set. Both exit 2
-		without a request; x-cli-no-validate opts out a stricter-than-API schema. */}}
+		{{/* Required values the schema rules out, plus the formats that accept
+		wider input than they send. Optional ones are handled below, where this
+		only applies when the flag was set. Both exit 2 without a request;
+		x-cli-no-validate opts out a stricter-than-API schema.
+
+		NormalizeParam covers every format: the ones with nothing to widen are
+		checked and handed back unchanged, so there is one call path here rather
+		than a per-format branch. Path params run before the URL is built, so a
+		relative timestamp reaches the server as RFC 3339 there too.
+
+		The temporary is scoped to its own block because a sibling param can
+		share the name one named after this param would take: `from` and
+		`from-time` both yield `paramFromTime`, and at function scope the := would
+		assign the sibling instead of declaring a temporary. */}}
 		{{- range .RequiredParams }}
 			{{- if or .Enum .Format }}
-				{{- /* A date-time check returns the value to send. Path params are
-				excluded: the URL is already built above. The temporary is scoped
-				to its own block: a sibling param can share its Go name (`from`
-				and `from-time` both yield `paramFromTime`), and at function scope
-				that assigns the sibling instead of declaring a temporary. */}}
-				{{- if and (eq .Format "date-time") (ne .In "path") }}
-					{
-						normalized, err := bartolocli.NormalizeParam("argument {{ .Name | slug | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} })
-						if err != nil {
-							return nil, nil, err
-						}
-						{{ .GoName }} = normalized
-					}
-				{{- else }}
-					if err := bartolocli.CheckParam("argument {{ .Name | slug | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} }); err != nil {
+				{
+					normalized, err := bartolocli.NormalizeParam("argument {{ .Name | slug | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} })
+					if err != nil {
 						return nil, nil, err
 					}
-				{{- end }}
+					{{ .GoName }} = normalized
+				}
+			{{- end }}
+		{{- end }}
+
+		{{- range $param := .RequiredParams }}
+			{{- if eq $param.In "path" }}
+				url = strings.Replace(url, "{{`{`}}{{ $param.Name | escapeStr }}{{`}`}}", neturl.PathEscape({{ $param.GoName }}), 1)
 			{{- end }}
 		{{- end }}
 
@@ -124,19 +128,13 @@ blocks need is a field on the operation itself (see Operation.PublicPrefix).
 			if bartolocli.FlagPassed(params, "{{ .CLIName | escapeStr }}") || {{ .GoName }} != {{ .TypeNil }} {
 				{{- if or .Enum .Format }}
 					{{- /* Enum and Format are string-only (see getParams), so no fmt.Sprintf — Imports.Fmt is set from `in`, not here. */}}
-					{{- if eq .Format "date-time" }}
-						{
-							normalized, err := bartolocli.NormalizeParam("--{{ .CLIName | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} })
-							if err != nil {
-								return nil, nil, err
-							}
-							{{ .GoName }} = normalized
-						}
-					{{- else }}
-						if err := bartolocli.CheckParam("--{{ .CLIName | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} }); err != nil {
+					{
+						normalized, err := bartolocli.NormalizeParam("--{{ .CLIName | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} })
+						if err != nil {
 							return nil, nil, err
 						}
-					{{- end }}
+						{{ .GoName }} = normalized
+					}
 				{{- end }}
 				{{- if eq .In "query" }}
 					req = req.AddQuery("{{ .Name | escapeStr }}", fmt.Sprintf("%v", {{ .GoName }}))

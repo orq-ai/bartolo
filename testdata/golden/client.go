@@ -40,10 +40,12 @@ func ExampleGetThing(paramId string, paramFrom string, paramFromTime string, par
 		return nil, nil, bartolocli.NewValueError(errors.Errorf("path parameter id cannot be empty"))
 	}
 
-	url = strings.Replace(url, "{id}", neturl.PathEscape(paramId), 1)
-
-	if err := bartolocli.CheckParam("argument id", paramId, "uuid", []string{}); err != nil {
-		return nil, nil, err
+	{
+		normalized, err := bartolocli.NormalizeParam("argument id", paramId, "uuid", []string{})
+		if err != nil {
+			return nil, nil, err
+		}
+		paramId = normalized
 	}
 	{
 		normalized, err := bartolocli.NormalizeParam("argument from", paramFrom, "date-time", []string{})
@@ -52,6 +54,7 @@ func ExampleGetThing(paramId string, paramFrom string, paramFromTime string, par
 		}
 		paramFrom = normalized
 	}
+	url = strings.Replace(url, "{id}", neturl.PathEscape(paramId), 1)
 
 	req := bartolocli.Client.Get().URL(url)
 
@@ -73,8 +76,12 @@ func ExampleGetThing(paramId string, paramFrom string, paramFromTime string, par
 	}
 	paramKind := params.GetString("kind")
 	if bartolocli.FlagPassed(params, "kind") || paramKind != "" {
-		if err := bartolocli.CheckParam("--kind", paramKind, "", []string{"internal", "a2a"}); err != nil {
-			return nil, nil, err
+		{
+			normalized, err := bartolocli.NormalizeParam("--kind", paramKind, "", []string{"internal", "a2a"})
+			if err != nil {
+				return nil, nil, err
+			}
+			paramKind = normalized
 		}
 		req = req.AddQuery("kind", fmt.Sprintf("%v", paramKind))
 	}
@@ -95,8 +102,12 @@ func ExampleGetThing(paramId string, paramFrom string, paramFromTime string, par
 	}
 	paramSess := params.GetString("sess")
 	if bartolocli.FlagPassed(params, "sess") || paramSess != "" {
-		if err := bartolocli.CheckParam("--sess", paramSess, "", []string{"a", "b"}); err != nil {
-			return nil, nil, err
+		{
+			normalized, err := bartolocli.NormalizeParam("--sess", paramSess, "", []string{"a", "b"})
+			if err != nil {
+				return nil, nil, err
+			}
+			paramSess = normalized
 		}
 	}
 

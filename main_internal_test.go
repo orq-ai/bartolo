@@ -503,8 +503,8 @@ func TestBodyFieldTypeCoversCommonShapes(t *testing.T) {
 		"metadata_any": "string-map",
 		"color":        "enum-string",
 		"from":         "datetime",
-		// Nullable keeps the nullable-string flag; any other format stays plain.
-		"expires_at": "string-nullable",
+		// Nullable date-time keeps both behaviours; any other format stays plain.
+		"expires_at": "datetime-nullable",
 		"email":      "string",
 	}
 	for name, typ := range want {
@@ -1328,8 +1328,8 @@ paths:
 
 	rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", doc))
 
-	if !strings.Contains(rendered, `bartolocli.CheckParam("argument agent-id", paramAgentId, "uuid"`) {
-		t.Error("required path param with format: uuid should be checked")
+	if !strings.Contains(rendered, `bartolocli.NormalizeParam("argument agent-id", paramAgentId, "uuid"`) {
+		t.Errorf("required path param with format: uuid should be checked, got:\n%s", rendered)
 	}
 
 	// The enum sits behind an anyOf/null wrapper, which must be resolved, and
@@ -1428,6 +1428,40 @@ paths:
 	}
 }
 
+// A date-time path param has to normalize before the URL is substituted, or the
+// relative value reaches the server verbatim. The empty check stays first so it
+// keeps its own message.
+func TestPathDateTimeParamNormalizesBeforeTheURLIsBuilt(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Path Date-time API
+  version: "1"
+paths:
+  /events/{at}:
+    get:
+      operationId: GetAt
+      parameters:
+        - {name: at, in: path, required: true, schema: {type: string, format: date-time}}
+      responses:
+        "200":
+          description: ok
+`)
+
+	rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", doc))
+
+	normalize := strings.Index(rendered, `NormalizeParam("argument at"`)
+	substitute := strings.Index(rendered, `strings.Replace(url, "{at}"`)
+	empty := strings.Index(rendered, "cannot be empty")
+
+	if normalize < 0 || substitute < 0 || empty < 0 {
+		t.Fatalf("expected an empty check, a normalization and a substitution, got:\n%s", rendered)
+	}
+	if !(empty < normalize && normalize < substitute) {
+		t.Errorf("want empty check, then normalization, then substitution, got offsets %d/%d/%d in:\n%s", empty, normalize, substitute, rendered)
+	}
+}
+
 func TestDateTimeParamFlagAdvertisesRelativeValues(t *testing.T) {
 	doc := loadTestSpec(t, `
 openapi: 3.0.3
@@ -1503,8 +1537,9 @@ paths:
 	}{
 		{"plain date-time", "                name: {type: string}\n                at: {type: string, format: date-time}", true},
 		{"no timestamp at all", "                name: {type: string}\n                count: {type: integer}", false},
-		// Each of these resolves to a flag type that skips normalization.
-		{"nullable date-time", "                at: {type: string, format: date-time, nullable: true}", false},
+		{"nullable date-time", "                at: {type: string, format: date-time, nullable: true}", true},
+		// An array of date-times resolves to a slice flag, which sends elements
+		// as typed, so the syntax genuinely does not apply.
 		{"array of date-times", "                at: {type: array, items: {type: string, format: date-time}}", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1551,12 +1586,66 @@ paths:
           description: ok
 `
 
-	if rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(spec, "false")))); !strings.Contains(rendered, `CheckParam("--cursor"`) {
+	if rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(spec, "false")))); !strings.Contains(rendered, `NormalizeParam("--cursor"`) {
 		t.Errorf("x-cli-no-validate: false should leave the check in place, got:\n%s", rendered)
 	}
 
-	if rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(spec, "true")))); strings.Contains(rendered, `CheckParam("--cursor"`) {
+	if rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(spec, "true")))); strings.Contains(rendered, `NormalizeParam("--cursor"`) {
 		t.Errorf("x-cli-no-validate: true should suppress the check, got:\n%s", rendered)
+	}
+}
+
+// x-cli-no-validate drops a constraint that is stricter than the API. date-time
+// is not one — it widens what the flag accepts and rejects nothing the server
+// would have taken — so normalization and its flag help survive the opt-out.
+func TestNoValidateKeepsDateTimeNormalization(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Ext Date-time API
+  version: "1"
+paths:
+  /things:
+    get:
+      operationId: ListThings
+      parameters:
+        - in: query
+          name: from
+          x-cli-no-validate: true
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: kind
+          x-cli-no-validate: true
+          schema:
+            type: string
+            enum: [a, b]
+      responses:
+        "200":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+	rendered := renderCommandTemplate("templates/generated_client.tmpl", api)
+
+	if !strings.Contains(rendered, `NormalizeParam("--from", paramFrom, "date-time"`) {
+		t.Errorf("date-time should still normalize under the opt-out, got:\n%s", rendered)
+	}
+	// The enum it was actually pointed at is still dropped.
+	if strings.Contains(rendered, `NormalizeParam("--kind"`) {
+		t.Errorf("an enum should still be dropped by the opt-out, got:\n%s", rendered)
+	}
+
+	group := api.Groups[0]
+	commands := renderCommandTemplate("templates/generated_group_commands.tmpl", &CommandsTemplateData{
+		API:        api,
+		Group:      group,
+		Operations: group.Operations,
+		NeedsFmt:   commandFileNeedsFmt(group.Operations),
+	})
+	if !strings.Contains(commands, "bartolocli.WithDateTimeHelp") {
+		t.Errorf("the flag help should survive the opt-out too, got:\n%s", commands)
 	}
 }
 

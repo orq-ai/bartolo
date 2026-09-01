@@ -61,6 +61,10 @@ smoke:
 		code=$$?; set -e; \
 		test "$$code" -eq 2 || { echo "a bad timestamp exited $$code, want 2"; exit 1; }; \
 		case "$$out" in *"is not a timestamp"*) ;; *) echo "the error should name the rejected value, got: $$out"; exit 1;; esac; \
-		case "$$out" in *24h*) ;; *) echo "the error should name the accepted forms, got: $$out"; exit 1;; esac
+		case "$$out" in *24h*) ;; *) echo "the error should name the accepted forms, got: $$out"; exit 1;; esac; \
+		printf '==> smoke: generated CLI sends relative timestamps as RFC 3339\n'; \
+		set +e; out=$$("$$SMOKE_DIR/bin/example" echo echo 24h --until 2w </dev/null 2>&1); set -e; \
+		case "$$out" in *"since=20"*"%3A"*"Z"*) ;; *) echo "a required date-time should reach the URL as RFC 3339, got: $$out"; exit 1;; esac; \
+		case "$$out" in *"until=20"*"%3A"*"Z"*) ;; *) echo "an optional date-time should reach the URL as RFC 3339, got: $$out"; exit 1;; esac
 
 verify: smoke test

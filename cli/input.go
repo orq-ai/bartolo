@@ -32,6 +32,7 @@ const nullableFlagSentinel = "null"
 //   - "enum-string": string flag whose value is validated against Enum.
 //   - "datetime": `format: date-time` string, normalized to RFC 3339 before the
 //     request is built. See NormalizeDateTime for the accepted forms.
+//   - "datetime-nullable": the same, but the literal "null" sends JSON null.
 //   - "json": fallback for nested objects, arrays of objects, and
 //     polymorphic unions. Value is parsed as JSON before being merged into
 //     the request body.
@@ -136,6 +137,8 @@ func AddBodyFieldFlags(cmd *cobra.Command, fields []BodyField) {
 			cmd.Flags().StringToString(name, nil, description+" (key=value, repeatable)")
 		case "datetime":
 			cmd.Flags().String(name, "", WithDateTimeHelp(description))
+		case "datetime-nullable":
+			cmd.Flags().String(name, "", WithDateTimeHelp(description)+` (pass "null" to send JSON null)`)
 		case "json":
 			cmd.Flags().String(name, "", description+" (JSON value, e.g. '{\"k\":1}' or '[1,2]')")
 		case "json-or-string":
@@ -192,6 +195,10 @@ func getBodyWithFlags(cmd *cobra.Command, mediaType string, args []string, param
 			return "", err
 		}
 
+		if err := normalizeShorthandDateTimes(result, fields); err != nil {
+			return "", err
+		}
+
 		body, err = mergeStructuredBody(mediaType, body, result)
 		if err != nil {
 			return "", err
@@ -199,6 +206,37 @@ func getBodyWithFlags(cmd *cobra.Command, mediaType string, args []string, param
 	}
 
 	return ApplyBodyFlags(cmd, params, mediaType, body, fields)
+}
+
+// normalizeShorthandDateTimes applies date-time normalization to top-level
+// shorthand values, so `from: 24h` means what `--from 24h` means. Shorthand is
+// typed by hand at a prompt and deserves the same convenience as a flag; a body
+// from --from-file or stdin is machine-written, so it is passed through as given
+// rather than silently rewritten.
+func normalizeShorthandDateTimes(body map[string]interface{}, fields []BodyField) error {
+	for _, field := range fields {
+		if field.Type != "datetime" && field.Type != "datetime-nullable" {
+			continue
+		}
+
+		raw, ok := body[field.Name].(string)
+		if !ok {
+			// Absent, or already a non-string the server will judge.
+			continue
+		}
+		if field.Type == "datetime-nullable" && strings.TrimSpace(raw) == nullableFlagSentinel {
+			body[field.Name] = nil
+			continue
+		}
+
+		normalized, err := NormalizeDateTime(raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", field.Name, err)
+		}
+		body[field.Name] = normalized
+	}
+
+	return nil
 }
 
 // bodySuppliedElsewhere reports whether a source other than stdin has already
@@ -320,6 +358,19 @@ func ApplyBodyFlags(cmd *cobra.Command, params *viper.Viper, mediaType string, b
 			}
 			overrides[field.Name] = values
 		case "datetime":
+			value, err := NormalizeDateTimeFlag(name, params.GetString(name))
+			if err != nil {
+				return "", err
+			}
+			overrides[field.Name] = value
+		case "datetime-nullable":
+			// The sentinel is checked first, which is safe because
+			// NormalizeDateTime rejects "null": neither behaviour can shadow the
+			// other.
+			if strings.TrimSpace(params.GetString(name)) == nullableFlagSentinel {
+				overrides[field.Name] = nil
+				break
+			}
 			value, err := NormalizeDateTimeFlag(name, params.GetString(name))
 			if err != nil {
 				return "", err

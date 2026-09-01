@@ -669,6 +669,8 @@ func TestBodyFieldFlagsDoNotCollideWithRequestBodyFlags(t *testing.T) {
 }
 
 func TestApplyBodyFlagsNormalizesDateTime(t *testing.T) {
+	cli.PinTimeForTest(t, bodyTestNow)
+
 	fields := []cli.BodyField{
 		{Name: "from", FlagName: "from", Type: "datetime"},
 		{Name: "to", FlagName: "to", Type: "datetime"},
@@ -685,12 +687,62 @@ func TestApplyBodyFlagsNormalizesDateTime(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal([]byte(body), &decoded))
 
-	from, err := time.Parse(time.RFC3339, decoded.From)
-	require.NoError(t, err)
-	assert.WithinDuration(t, time.Now().Add(-24*time.Hour), from, time.Minute)
+	assert.Equal(t, "2026-08-31T12:00:00Z", decoded.From)
 
 	// Offset and all, byte-for-byte.
 	assert.Equal(t, "2026-08-31T17:40:00+02:00", decoded.To)
+}
+
+var bodyTestNow = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+// A nullable date-time normalizes like any other, and the "null" sentinel still
+// reaches the wire: NormalizeDateTime rejects "null", so checking the sentinel
+// first cannot shadow a timestamp.
+func TestApplyBodyFlagsNullableDateTime(t *testing.T) {
+	cli.PinTimeForTest(t, bodyTestNow)
+
+	fields := []cli.BodyField{{Name: "expires_at", FlagName: "expires-at", Type: "datetime-nullable"}}
+
+	for _, tc := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"relative", "24h", `{"expires_at":"2026-08-31T12:00:00Z"}`},
+		{"explicit null", "null", `{"expires_at":null}`},
+		{"rfc3339 verbatim", "2026-08-31T17:40:00+02:00", `{"expires_at":"2026-08-31T17:40:00+02:00"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.JSONEq(t, tc.want, applyBody(t, fields, map[string][]string{"expires-at": {tc.value}}, ``))
+		})
+	}
+}
+
+// Shorthand is typed by hand at a prompt, so `from: 24h` means what
+// `--from 24h` means. A body from --from-file or stdin is machine-written and
+// is passed through as given.
+func TestShorthandNormalizesDateTimeFields(t *testing.T) {
+	cli.PinTimeForTest(t, bodyTestNow)
+
+	fields := []cli.BodyField{
+		{Name: "from", FlagName: "from", Type: "datetime"},
+		{Name: "note", FlagName: "note", Type: "string"},
+	}
+
+	cmd := &cobra.Command{Use: "test"}
+	cli.AddBodyFieldFlags(cmd, fields)
+	params := viper.New()
+	require.NoError(t, params.BindPFlags(cmd.Flags()))
+
+	body, err := cli.GetBodyWithFlags(cmd, "application/json", []string{"from: 24h, note: hi"}, params, fields)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"from":"2026-08-31T12:00:00Z","note":"hi"}`, body)
+
+	// And it fails locally, naming the field, rather than reaching the server.
+	_, err = cli.GetBodyWithFlags(cmd, "application/json", []string{"from: banana"}, params, fields)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "from")
+	assert.Contains(t, err.Error(), "is not a timestamp")
 }
 
 func TestApplyBodyFlagsRejectsUnparseableDateTime(t *testing.T) {

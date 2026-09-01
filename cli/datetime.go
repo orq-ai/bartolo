@@ -14,14 +14,25 @@ var timeNow = time.Now
 // time.ParseDuration stops at hours, so d and w are expanded before it runs.
 var dayOrWeekUnit = regexp.MustCompile(`(\d+(?:\.\d+)?)([dw])`)
 
-var dateOnlyLayouts = []string{"2006-01-02", "2006-01-02 15:04:05"}
+// Zoneless forms, read as UTC. The T-separated one is RFC 3339 minus the zone,
+// which is the likeliest near-miss for someone who almost typed a valid one.
+var zonelessLayouts = []string{
+	"2006-01-02",
+	"2006-01-02 15:04:05",
+	"2006-01-02T15:04:05",
+}
 
-const dateTimeHint = "use RFC 3339 (2026-08-31T17:40:00Z), a date (2026-08-31), " +
-	"or a relative value such as 24h, 7d, 30m, now, now-24h"
+// dateTimeForms names every accepted form once. The flag help and the rejection
+// message both read from it, so neither can drift from the other.
+const dateTimeForms = "RFC 3339 (2026-08-31T17:40:00Z), a date (2026-08-31) or " +
+	"date and time (2026-08-31 14:00:00), or a relative value such as 24h, 7d, " +
+	"2w, 30m, now, now-24h, now+1h"
+
+const dateTimeHint = "use " + dateTimeForms
 
 // DateTimeFlagHelp is referenced by generated code so every date-time flag reads
 // the same.
-const DateTimeFlagHelp = "(RFC 3339 timestamp, or relative: 24h, 7d, now, now-24h)"
+const DateTimeFlagHelp = "(accepts " + dateTimeForms + ")"
 
 // WithDateTimeHelp appends DateTimeFlagHelp to a description the spec may not
 // have supplied — parameters often have none.
@@ -39,7 +50,7 @@ func notATimestamp(value string) error {
 // NormalizeDateTime converts a user-supplied timestamp into RFC 3339.
 //
 //   - RFC 3339, returned verbatim so offsets and sub-second precision survive.
-//   - "2026-08-31" or "2026-08-31 15:04:05", read as UTC.
+//   - "2026-08-31", "2026-08-31 15:04:05" or "2026-08-31T15:04:05", read as UTC.
 //   - "now", "now-24h", "now+1h".
 //   - A bare duration, meaning that long ago: "24h", "7d", "30m", "2w", "1h30m".
 //
@@ -54,7 +65,7 @@ func NormalizeDateTime(value string) (string, error) {
 		return raw, nil
 	}
 
-	for _, layout := range dateOnlyLayouts {
+	for _, layout := range zonelessLayouts {
 		if t, err := time.ParseInLocation(layout, raw, time.UTC); err == nil {
 			return t.UTC().Format(time.RFC3339), nil
 		}

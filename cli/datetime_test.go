@@ -32,6 +32,9 @@ func TestNormalizeDateTimeAccepts(t *testing.T) {
 
 		{"date only", "2026-08-31", "2026-08-31T00:00:00Z"},
 		{"date and time", "2026-08-31 14:30:00", "2026-08-31T14:30:00Z"},
+		// RFC 3339 minus the zone: the likeliest near-miss, so it is read as UTC
+		// rather than falling through to the duration parser.
+		{"date and time t-separated", "2026-08-31T14:30:00", "2026-08-31T14:30:00Z"},
 
 		{"now", "now", "2026-09-01T12:00:00Z"},
 		{"now minus hours", "now-24h", "2026-08-31T12:00:00Z"},
@@ -112,6 +115,18 @@ func TestNormalizeDateTimeRejects(t *testing.T) {
 			assert.Contains(t, err.Error(), "24h")
 			assert.Contains(t, err.Error(), "now-24h")
 		})
+	}
+}
+
+// The flag help and the rejection message are two wordings of one contract, so
+// each accepted form has to appear in both.
+func TestDateTimeHelpAndHintNameTheSameForms(t *testing.T) {
+	for _, form := range []string{
+		"RFC 3339", "2026-08-31", "2026-08-31 14:00:00",
+		"24h", "7d", "2w", "30m", "now", "now-24h", "now+1h",
+	} {
+		assert.Contains(t, dateTimeHint, form)
+		assert.Contains(t, DateTimeFlagHelp, form)
 	}
 }
 
