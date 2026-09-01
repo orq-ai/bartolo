@@ -19,8 +19,8 @@ var dateOnlyLayouts = []string{"2006-01-02", "2006-01-02 15:04:05"}
 const dateTimeHint = "use RFC 3339 (2026-08-31T17:40:00Z), a date (2026-08-31), " +
 	"or a relative value such as 24h, 7d, 30m, now, now-24h"
 
-// DateTimeFlagHelp is referenced by generated code, so body-field and parameter
-// flags describe themselves the same way.
+// DateTimeFlagHelp is referenced by generated code so every date-time flag reads
+// the same.
 const DateTimeFlagHelp = "(RFC 3339 timestamp, or relative: 24h, 7d, now, now-24h)"
 
 // WithDateTimeHelp appends DateTimeFlagHelp to a description the spec may not
@@ -32,24 +32,14 @@ func WithDateTimeHelp(description string) string {
 	return description + " " + DateTimeFlagHelp
 }
 
-// NormalizeDateTime converts a user-supplied timestamp into RFC 3339, which is
-// what an OpenAPI `format: date-time` field expects on the wire.
+// NormalizeDateTime converts a user-supplied timestamp into RFC 3339.
 //
-// Accepted forms:
+//   - RFC 3339, returned verbatim so offsets and sub-second precision survive.
+//   - "2026-08-31" or "2026-08-31 15:04:05", read as UTC.
+//   - "now", "now-24h", "now+1h".
+//   - A bare duration, meaning that long ago: "24h", "7d", "30m", "2w", "1h30m".
 //
-//   - RFC 3339, returned verbatim so numeric offsets ("+02:00") and sub-second
-//     precision survive byte-for-byte.
-//   - A bare date, "2026-08-31", or "2026-08-31 15:04:05", read as UTC.
-//   - "now".
-//   - "now-<duration>" / "now+<duration>", offset from now.
-//   - A bare "<duration>", meaning that long ago: "24h", "7d", "30m", "2w", "1h30m".
-//
-// The grammar is the de facto Prometheus/Grafana one, not ISO 8601 durations
-// ("P1D"), which are rejected. The two are disjoint — ISO always starts with an
-// optionally-signed "P" — so ISO could be added later without ambiguity.
-//
-// "d" and "w" are fixed spans, 24h and 168h, so no calendar arithmetic and no
-// timezone to pick.
+// "d" and "w" are fixed spans, 24h and 168h. ISO 8601 durations are rejected.
 func NormalizeDateTime(value string) (string, error) {
 	raw := strings.TrimSpace(value)
 	if raw == "" {
@@ -107,9 +97,7 @@ func NormalizeDateTimeFlag(flagName, value string) (string, error) {
 	return normalized, nil
 }
 
-// parseRelativeDuration is time.ParseDuration with "d" (24h) and "w" (168h)
-// units. Expanding them up front keeps compounds like "1h30m" and ParseDuration's
-// unit validation for free.
+// parseRelativeDuration is time.ParseDuration with "d" (24h) and "w" (168h) units.
 func parseRelativeDuration(value string) (time.Duration, error) {
 	expanded := dayOrWeekUnit.ReplaceAllStringFunc(value, func(match string) string {
 		parts := dayOrWeekUnit.FindStringSubmatch(match)
