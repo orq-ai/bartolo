@@ -1378,6 +1378,11 @@ paths:
             type: string
             format: date-time
         - in: query
+          name: from-time
+          required: true
+          schema:
+            type: string
+        - in: query
           name: cursor
           schema:
             type: string
@@ -1398,12 +1403,23 @@ paths:
 		}
 	}
 
-	// Two date-time params in one operation each need their own temporary, or
-	// the generated function does not compile.
-	for _, want := range []string{"paramFromTime", "paramToTime"} {
+	// Each normalization writes back to its own parameter.
+	for _, want := range []string{"paramFrom = normalized", "paramTo = normalized"} {
 		if !strings.Contains(rendered, want) {
-			t.Errorf("expected a per-param temporary %s, got:\n%s", want, rendered)
+			t.Errorf("a normalized value should be written back, missing %q in:\n%s", want, rendered)
 		}
+	}
+
+	// A temporary named after the parameter collides with a sibling that has
+	// that name already: `from` and `from-time` both yield paramFromTime. At
+	// function scope the := assigns the sibling rather than declaring a
+	// temporary, so the request carries from's value under both names — and it
+	// still compiles. The normalization lives in its own block instead.
+	if strings.Contains(rendered, "paramFromTime, err :=") {
+		t.Errorf("the temporary must not take a sibling parameter's name, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, `req = req.AddQuery("from-time", paramFromTime)`) {
+		t.Errorf("a sibling parameter should keep its own value, got:\n%s", rendered)
 	}
 
 	// No format: nothing to normalize, nothing to check.
@@ -1449,6 +1465,65 @@ paths:
 
 	if !strings.Contains(rendered, `bartolocli.WithDateTimeHelp("Upper bound")`) {
 		t.Errorf("date-time flag help should point at the shared suffix, got:\n%s", rendered)
+	}
+}
+
+// The body-flag paragraph advertises relative timestamps, so it must only do so
+// where a field actually normalizes. A nullable, enum or array date-time keeps
+// its own flag type and is sent as typed.
+func TestTimestampHelpOnlyWhereAFieldNormalizes(t *testing.T) {
+	const specFmt = `
+openapi: 3.0.3
+info:
+  title: Body Help API
+  version: "1"
+paths:
+  /things:
+    post:
+      operationId: MakeThing
+      summary: Make a thing
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+%s
+      responses:
+        "200":
+          description: ok
+`
+
+	const sentence = "Timestamp fields (`format: date-time`)"
+
+	for _, tc := range []struct {
+		name  string
+		props string
+		want  bool
+	}{
+		{"plain date-time", "                name: {type: string}\n                at: {type: string, format: date-time}", true},
+		{"no timestamp at all", "                name: {type: string}\n                count: {type: integer}", false},
+		// Each of these resolves to a flag type that skips normalization.
+		{"nullable date-time", "                at: {type: string, format: date-time, nullable: true}", false},
+		{"array of date-times", "                at: {type: array, items: {type: string, format: date-time}}", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(specFmt, tc.props)))
+			if len(api.Groups) != 1 {
+				t.Fatalf("expected one group, got %d", len(api.Groups))
+			}
+			group := api.Groups[0]
+			rendered := renderCommandTemplate("templates/generated_group_commands.tmpl", &CommandsTemplateData{
+				API:        api,
+				Group:      group,
+				Operations: group.Operations,
+				NeedsFmt:   commandFileNeedsFmt(group.Operations),
+			})
+
+			if got := strings.Contains(rendered, sentence); got != tc.want {
+				t.Errorf("advertised relative timestamps = %v, want %v, in:\n%s", got, tc.want, rendered)
+			}
+		})
 	}
 }
 

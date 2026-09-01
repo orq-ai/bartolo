@@ -31,8 +31,8 @@ func initGeneratedRuntime() {
 }
 
 // ExampleGetThing Get a thing
-func ExampleGetThing(paramId string, paramFrom string, params *viper.Viper) (*gentleman.Response, interface{}, error) {
-	handlerPath := "get-thing id from"
+func ExampleGetThing(paramId string, paramFrom string, paramFromTime string, params *viper.Viper) (*gentleman.Response, interface{}, error) {
+	handlerPath := "get-thing id from from-time"
 	server := bartolocli.ResolveServer()
 
 	url := server + "/{id}"
@@ -45,15 +45,19 @@ func ExampleGetThing(paramId string, paramFrom string, params *viper.Viper) (*ge
 	if err := bartolocli.CheckParam("argument id", paramId, "uuid", []string{}); err != nil {
 		return nil, nil, err
 	}
-	paramFromTime, err := bartolocli.NormalizeParam("argument from", paramFrom, "date-time", []string{})
-	if err != nil {
-		return nil, nil, err
+	{
+		normalized, err := bartolocli.NormalizeParam("argument from", paramFrom, "date-time", []string{})
+		if err != nil {
+			return nil, nil, err
+		}
+		paramFrom = normalized
 	}
-	paramFrom = paramFromTime
 
 	req := bartolocli.Client.Get().URL(url)
 
 	req = req.AddQuery("from", paramFrom)
+
+	req = req.AddQuery("from-time", paramFromTime)
 
 	paramDetailed := params.GetBool("detailed")
 	if bartolocli.FlagPassed(params, "detailed") || paramDetailed != false {
@@ -76,11 +80,13 @@ func ExampleGetThing(paramId string, paramFrom string, params *viper.Viper) (*ge
 	}
 	paramTo := params.GetString("to")
 	if bartolocli.FlagPassed(params, "to") || paramTo != "" {
-		paramToTime, err := bartolocli.NormalizeParam("--to", paramTo, "date-time", []string{})
-		if err != nil {
-			return nil, nil, err
+		{
+			normalized, err := bartolocli.NormalizeParam("--to", paramTo, "date-time", []string{})
+			if err != nil {
+				return nil, nil, err
+			}
+			paramTo = normalized
 		}
-		paramTo = paramToTime
 		req = req.AddQuery("to", fmt.Sprintf("%v", paramTo))
 	}
 	paramCursor := params.GetString("cursor")

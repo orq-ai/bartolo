@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -455,8 +456,13 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				description += "\n\nAll top-level body fields are exposed as flags for this command. " +
 					"Scalar, nullable scalar (pass `null` for JSON null), enum, repeatable list (`--field a --field b`), " +
 					"and string map (`--field key=value`) fields use typed flags. " +
-					"Nested objects, arrays of objects, and polymorphic unions accept a JSON string (e.g. `--field '{\"k\":1}'`)." +
-					" Timestamp fields (`format: date-time`) also accept a bare date or a relative value such as `24h`, `7d` or `now-24h`."
+					"Nested objects, arrays of objects, and polymorphic unions accept a JSON string (e.g. `--field '{\"k\":1}'`)."
+				// Only advertised where a field actually normalizes: a nullable,
+				// enum or array date-time keeps its own flag type and is sent as
+				// typed, so promising the syntax there would be wrong.
+				if slices.ContainsFunc(bodyFields, func(f *BodyField) bool { return f != nil && f.Type == "datetime" }) {
+					description += " Timestamp fields (`format: date-time`) also accept a bare date or a relative value such as `24h`, `7d` or `now-24h`."
+				}
 			}
 			if len(renamedFlags) > 0 {
 				description += "\n\nRenamed flags (the original names belong to global flags):\n"

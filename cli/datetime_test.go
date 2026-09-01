@@ -83,11 +83,23 @@ func TestNormalizeDateTimeRejects(t *testing.T) {
 		{"unknown unit", "24x"},
 		{"words", "banana"},
 		{"now prefix without sign", "nowish"},
-		// Ambiguous against "now-24h".
+		// A bare duration always means "ago", so a sign is refused rather than
+		// guessed at: "-24h" is ambiguous against "now-24h", and "+24h" would
+		// otherwise parse as a positive duration and silently mean "24h" ago.
 		{"negative bare duration", "-24h"},
+		{"positive bare duration", "+24h"},
 
-		// Rejected by design: Prometheus grammar only. Pinned so ISO 8601 is not
-		// added by accident.
+		// time.ParseDuration accepts a second sign, which would flip the one the
+		// "now" branch already applied: "now--24h" would land in the future.
+		{"doubled sign minus minus", "now--24h"},
+		{"doubled sign plus minus", "now+-1h"},
+		{"doubled sign minus plus", "now-+1h"},
+
+		// The accepted grammar is time.ParseDuration plus "d" (24h) and "w"
+		// (168h), so ISO 8601 durations fall outside it. Pinned so they are not
+		// added by accident: they start with an optionally-signed "P", which the
+		// grammar above never produces, so they could be added later without
+		// ambiguity.
 		{"iso duration signed", "-P1D"},
 		{"iso duration", "P1D"},
 		{"iso duration with time", "PT30M"},

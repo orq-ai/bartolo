@@ -32,6 +32,10 @@ func WithDateTimeHelp(description string) string {
 	return description + " " + DateTimeFlagHelp
 }
 
+func notATimestamp(value string) error {
+	return fmt.Errorf("%q is not a timestamp: %s", value, dateTimeHint)
+}
+
 // NormalizeDateTime converts a user-supplied timestamp into RFC 3339.
 //
 //   - RFC 3339, returned verbatim so offsets and sub-second precision survive.
@@ -43,7 +47,7 @@ func WithDateTimeHelp(description string) string {
 func NormalizeDateTime(value string) (string, error) {
 	raw := strings.TrimSpace(value)
 	if raw == "" {
-		return "", fmt.Errorf("%q is not a timestamp: %s", value, dateTimeHint)
+		return "", notATimestamp(value)
 	}
 
 	if _, err := time.Parse(time.RFC3339, raw); err == nil {
@@ -65,23 +69,24 @@ func NormalizeDateTime(value string) (string, error) {
 
 	if rest, ok := strings.CutPrefix(lower, "now"); ok {
 		if len(rest) > 1 && (rest[0] == '-' || rest[0] == '+') {
-			d, err := parseRelativeDuration(rest[1:])
+			d, err := parseUnsignedDuration(rest[1:])
 			if err != nil {
-				return "", fmt.Errorf("%q is not a timestamp: %s", value, dateTimeHint)
+				return "", notATimestamp(value)
 			}
 			if rest[0] == '-' {
 				d = -d
 			}
 			return now.Add(d).Format(time.RFC3339), nil
 		}
-		return "", fmt.Errorf("%q is not a timestamp: %s", value, dateTimeHint)
+		return "", notATimestamp(value)
 	}
 
-	// A bare duration means "ago". A signed one is rejected: "-24h" is ambiguous
-	// against "now-24h", and pflag reads the leading "-" as a flag anyway.
-	d, err := parseRelativeDuration(lower)
-	if err != nil || d < 0 {
-		return "", fmt.Errorf("%q is not a timestamp: %s", value, dateTimeHint)
+	// A bare duration means "ago", so a sign is refused rather than guessed at:
+	// "-24h" is ambiguous against "now-24h" and pflag reads the leading "-" as a
+	// flag anyway, and "+24h" would otherwise mean the same as "24h".
+	d, err := parseUnsignedDuration(lower)
+	if err != nil {
+		return "", notATimestamp(value)
 	}
 	return now.Add(-d).Format(time.RFC3339), nil
 }
@@ -95,6 +100,17 @@ func NormalizeDateTimeFlag(flagName, value string) (string, error) {
 		return "", fmt.Errorf("--%s: %w", flagName, err)
 	}
 	return normalized, nil
+}
+
+// parseUnsignedDuration is parseRelativeDuration with a leading sign refused, so
+// the only sign that can apply is the caller's own. time.ParseDuration accepts
+// "+24h" and returns it indistinguishable from "24h", and it accepts a sign only
+// at the front, so this one check covers every signed form.
+func parseUnsignedDuration(value string) (time.Duration, error) {
+	if strings.HasPrefix(value, "-") || strings.HasPrefix(value, "+") {
+		return 0, fmt.Errorf("duration %q must not carry a sign", value)
+	}
+	return parseRelativeDuration(value)
 }
 
 // parseRelativeDuration is time.ParseDuration with "d" (24h) and "w" (168h) units.

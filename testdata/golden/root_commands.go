@@ -20,16 +20,16 @@ func registerRootCommands(root *cobra.Command) {
 		var examples string
 
 		cmd := &cobra.Command{
-			Use:     "get-thing id from",
+			Use:     "get-thing id from from-time",
 			Short:   "Get a thing",
 			Long:    bartolocli.Markdown(""),
 			Example: examples,
-			Args:    cobra.MinimumNArgs(2),
+			Args:    cobra.MinimumNArgs(3),
 			RunE: func(cmd *cobra.Command, args []string) error {
 
 				bartolocli.MarkPassedFlags(cmd, params)
 
-				_, decoded, err := ExampleGetThing(args[0], args[1], params)
+				_, decoded, err := ExampleGetThing(args[0], args[1], args[2], params)
 				if err != nil {
 					return bartolocli.OperationError(err)
 				}
