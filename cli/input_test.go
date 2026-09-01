@@ -695,9 +695,7 @@ func TestApplyBodyFlagsNormalizesDateTime(t *testing.T) {
 
 var bodyTestNow = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 
-// A nullable date-time normalizes like any other, and the "null" sentinel still
-// reaches the wire: NormalizeDateTime rejects "null", so checking the sentinel
-// first cannot shadow a timestamp.
+// A nullable date-time normalizes like any other and still sends JSON null.
 func TestApplyBodyFlagsNullableDateTime(t *testing.T) {
 	cli.PinTimeForTest(t, bodyTestNow)
 
@@ -718,9 +716,7 @@ func TestApplyBodyFlagsNullableDateTime(t *testing.T) {
 	}
 }
 
-// Shorthand is typed by hand at a prompt, so `from: 24h` means what
-// `--from 24h` means. A body from --from-file or stdin is machine-written and
-// is passed through as given.
+// `from: 24h` means what `--from 24h` means.
 func TestShorthandNormalizesDateTimeFields(t *testing.T) {
 	cli.PinTimeForTest(t, bodyTestNow)
 
@@ -738,7 +734,6 @@ func TestShorthandNormalizesDateTimeFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"from":"2026-08-31T12:00:00Z","note":"hi"}`, body)
 
-	// And it fails locally, naming the field, rather than reaching the server.
 	_, err = cli.GetBodyWithFlags(cmd, "application/json", []string{"from: banana"}, params, fields)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "from")

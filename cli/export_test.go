@@ -5,9 +5,8 @@ import (
 	"time"
 )
 
-// PinTimeForTest fixes what "now" means for the external test package, so a
-// test of the body or parameter path can assert an exact timestamp instead of
-// a tolerance around the wall clock. This file is only compiled into tests.
+// PinTimeForTest fixes "now" for the external test package, so a body or
+// parameter test can assert an exact timestamp rather than a tolerance.
 func PinTimeForTest(t *testing.T, now time.Time) {
 	t.Helper()
 

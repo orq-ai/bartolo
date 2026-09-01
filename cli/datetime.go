@@ -14,16 +14,14 @@ var timeNow = time.Now
 // time.ParseDuration stops at hours, so d and w are expanded before it runs.
 var dayOrWeekUnit = regexp.MustCompile(`(\d+(?:\.\d+)?)([dw])`)
 
-// Zoneless forms, read as UTC. The T-separated one is RFC 3339 minus the zone,
-// which is the likeliest near-miss for someone who almost typed a valid one.
+// Read as UTC.
 var zonelessLayouts = []string{
 	"2006-01-02",
 	"2006-01-02 15:04:05",
 	"2006-01-02T15:04:05",
 }
 
-// dateTimeForms names every accepted form once. The flag help and the rejection
-// message both read from it, so neither can drift from the other.
+// Named once so the flag help and the rejection message cannot drift apart.
 const dateTimeForms = "RFC 3339 (2026-08-31T17:40:00Z), a date (2026-08-31) or " +
 	"date and time (2026-08-31 14:00:00), or a relative value such as 24h, 7d, " +
 	"2w, 30m, now, now-24h, now+1h"
@@ -92,9 +90,9 @@ func NormalizeDateTime(value string) (string, error) {
 		return "", notATimestamp(value)
 	}
 
-	// A bare duration means "ago", so a sign is refused rather than guessed at:
-	// "-24h" is ambiguous against "now-24h" and pflag reads the leading "-" as a
-	// flag anyway, and "+24h" would otherwise mean the same as "24h".
+	// A bare duration means "ago". Its sign is refused rather than honoured:
+	// "-24h" is ambiguous against "now-24h", and pflag reads a leading "-" as a
+	// flag anyway.
 	d, err := parseUnsignedDuration(lower)
 	if err != nil {
 		return "", notATimestamp(value)
@@ -113,10 +111,8 @@ func NormalizeDateTimeFlag(flagName, value string) (string, error) {
 	return normalized, nil
 }
 
-// parseUnsignedDuration is parseRelativeDuration with a leading sign refused, so
-// the only sign that can apply is the caller's own. time.ParseDuration accepts
-// "+24h" and returns it indistinguishable from "24h", and it accepts a sign only
-// at the front, so this one check covers every signed form.
+// parseUnsignedDuration leaves the caller's sign the only one that applies.
+// time.ParseDuration reads "+24h" as "24h", and takes a sign only at the front.
 func parseUnsignedDuration(value string) (time.Duration, error) {
 	if strings.HasPrefix(value, "-") || strings.HasPrefix(value, "+") {
 		return 0, fmt.Errorf("duration %q must not carry a sign", value)

@@ -80,20 +80,12 @@ blocks need is a field on the operation itself (see Operation.PublicPrefix).
 			{{- end }}
 		{{- end }}
 
-		{{/* Required values the schema rules out, plus the formats that accept
-		wider input than they send. Optional ones are handled below, where this
-		only applies when the flag was set. Both exit 2 without a request;
-		x-cli-no-validate opts out a stricter-than-API schema.
+		{{/* Runs before the URL is built, so a path param is normalized too.
+		Optional params get the same call below, only when the flag was set.
 
-		NormalizeParam covers every format: the ones with nothing to widen are
-		checked and handed back unchanged, so there is one call path here rather
-		than a per-format branch. Path params run before the URL is built, so a
-		relative timestamp reaches the server as RFC 3339 there too.
-
-		The temporary is scoped to its own block because a sibling param can
-		share the name one named after this param would take: `from` and
-		`from-time` both yield `paramFromTime`, and at function scope the := would
-		assign the sibling instead of declaring a temporary. */}}
+		The temporary is scoped because a name derived from the param can already
+		belong to a sibling: `from` and `from-time` both yield `paramFromTime`,
+		and at function scope the := would assign the sibling. */}}
 		{{- range .RequiredParams }}
 			{{- if or .Enum .Format }}
 				{

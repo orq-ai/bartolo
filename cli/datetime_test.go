@@ -32,8 +32,7 @@ func TestNormalizeDateTimeAccepts(t *testing.T) {
 
 		{"date only", "2026-08-31", "2026-08-31T00:00:00Z"},
 		{"date and time", "2026-08-31 14:30:00", "2026-08-31T14:30:00Z"},
-		// RFC 3339 minus the zone: the likeliest near-miss, so it is read as UTC
-		// rather than falling through to the duration parser.
+		// RFC 3339 minus the zone: read as UTC, not passed to the duration parser.
 		{"date and time t-separated", "2026-08-31T14:30:00", "2026-08-31T14:30:00Z"},
 
 		{"now", "now", "2026-09-01T12:00:00Z"},
@@ -86,23 +85,18 @@ func TestNormalizeDateTimeRejects(t *testing.T) {
 		{"unknown unit", "24x"},
 		{"words", "banana"},
 		{"now prefix without sign", "nowish"},
-		// A bare duration always means "ago", so a sign is refused rather than
-		// guessed at: "-24h" is ambiguous against "now-24h", and "+24h" would
-		// otherwise parse as a positive duration and silently mean "24h" ago.
+		// A bare duration always means "ago", so its own sign is refused: "-24h"
+		// is ambiguous against "now-24h", and "+24h" would silently mean "24h".
 		{"negative bare duration", "-24h"},
 		{"positive bare duration", "+24h"},
 
-		// time.ParseDuration accepts a second sign, which would flip the one the
-		// "now" branch already applied: "now--24h" would land in the future.
+		// time.ParseDuration takes a second sign, flipping the one "now" applied.
 		{"doubled sign minus minus", "now--24h"},
 		{"doubled sign plus minus", "now+-1h"},
 		{"doubled sign minus plus", "now-+1h"},
 
-		// The accepted grammar is time.ParseDuration plus "d" (24h) and "w"
-		// (168h), so ISO 8601 durations fall outside it. Pinned so they are not
-		// added by accident: they start with an optionally-signed "P", which the
-		// grammar above never produces, so they could be added later without
-		// ambiguity.
+		// The grammar is time.ParseDuration plus "d" and "w", so ISO 8601 falls
+		// outside it. Its leading "P" keeps it unambiguous if ever added.
 		{"iso duration signed", "-P1D"},
 		{"iso duration", "P1D"},
 		{"iso duration with time", "PT30M"},
@@ -118,8 +112,7 @@ func TestNormalizeDateTimeRejects(t *testing.T) {
 	}
 }
 
-// The flag help and the rejection message are two wordings of one contract, so
-// each accepted form has to appear in both.
+// Two wordings of one contract: every accepted form appears in both.
 func TestDateTimeHelpAndHintNameTheSameForms(t *testing.T) {
 	for _, form := range []string{
 		"RFC 3339", "2026-08-31", "2026-08-31 14:00:00",

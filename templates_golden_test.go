@@ -36,10 +36,8 @@ paths:
         # Two in one operation, so each normalization needs its own scope.
         - {name: from, in: query, required: true, schema: {type: string, format: date-time}}
         - {name: to, in: query, schema: {type: string, format: date-time}}
-        # from-time shares the Go name a from temporary would take. Pinned so the
-        # normalization stays inside a block: at function scope it would assign
-        # this parameter instead, and the request would carry from's value under
-        # both names without failing to compile.
+        # Shares the Go name a from-derived temporary would take, which is why
+        # the normalization is scoped to a block rather than named after a param.
         - {name: from-time, in: query, required: true, schema: {type: string}}
         - name: cursor
           in: query

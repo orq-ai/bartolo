@@ -208,11 +208,9 @@ func getBodyWithFlags(cmd *cobra.Command, mediaType string, args []string, param
 	return ApplyBodyFlags(cmd, params, mediaType, body, fields)
 }
 
-// normalizeShorthandDateTimes applies date-time normalization to top-level
-// shorthand values, so `from: 24h` means what `--from 24h` means. Shorthand is
-// typed by hand at a prompt and deserves the same convenience as a flag; a body
-// from --from-file or stdin is machine-written, so it is passed through as given
-// rather than silently rewritten.
+// normalizeShorthandDateTimes makes `from: 24h` mean what `--from 24h` means.
+// Shorthand only: a body from --from-file or stdin is machine-written, so it is
+// sent as given rather than silently rewritten.
 func normalizeShorthandDateTimes(body map[string]interface{}, fields []BodyField) error {
 	for _, field := range fields {
 		if field.Type != "datetime" && field.Type != "datetime-nullable" {
@@ -221,7 +219,6 @@ func normalizeShorthandDateTimes(body map[string]interface{}, fields []BodyField
 
 		raw, ok := body[field.Name].(string)
 		if !ok {
-			// Absent, or already a non-string the server will judge.
 			continue
 		}
 		if field.Type == "datetime-nullable" && strings.TrimSpace(raw) == nullableFlagSentinel {
@@ -364,9 +361,7 @@ func ApplyBodyFlags(cmd *cobra.Command, params *viper.Viper, mediaType string, b
 			}
 			overrides[field.Name] = value
 		case "datetime-nullable":
-			// The sentinel is checked first, which is safe because
-			// NormalizeDateTime rejects "null": neither behaviour can shadow the
-			// other.
+			// Safe to check first: NormalizeDateTime always rejects "null".
 			if strings.TrimSpace(params.GetString(name)) == nullableFlagSentinel {
 				overrides[field.Name] = nil
 				break

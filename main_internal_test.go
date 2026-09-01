@@ -1410,11 +1410,9 @@ paths:
 		}
 	}
 
-	// A temporary named after the parameter collides with a sibling that has
-	// that name already: `from` and `from-time` both yield paramFromTime. At
-	// function scope the := assigns the sibling rather than declaring a
-	// temporary, so the request carries from's value under both names — and it
-	// still compiles. The normalization lives in its own block instead.
+	// `from` and `from-time` both yield paramFromTime. A temporary by that name
+	// would assign the sibling at function scope — and still compile — sending
+	// from's value under both names. Hence the block.
 	if strings.Contains(rendered, "paramFromTime, err :=") {
 		t.Errorf("the temporary must not take a sibling parameter's name, got:\n%s", rendered)
 	}
@@ -1428,9 +1426,8 @@ paths:
 	}
 }
 
-// A date-time path param has to normalize before the URL is substituted, or the
-// relative value reaches the server verbatim. The empty check stays first so it
-// keeps its own message.
+// Normalization has to beat the URL substitution, or the relative value reaches
+// the server verbatim. The empty check stays ahead of both, for its message.
 func TestPathDateTimeParamNormalizesBeforeTheURLIsBuilt(t *testing.T) {
 	doc := loadTestSpec(t, `
 openapi: 3.0.3
@@ -1502,9 +1499,8 @@ paths:
 	}
 }
 
-// The body-flag paragraph advertises relative timestamps, so it must only do so
-// where a field actually normalizes. A nullable, enum or array date-time keeps
-// its own flag type and is sent as typed.
+// The body-flag paragraph advertises relative timestamps, so it must only
+// appear where a field actually normalizes.
 func TestTimestampHelpOnlyWhereAFieldNormalizes(t *testing.T) {
 	const specFmt = `
 openapi: 3.0.3
@@ -1538,8 +1534,7 @@ paths:
 		{"plain date-time", "                name: {type: string}\n                at: {type: string, format: date-time}", true},
 		{"no timestamp at all", "                name: {type: string}\n                count: {type: integer}", false},
 		{"nullable date-time", "                at: {type: string, format: date-time, nullable: true}", true},
-		// An array of date-times resolves to a slice flag, which sends elements
-		// as typed, so the syntax genuinely does not apply.
+		// Resolves to a slice flag, which sends elements as typed.
 		{"array of date-times", "                at: {type: array, items: {type: string, format: date-time}}", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1595,9 +1590,7 @@ paths:
 	}
 }
 
-// x-cli-no-validate drops a constraint that is stricter than the API. date-time
-// is not one — it widens what the flag accepts and rejects nothing the server
-// would have taken — so normalization and its flag help survive the opt-out.
+// date-time is not a stricter-than-API constraint, so it survives the opt-out.
 func TestNoValidateKeepsDateTimeNormalization(t *testing.T) {
 	doc := loadTestSpec(t, `
 openapi: 3.0.3
