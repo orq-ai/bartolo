@@ -12,7 +12,9 @@ import (
 var timeNow = time.Now
 
 // time.ParseDuration stops at hours, so d and w are expanded before it runs.
-var dayOrWeekUnit = regexp.MustCompile(`(\d+(?:\.\d+)?)([dw])`)
+// The number matches what ParseDuration takes, leading dot included: a stricter
+// pattern would expand only the tail of ".5d" and quietly change what it means.
+var dayOrWeekUnit = regexp.MustCompile(`(\d*\.?\d+)([dw])`)
 
 // Read as UTC.
 var zonelessLayouts = []string{
