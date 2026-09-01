@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -338,10 +340,68 @@ func TestLooksSensitiveKey(t *testing.T) {
 	}
 }
 
-// The verbose config dump must use looksSensitiveKey, not its own inline chain.
+// The verbose config dump must mask sensitive keys at every depth: it once
+// walked only the top level, so every profiles.<name>.api_key was printed in
+// full.
 func TestVerboseConfigMaskesAllSensitiveKeys(t *testing.T) {
-	if !looksSensitiveKey("api-key") {
-		t.Fatal("looksSensitiveKey must match api-key")
+	const secret = "sk-orq-abcdefghijklmnop"
+
+	settings := map[string]interface{}{
+		"api-key": secret,
+		"profiles": map[string]interface{}{
+			"default": map[string]interface{}{
+				"api_key":  secret,
+				"base_url": "https://my.orq.ai",
+				"nested": map[string]interface{}{
+					"deep": map[string]interface{}{"access_token": secret},
+				},
+			},
+		},
+		"accounts":  []interface{}{map[string]interface{}{"password": secret}},
+		"api_keys":  []interface{}{secret},
+		"tokens":    map[string]interface{}{"a": secret},
+		"raw_token": 42,
+		"verbose":   true,
+	}
+
+	redacted := redactSettings(settings)
+
+	// Assert on the absence of the secret anywhere in the rendering, so this
+	// fails for any leaking shape, not only the ones enumerated above.
+	rendered, err := json.Marshal(redacted)
+	if err != nil {
+		t.Fatalf("marshal redacted settings: %v", err)
+	}
+	if strings.Contains(string(rendered), secret) {
+		t.Errorf("secret survived redaction: %s", rendered)
+	}
+
+	profiles := redacted["profiles"].(map[string]interface{})
+	def := profiles["default"].(map[string]interface{})
+	if got := def["api_key"]; got != "sk-o****mnop" {
+		t.Errorf("nested api_key = %v, want sk-o****mnop", got)
+	}
+	// Non-secret neighbours stay readable, or the dump loses its point.
+	if got := def["base_url"]; got != "https://my.orq.ai" {
+		t.Errorf("base_url = %v, want it unredacted", got)
+	}
+	if got := redacted["verbose"]; got != true {
+		t.Errorf("verbose = %v, want true", got)
+	}
+	// A sensitive key holding a subtree or a non-string is masked whole.
+	if got := redacted["tokens"]; got != "****" {
+		t.Errorf("tokens = %v, want ****", got)
+	}
+	if got := redacted["raw_token"]; got != "****" {
+		t.Errorf("raw_token = %v, want ****", got)
+	}
+
+	// Redaction must not write the mask back into the live configuration.
+	if got := settings["api-key"]; got != secret {
+		t.Errorf("redaction mutated the input: api-key = %v", got)
+	}
+	if got := settings["profiles"].(map[string]interface{})["default"].(map[string]interface{})["api_key"]; got != secret {
+		t.Errorf("redaction mutated the input: nested api_key = %v", got)
 	}
 }
 

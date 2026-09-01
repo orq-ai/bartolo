@@ -115,15 +115,7 @@ func Init(config *Config) {
 			if viper.GetBool("verbose") {
 				zerolog.SetGlobalLevel(zerolog.DebugLevel)
 
-				settings := viper.AllSettings()
-
-				for k := range settings {
-					if looksSensitiveKey(k) {
-						settings[k] = "**HIDDEN**"
-					}
-				}
-
-				log.Info().Fields(settings).Msg("Configuration")
+				log.Info().Fields(redactSettings(viper.AllSettings())).Msg("Configuration")
 			}
 
 			if PreRun != nil {

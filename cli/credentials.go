@@ -323,9 +323,52 @@ func maskIfSecret(name string, value interface{}) interface{} {
 	// The middle is a fixed width rather than the real one, so the output does
 	// not disclose the secret's length either.
 	if len(runes) < 12 {
-		return "********"
+		return "****"
 	}
-	return string(runes[:4]) + "********" + string(runes[len(runes)-4:])
+	return string(runes[:4]) + "****" + string(runes[len(runes)-4:])
+}
+
+// redactSettings copies a settings tree with every value under a sensitive key
+// masked, at any depth. The `--verbose` configuration dump used to mask only
+// the top level, so a nested credential (profiles.<name>.api_key) was printed
+// in full. The copy is new at every level: the maps viper hands out can alias
+// live configuration, and masking in place would overwrite the real values.
+func redactSettings(settings map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(settings))
+	for key, value := range settings {
+		out[key] = redactSettingValue(key, value)
+	}
+	return out
+}
+
+func redactSettingValue(key string, value interface{}) interface{} {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		// A sensitive key holding a subtree has no safe rendering: mask it
+		// whole rather than descend and hope every leaf below looks sensitive.
+		if looksSensitiveKey(key) {
+			return "****"
+		}
+		return redactSettings(typed)
+	case []interface{}:
+		if looksSensitiveKey(key) {
+			return "****"
+		}
+		items := make([]interface{}, len(typed))
+		for i, item := range typed {
+			// The elements carry no key of their own, so they inherit the
+			// enclosing one: a list under api_keys is a list of secrets.
+			items[i] = redactSettingValue(key, item)
+		}
+		return items
+	case string:
+		return maskIfSecret(key, typed)
+	default:
+		if looksSensitiveKey(key) {
+			return "****"
+		}
+		return typed
+	}
 }
 
 func resolveAuthHandler(profile map[string]string) (string, AuthHandler) {

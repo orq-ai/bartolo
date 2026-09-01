@@ -369,15 +369,15 @@ func TestListProfilesToleratesMissingServer(t *testing.T) {
 
 func TestMaskIfSecret(t *testing.T) {
 	for _, field := range []string{"api_key", "API-Key", "access_token", "client_secret", "password"} {
-		assert.Equal(t, "sk-o********mnop", maskIfSecret(field, "sk-orq-abcdefghijklmnop"), field)
+		assert.Equal(t, "sk-o****mnop", maskIfSecret(field, "sk-orq-abcdefghijklmnop"), field)
 	}
 
 	// A short secret shows nothing at all, and the mask width never tracks the
 	// real length.
-	assert.Equal(t, "********", maskIfSecret("api_key", "sk-orq-abcd"))
+	assert.Equal(t, "****", maskIfSecret("api_key", "sk-orq-abcd"))
 
 	// Multi-byte secrets are cut on rune boundaries, not bytes.
-	assert.Equal(t, "日本語で********密ですね", maskIfSecret("password", "日本語ですごく長い秘密ですね"))
+	assert.Equal(t, "日本語で****密ですね", maskIfSecret("password", "日本語ですごく長い秘密ですね"))
 
 	// Non-secret fields pass through untouched.
 	assert.Equal(t, "https://api.orq.ai", maskIfSecret("base_url", "https://api.orq.ai"))
@@ -405,7 +405,7 @@ func TestListProfilesMasksSecretsAndHonorsJSON(t *testing.T) {
 	}
 	assert.Len(t, decoded.Profiles, 1)
 	assert.Equal(t, "acme", decoded.Profiles[0]["name"])
-	assert.Equal(t, "sk-o********mnop", decoded.Profiles[0]["api_key"])
+	assert.Equal(t, "sk-o****mnop", decoded.Profiles[0]["api_key"])
 	assert.Equal(t, "https://acme.example.com", decoded.Profiles[0]["server"])
 }
 
