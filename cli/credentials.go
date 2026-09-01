@@ -965,7 +965,7 @@ func looksSensitiveKey(key string) bool {
 // `authorization`. An exempted value is not printed raw: it goes through
 // redactAddressValue, since an address can carry a credential of its own.
 func namesALocation(lower string) bool {
-	for _, suffix := range []string{"url", "uri", "endpoint", "host", "server"} {
+	for _, suffix := range []string{"url", "uri", "endpoint", "host", "server", "domain", "port"} {
 		if strings.HasSuffix(lower, suffix) {
 			return true
 		}

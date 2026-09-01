@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	gentleman "gopkg.in/h2non/gentleman.v2"
 )
 
 // ConfirmDestructive stops an accidental delete, so pin its four paths.
@@ -338,7 +340,7 @@ func TestLooksSensitiveKey(t *testing.T) {
 	}
 	// A name that ends in an address suffix is a location, not a credential,
 	// even though the hints above appear in it.
-	for _, key := range []string{"client_id", "username", "region", "endpoint", "auth_url", "auth-url", "token_uri", "token_endpoint", "session_host", "authorization_server"} {
+	for _, key := range []string{"client_id", "username", "region", "endpoint", "auth_url", "auth-url", "token_uri", "token_endpoint", "session_host", "authorization_server", "cookie_domain", "session_port"} {
 		if looksSensitiveKey(key) {
 			t.Errorf("looksSensitiveKey(%q) = true, want false (should echo)", key)
 		}
@@ -733,5 +735,43 @@ func TestAddressFieldsAreStrippedNotPrintedRaw(t *testing.T) {
 	}
 	if got := redactBody("application/x-www-form-urlencoded", "redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb%3Fapi_key%3Dleaked&state=1"); strings.Contains(got, "leaked") {
 		t.Errorf("form redirect_uri = %q, want its own query redacted", got)
+	}
+}
+
+// The error a failed request turns into is printed on every run, not only
+// under --verbose, and it is what users copy into a bug report. An error body
+// carries credentials as readily as a successful one.
+func TestResponseErrorRedactsTheBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"invalid audience","access_token":"sk-orq-live"}`))
+	}))
+	defer srv.Close()
+
+	resp, err := gentleman.New().URL(srv.URL).Request().Do()
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+
+	for name, got := range map[string]error{
+		"ResponseError":     ResponseError(resp),
+		"UnmarshalResponse": UnmarshalResponse(resp, &map[string]interface{}{}),
+	} {
+		if got == nil {
+			t.Fatalf("%s: expected an error for a 401", name)
+		}
+		msg := got.Error()
+		if strings.Contains(msg, "sk-orq-live") {
+			t.Errorf("%s printed the token: %s", name, msg)
+		}
+		if !strings.Contains(msg, "401") {
+			t.Errorf("%s dropped the status code: %s", name, msg)
+		}
+		// The part of the body that explains the failure has to survive, or
+		// the error stops being diagnosable.
+		if !strings.Contains(msg, "invalid audience") {
+			t.Errorf("%s dropped the error message: %s", name, msg)
+		}
 	}
 }

@@ -315,13 +315,28 @@ func UnmarshalRequest(ctx *context.Context, s interface{}) error {
 // UnmarshalResponse into a given structure `s`. Supports both JSON and
 // YAML depending on the response's content-type header.
 func UnmarshalResponse(resp *gentleman.Response, s interface{}) error {
-	data := resp.Bytes()
-
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("HTTP %d:\n%s", resp.StatusCode, string(data))
+		return ResponseError(resp)
 	}
 
-	return unmarshalBody(resp.Header, data, s)
+	return unmarshalBody(resp.Header, resp.Bytes(), s)
+}
+
+// ResponseError renders a failed response as an error, with the body run
+// through the same redaction the verbose log uses. Every caller that turns a
+// >= 400 response into an error goes through here, so none of them can skip
+// that: this message is printed to stderr on every failed command, not only
+// under `--verbose`, and an error body carries credentials as readily as a
+// successful one -- a 401 that echoes back the token it rejected is ordinary.
+// It is also the text users copy into a bug report, because it is what the CLI
+// showed them when it broke.
+func ResponseError(resp *gentleman.Response) error {
+	if resp == nil {
+		return fmt.Errorf("the request failed with no response")
+	}
+
+	body := redactBody(resp.Header.Get("content-type"), string(resp.Bytes()))
+	return fmt.Errorf("HTTP %d:\n%s", resp.StatusCode, body)
 }
 
 func unmarshalBody(headers http.Header, data []byte, s interface{}) error {
