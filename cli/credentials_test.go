@@ -372,12 +372,17 @@ func TestMaskIfSecret(t *testing.T) {
 		assert.Equal(t, "sk-o****mnop", maskIfSecret(field, "sk-orq-abcdefghijklmnop"), field)
 	}
 
-	// A short secret shows nothing at all, and the mask width never tracks the
-	// real length.
-	assert.Equal(t, "****", maskIfSecret("api_key", "sk-orq-abcd"))
+	// How much of the ends survives scales with the length: four either side
+	// of a middling secret gives away too much of it, and a short enough one
+	// shows nothing at all. The mask width never tracks the real length.
+	assert.Equal(t, "sk****cd", maskIfSecret("api_key", "sk-orq-abcd"))           // 11 runes
+	assert.Equal(t, "sk****op", maskIfSecret("api_key", "sk-orq-abcdefop"))       // 15 runes
+	assert.Equal(t, "sk-o****mnop", maskIfSecret("api_key", "sk-orq-abcdefmnop")) // 16 runes
+	assert.Equal(t, "****", maskIfSecret("api_key", "sk-orq"))                    // 6 runes
+	assert.Equal(t, "sk****-a", maskIfSecret("api_key", "sk-orq-a"))              // 8 runes: the boundary
 
 	// Multi-byte secrets are cut on rune boundaries, not bytes.
-	assert.Equal(t, "日本語で****密ですね", maskIfSecret("password", "日本語ですごく長い秘密ですね"))
+	assert.Equal(t, "日本****すね", maskIfSecret("password", "日本語ですごく長い秘密ですね"))
 
 	// A non-string under a credential name is masked too: YAML decodes a
 	// numeric key as an int, and it is no less a secret for it.

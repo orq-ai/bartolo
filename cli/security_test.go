@@ -328,7 +328,9 @@ func TestResolveProfileValue(t *testing.T) {
 
 // looksSensitiveKey decides whether add-profile echoes the typed value.
 func TestLooksSensitiveKey(t *testing.T) {
-	for _, key := range []string{"api_key", "api-key", "client_secret", "access_token", "password", "X-Orq-Key", "passphrase", "client_credential", "signature"} {
+	// The wire names come through the same predicate as the configuration
+	// ones: a name redacted in a header must not print in full in a profile.
+	for _, key := range []string{"api_key", "api-key", "client_secret", "access_token", "password", "X-Orq-Key", "passphrase", "client_credential", "signature", "Authorization", "Proxy-Authorization", "Cookie", "Set-Cookie", "session_id", "auth"} {
 		if !looksSensitiveKey(key) {
 			t.Errorf("looksSensitiveKey(%q) = false, want true (must not echo)", key)
 		}
@@ -471,4 +473,108 @@ func TestCredentialsSaveRoundTripsAndStays0600(t *testing.T) {
 			t.Errorf("Save dropped a profile it did not set: %q", got)
 		}
 	})
+}
+
+// The verbose log redacts headers and the URL, so a body that carries the same
+// credential must not walk past it: an OAuth exchange posts client_secret and
+// gets back access_token, and a key-minting endpoint returns the new key.
+func TestRedactBody(t *testing.T) {
+	const secret = "sk-orq-abcdefghijklmnop"
+
+	t.Run("json_at_any_depth", func(t *testing.T) {
+		body := `{"data":{"api_key":"` + secret + `","name":"prod"},"items":[{"access_token":"` + secret + `"}]}`
+		got := redactBody("application/json", body)
+		if strings.Contains(got, secret) {
+			t.Errorf("secret survived: %s", got)
+		}
+		if !strings.Contains(got, "prod") {
+			t.Errorf("non-secret field dropped: %s", got)
+		}
+	})
+
+	t.Run("form_encoded", func(t *testing.T) {
+		got := redactBody("application/x-www-form-urlencoded; charset=utf-8", "grant_type=client_credentials&client_secret="+secret)
+		if strings.Contains(got, secret) {
+			t.Errorf("secret survived: %s", got)
+		}
+		if !strings.Contains(got, "client_credentials") {
+			t.Errorf("grant_type dropped: %s", got)
+		}
+	})
+
+	t.Run("json_mislabelled_as_text", func(t *testing.T) {
+		// A server can return a JSON error body labelled text/plain, so the
+		// content type is a hint and not the rule.
+		if got := redactBody("text/plain", `{"api_key":"`+secret+`"}`); strings.Contains(got, secret) {
+			t.Errorf("secret survived: %s", got)
+		}
+	})
+
+	t.Run("clean_body_is_untouched", func(t *testing.T) {
+		// Reformatting a body the user is debugging is its own kind of damage,
+		// so an untouched body comes back byte for byte.
+		body := `{"name":   "prod"}`
+		if got := redactBody("application/json", body); got != body {
+			t.Errorf("clean body rewritten: %q", got)
+		}
+		if got := redactBody("text/plain", "not json at all"); got != "not json at all" {
+			t.Errorf("non-JSON body rewritten: %q", got)
+		}
+		if got := redactBody("application/json", ""); got != "" {
+			t.Errorf("empty body rewritten: %q", got)
+		}
+	})
+}
+
+// Writes go through writeFileAtomic and land 0600, but a file an older version
+// or a neighbouring tool left behind keeps its mode forever unless something
+// narrows it.
+func TestNarrowConfigDirPermissions(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatalf("seed dir mode: %v", err)
+	}
+	for _, name := range []string{"credentials.json", "config.json", "cache.json"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o644); err != nil {
+			t.Fatalf("seed %s: %v", name, err)
+		}
+	}
+	// A file the CLI does not know about is covered by the directory instead.
+	if err := os.WriteFile(filepath.Join(dir, "config.json.bak"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("seed backup: %v", err)
+	}
+
+	narrowConfigDirPermissions(dir)
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat dir: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+		t.Errorf("config directory mode = %o, want no group/other bits", perm)
+	}
+	for _, name := range []string{"credentials.json", "config.json", "cache.json"} {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("stat %s: %v", name, err)
+		}
+		if perm := info.Mode().Perm(); perm&0o077 != 0 {
+			t.Errorf("%s mode = %o, want no group/other bits", name, perm)
+		}
+	}
+
+	// Narrowing only ever removes access, and a file that is already private
+	// is left alone.
+	private := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(private, []byte("{}"), 0o400); err != nil {
+		t.Fatalf("seed read-only: %v", err)
+	}
+	narrowConfigDirPermissions(dir)
+	info, err = os.Stat(private)
+	if err != nil {
+		t.Fatalf("stat read-only: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o400 {
+		t.Errorf("already-private file mode = %o, want it untouched at 400", perm)
+	}
 }

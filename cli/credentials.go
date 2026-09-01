@@ -327,13 +327,20 @@ func maskIfSecret(name string, value interface{}) interface{} {
 		return value
 	}
 
-	runes := []rune(s)
 	// The middle is a fixed width rather than the real one, so the output does
-	// not disclose the secret's length either.
-	if len(runes) < 12 {
+	// not disclose the secret's length either. How much of the ends survives
+	// scales with the secret: showing four characters either side of a short
+	// value gives away most of it, and a value short enough that even two
+	// would is not worth identifying.
+	runes := []rune(s)
+	switch {
+	case len(runes) < 8:
 		return "****"
+	case len(runes) < 16:
+		return string(runes[:2]) + "****" + string(runes[len(runes)-2:])
+	default:
+		return string(runes[:4]) + "****" + string(runes[len(runes)-4:])
 	}
-	return string(runes[:4]) + "****" + string(runes[len(runes)-4:])
 }
 
 // redactSettings copies a settings tree with every value under a sensitive key
@@ -855,12 +862,20 @@ var promptProfileValue = func(key string, required bool) (string, error) {
 }
 
 // looksSensitiveKey is the package's one definition of "secret", deciding
-// echo-less prompts, masked listings and redacted headers alike. Substring
-// matching over-redacts by design: a benign field is worth masking to keep a
-// key out of a log.
+// echo-less prompts, masked listings, the `--verbose` configuration dump and
+// redacted headers, query parameters and bodies alike. Substring matching
+// over-redacts by design: a benign field is worth masking to keep a key out of
+// a log.
+//
+// The wire hints ("auth", "session", "cookie") are in the same list as the
+// configuration ones rather than in a separate header-only predicate. Two
+// lists meant a name that was redacted in a header printed in full in a
+// profile, and profile key names come from the OpenAPI generator, so they are
+// not a fixed set we can check by eye. The cost is that a non-secret like
+// `auth_url` is masked too; a masked URL beats a printed credential.
 func looksSensitiveKey(key string) bool {
 	lower := strings.ToLower(key)
-	for _, hint := range []string{"key", "token", "secret", "password", "passphrase", "credential", "signature"} {
+	for _, hint := range []string{"key", "token", "secret", "password", "passphrase", "credential", "signature", "auth", "session", "cookie"} {
 		if strings.Contains(lower, hint) {
 			return true
 		}

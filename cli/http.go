@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/ioutil"
 	"math/rand"
+	"mime"
 	"net/http"
 	"net/url"
 	"strings"
@@ -64,35 +65,16 @@ func UserAgentMiddleware() {
 }
 
 // redactHeaderValue masks the value of a sensitive header so `--verbose` never
-// prints an API key, bearer token, or cookie. See looksSensitiveHeader for the
-// full rule: the four fixed transport names plus any name matching looksSensitiveKey
-// or containing "auth"/"session".
+// prints an API key, bearer token, or cookie. What counts as sensitive is
+// looksSensitiveKey, the same predicate the configuration dump and the profile
+// listing use: the transport names this used to list separately
+// (authorization, proxy-authorization, cookie, set-cookie) all match its
+// "auth" and "cookie" hints.
 func redactHeaderValue(key, val string) string {
-	if looksSensitiveHeader(key) {
+	if looksSensitiveKey(key) {
 		return "[REDACTED]"
 	}
 	return val
-}
-
-// looksSensitiveHeader reports whether a header or query-parameter name carries a
-// credential. It combines three sources: fixed transport header names (authorization,
-// proxy-authorization, cookie, set-cookie), looksSensitiveKey (key/token/secret/password/
-// passphrase/credential/signature), and wire-only hints (auth, session).
-func looksSensitiveHeader(name string) bool {
-	n := strings.ToLower(name)
-	switch n {
-	case "authorization", "proxy-authorization", "cookie", "set-cookie":
-		return true
-	}
-	if looksSensitiveKey(n) {
-		return true
-	}
-	for _, hint := range []string{"auth", "session"} {
-		if strings.Contains(n, hint) {
-			return true
-		}
-	}
-	return false
 }
 
 // redactURL renders a URL with the value of every sensitive query parameter masked.
@@ -110,7 +92,7 @@ func redactURL(u *url.URL) string {
 	query := u.Query()
 	redacted := false
 	for name := range query {
-		if !looksSensitiveHeader(name) {
+		if !looksSensitiveKey(name) {
 			continue
 		}
 		query.Set(name, "[REDACTED]")
@@ -124,6 +106,116 @@ func redactURL(u *url.URL) string {
 	clean := *u
 	clean.RawQuery = query.Encode()
 	return clean.String()
+}
+
+// redactBody masks credentials inside a request or response body so
+// `--verbose` does not print what the header and URL redaction just kept out
+// of the log: an OAuth token exchange carries client_secret in a form body and
+// returns access_token in a JSON one, and any endpoint that mints a key
+// returns it in its response.
+//
+// Only JSON and form-encoded bodies can be redacted, since redaction needs
+// field names. Anything else is logged unchanged, so a credential in an opaque
+// body -- or in a JSON document carried as a string inside another one, which
+// is one value to this walk -- still reaches the log. That is the accepted
+// limit of a key-based rule.
+// The original text is returned untouched when nothing matched, so a body the
+// user is trying to debug is not silently reformatted.
+func redactBody(contentType, body string) string {
+	if strings.TrimSpace(body) == "" {
+		return body
+	}
+
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		mediaType = strings.ToLower(strings.TrimSpace(contentType))
+	}
+
+	if mediaType == "application/x-www-form-urlencoded" {
+		return redactFormBody(body)
+	}
+
+	// The content type is advisory: a server can return a JSON error body
+	// labelled text/plain. Try to parse regardless, and fall back to the
+	// original text when it is not JSON after all.
+	return redactJSONBody(body)
+}
+
+func redactJSONBody(body string) string {
+	var parsed interface{}
+	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
+		return body
+	}
+
+	redacted, changed := redactJSONValue("", parsed)
+	if !changed {
+		return body
+	}
+
+	out, err := json.MarshalIndent(redacted, "", "  ")
+	if err != nil {
+		// The value came out of encoding/json, so this should not happen; if
+		// it does, dropping the body beats printing the unredacted one.
+		return "[REDACTED BODY]"
+	}
+	return string(out)
+}
+
+// redactJSONValue walks a decoded JSON document, masking every value whose key
+// looks like a credential at any depth. Array elements inherit the key of the
+// array they are in: a list under "api_keys" is a list of secrets.
+func redactJSONValue(key string, value interface{}) (interface{}, bool) {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		if looksSensitiveKey(key) {
+			return "[REDACTED]", true
+		}
+		out := make(map[string]interface{}, len(typed))
+		changed := false
+		for k, v := range typed {
+			redacted, hit := redactJSONValue(k, v)
+			out[k] = redacted
+			changed = changed || hit
+		}
+		return out, changed
+	case []interface{}:
+		if looksSensitiveKey(key) {
+			return "[REDACTED]", true
+		}
+		out := make([]interface{}, len(typed))
+		changed := false
+		for i, item := range typed {
+			redacted, hit := redactJSONValue(key, item)
+			out[i] = redacted
+			changed = changed || hit
+		}
+		return out, changed
+	default:
+		if looksSensitiveKey(key) {
+			return "[REDACTED]", true
+		}
+		return typed, false
+	}
+}
+
+func redactFormBody(body string) string {
+	values, err := url.ParseQuery(body)
+	if err != nil {
+		return body
+	}
+
+	changed := false
+	for name := range values {
+		if !looksSensitiveKey(name) {
+			continue
+		}
+		values.Set(name, "[REDACTED]")
+		changed = true
+	}
+	if !changed {
+		return body
+	}
+	return values.Encode()
 }
 
 // LogMiddleware adds verbose log info to HTTP requests.
@@ -159,7 +251,7 @@ func LogMiddleware(useColor bool) {
 			}
 
 			if body != "" {
-				body = "\n" + body
+				body = "\n" + redactBody(ctx.Request.Header.Get("Content-Type"), body)
 			}
 
 			http := fmt.Sprintf("%s %s %s\n%s%s", ctx.Request.Method, redactURL(ctx.Request.URL), ctx.Request.Proto, headers, body)
@@ -194,7 +286,7 @@ func LogMiddleware(useColor bool) {
 			}
 			ctx.Response.Body = newReader
 
-			http := fmt.Sprintf("%s %s\n%s\n%s", ctx.Response.Proto, ctx.Response.Status, headers, body)
+			http := fmt.Sprintf("%s %s\n%s\n%s", ctx.Response.Proto, ctx.Response.Status, headers, redactBody(ctx.Response.Header.Get("Content-Type"), body))
 
 			if useColor {
 				sb := strings.Builder{}

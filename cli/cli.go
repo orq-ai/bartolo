@@ -230,6 +230,7 @@ func initConfig(appName, envPrefix, apiKeyEnvVar, defaultOutputFormat string) {
 	if err := os.MkdirAll(configDir, 0700); err != nil {
 		panic(err)
 	}
+	narrowConfigDirPermissions(configDir)
 
 	// Load configuration from file(s) if provided.
 	viper.SetConfigName("config")
@@ -265,6 +266,48 @@ var outputFormats = []string{"json", "yaml", "toon"}
 
 func outputFormatList() string {
 	return strings.Join(outputFormats, ", ")
+}
+
+// narrowConfigDirPermissions closes a credential file left world-readable by an
+// older version. Writes go through writeFileAtomic, which creates its temp file
+// 0600 and renames it into place, so anything this CLI has written since is
+// already private -- but a file written before that, or by another tool sharing
+// the directory, keeps its original mode forever because nothing ever chmods
+// it. MkdirAll has the same gap: it leaves an existing directory's mode alone.
+//
+// The directory is narrowed too, which also covers files not on this list: a
+// backup an older version left behind is unreachable once the directory is not
+// traversable by anyone else.
+func narrowConfigDirPermissions(configDir string) {
+	narrowPermissions(configDir, 0700)
+
+	// config.json and config.yaml hold no credentials that this CLI writes --
+	// profiles live in credentials.json -- but viper reads them, so a profile
+	// an older version or a neighbouring tool left there is still live.
+	for _, name := range []string{"credentials.json", "config.json", "config.yaml", "config.yml", "cache.json", "cache.yaml", "cache.yml"} {
+		narrowPermissions(path.Join(configDir, name), 0600)
+	}
+}
+
+func narrowPermissions(name string, want os.FileMode) {
+	info, err := os.Stat(name)
+	if err != nil {
+		return
+	}
+
+	// Only ever remove access. A user who has widened a mode past `want` on
+	// purpose is not the case being fixed here; group- and other-readable
+	// credentials are.
+	perm := info.Mode().Perm()
+	if perm&^want == 0 {
+		return
+	}
+
+	if err := os.Chmod(name, perm&want); err != nil {
+		// Worth a line: the file stays readable by others, which is the
+		// condition this exists to remove.
+		fmt.Fprintf(Stderr, "warning: %s is readable by other users and could not be narrowed: %v\n", name, err)
+	}
 }
 
 func outputFormatOrDefault(value string) string {
