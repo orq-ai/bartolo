@@ -72,13 +72,13 @@ func TestNormalizeParamDateTime(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "--from")
 	assert.Contains(t, err.Error(), "now-24h")
-	// A bad value is a usage error, so the CLI exits 2 rather than 1.
+	// A usage error, so the CLI exits 2 rather than 1.
 	var usageErr *UsageError
 	assert.True(t, errors.As(err, &usageErr), "a bad timestamp should be a usage error")
 }
 
-// NormalizeParam stands in for CheckParam at every call site, so it has to keep
-// doing CheckParam's job for the formats it does not normalize.
+// NormalizeParam replaced CheckParam at every call site, so it still has to do
+// CheckParam's job.
 func TestNormalizeParamPassesThroughOtherFormats(t *testing.T) {
 	got, err := NormalizeParam("--id", "550e8400-e29b-41d4-a716-446655440000", "uuid", nil)
 	assert.NoError(t, err)

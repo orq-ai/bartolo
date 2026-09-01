@@ -1562,9 +1562,8 @@ func bodyFieldType(schema *openapi3.Schema) string {
 		return "json"
 	}
 	if nullable {
-		// A nullable date-time keeps the plain nullable-string flag: being able to
-		// send JSON null matters more there than relative-timestamp parsing, and
-		// one token cannot do both.
+		// A nullable date-time stays nullable-string: sending JSON null matters
+		// more there, and one token cannot do both.
 		return base + "-nullable"
 	}
 	if base == "string" && isDateTimeSchema(effective, schema) {
@@ -1573,9 +1572,8 @@ func bodyFieldType(schema *openapi3.Schema) string {
 	return base
 }
 
-// isDateTimeSchema reports whether any of the given schemas carries
-// `format: date-time`. Callers pass both the effective schema and the original,
-// since a nullability wrapper may hold the format rather than its branch.
+// isDateTimeSchema takes both the effective schema and the original, since a
+// nullability wrapper may carry `format` rather than its branch.
 func isDateTimeSchema(schemas ...*openapi3.Schema) bool {
 	for _, schema := range schemas {
 		if schema != nil && schema.Format == "date-time" {

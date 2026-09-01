@@ -87,9 +87,8 @@ blocks need is a field on the operation itself (see Operation.PublicPrefix).
 		without a request; x-cli-no-validate opts out a stricter-than-API schema. */}}
 		{{- range .RequiredParams }}
 			{{- if or .Enum .Format }}
-				{{- /* A date-time also accepts relative shorthand, so the check returns
-				the value to send. Path params are excluded: the URL is already built
-				above, so normalizing here would have nowhere to go. */}}
+				{{- /* A date-time check returns the value to send. Path params are
+				excluded: the URL is already built above. */}}
 				{{- if and (eq .Format "date-time") (ne .In "path") }}
 					{{ .GoName }}Time, err := bartolocli.NormalizeParam("argument {{ .Name | slug | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} })
 					if err != nil {

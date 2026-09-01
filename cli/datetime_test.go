@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// pinnedNow is the instant every relative case in this file resolves against.
 var pinnedNow = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
 
 func pinTime(t *testing.T) {
@@ -26,7 +25,7 @@ func TestNormalizeDateTimeAccepts(t *testing.T) {
 		input string
 		want  string
 	}{
-		// RFC 3339 is handed back byte-for-byte, offsets and precision intact.
+		// Handed back byte-for-byte.
 		{"rfc3339 zulu", "2026-08-31T17:40:00Z", "2026-08-31T17:40:00Z"},
 		{"rfc3339 offset", "2026-08-31T00:00:00+02:00", "2026-08-31T00:00:00+02:00"},
 		{"rfc3339 subsecond", "2026-08-31T17:40:00.123456Z", "2026-08-31T17:40:00.123456Z"},
@@ -55,8 +54,6 @@ func TestNormalizeDateTimeAccepts(t *testing.T) {
 	}
 }
 
-// TestNormalizeDateTimeDayAndWeekAreFixedSpans pins the deliberate choice that a
-// day is exactly 24h and a week exactly 168h, with no calendar or DST arithmetic.
 func TestNormalizeDateTimeDayAndWeekAreFixedSpans(t *testing.T) {
 	pinTime(t)
 
@@ -86,14 +83,11 @@ func TestNormalizeDateTimeRejects(t *testing.T) {
 		{"unknown unit", "24x"},
 		{"words", "banana"},
 		{"now prefix without sign", "nowish"},
-		// A signed bare duration is ambiguous against "now-24h", and pflag would
-		// read the leading "-" as a flag anyway.
+		// Ambiguous against "now-24h".
 		{"negative bare duration", "-24h"},
 
-		// ISO 8601 durations are rejected by design: the CLI implements the
-		// Prometheus-style grammar only. Adding ISO support later is unambiguous
-		// (it always starts with an optionally-signed "P"), but until then these
-		// must fail locally rather than reach the API.
+		// Rejected by design: Prometheus grammar only. Pinned so ISO 8601 is not
+		// added by accident.
 		{"iso duration signed", "-P1D"},
 		{"iso duration", "P1D"},
 		{"iso duration with time", "PT30M"},
@@ -101,7 +95,7 @@ func TestNormalizeDateTimeRejects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := NormalizeDateTime(tc.input)
 			require.Error(t, err)
-			// The message has to name the accepted forms, per the ticket.
+			// The ticket requires the message to name the accepted forms.
 			assert.Contains(t, err.Error(), "RFC 3339")
 			assert.Contains(t, err.Error(), "24h")
 			assert.Contains(t, err.Error(), "now-24h")

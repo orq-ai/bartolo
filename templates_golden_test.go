@@ -33,8 +33,7 @@ paths:
         - {name: limit, in: query, schema: {type: integer}}
         - {name: ratio, in: query, schema: {type: number}}
         - {name: kind, in: query, schema: {type: string, enum: [internal, a2a]}}
-        # Two date-time params in one operation: each needs its own temporary,
-        # and a required one is normalized before the query is built.
+        # Two in one operation: each needs its own temporary to compile.
         - {name: from, in: query, required: true, schema: {type: string, format: date-time}}
         - {name: to, in: query, schema: {type: string, format: date-time}}
         - name: cursor

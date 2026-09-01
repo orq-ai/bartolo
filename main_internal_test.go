@@ -502,13 +502,10 @@ func TestBodyFieldTypeCoversCommonShapes(t *testing.T) {
 		"metadata":     "string-map",
 		"metadata_any": "string-map",
 		"color":        "enum-string",
-		// format: date-time earns the flag that also accepts relative values.
-		"from": "datetime",
-		// A nullable date-time keeps the nullable-string flag: sending JSON null
-		// matters more there, and one token cannot do both.
+		"from":         "datetime",
+		// Nullable keeps the nullable-string flag; any other format stays plain.
 		"expires_at": "string-nullable",
-		// Any other string format is still a plain string flag.
-		"email": "string",
+		"email":      "string",
 	}
 	for name, typ := range want {
 		if got[name] != typ {
@@ -1391,8 +1388,7 @@ paths:
 
 	rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", doc))
 
-	// Required and optional alike are normalized, so `--from 24h --to now` works
-	// the same way on a query param as it does on a body field.
+	// Required and optional alike.
 	for _, want := range []string{
 		`bartolocli.NormalizeParam("argument from", paramFrom, "date-time"`,
 		`bartolocli.NormalizeParam("--to", paramTo, "date-time"`,
@@ -1410,8 +1406,7 @@ paths:
 		}
 	}
 
-	// A param with no format keeps the plain path: nothing to normalize, and no
-	// check to run either.
+	// No format: nothing to normalize, nothing to check.
 	if strings.Contains(rendered, `NormalizeParam("--cursor"`) || strings.Contains(rendered, `CheckParam("--cursor"`) {
 		t.Error("a plain string param should be neither normalized nor checked")
 	}

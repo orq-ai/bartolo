@@ -8,30 +8,23 @@ import (
 	"time"
 )
 
-// timeNow is the clock used to resolve relative timestamps. Tests replace it.
+// timeNow lets tests pin "now".
 var timeNow = time.Now
 
-// dayOrWeekUnit matches a `<number>d` or `<number>w` component of a duration.
-// Go's time.ParseDuration deliberately stops at hours, so these are expanded to
-// hours before it sees them.
+// time.ParseDuration stops at hours, so d and w are expanded before it runs.
 var dayOrWeekUnit = regexp.MustCompile(`(\d+(?:\.\d+)?)([dw])`)
 
-// dateOnlyLayouts are the shorthand date forms accepted in addition to RFC 3339.
-// Both are interpreted as UTC.
 var dateOnlyLayouts = []string{"2006-01-02", "2006-01-02 15:04:05"}
 
 const dateTimeHint = "use RFC 3339 (2026-08-31T17:40:00Z), a date (2026-08-31), " +
 	"or a relative value such as 24h, 7d, 30m, now, now-24h"
 
-// DateTimeFlagHelp is the suffix appended to the help text of every flag that
-// accepts a date-time, whether it is a body field or a query parameter. Generated
-// code references it so the two stay in step.
+// DateTimeFlagHelp is referenced by generated code, so body-field and parameter
+// flags describe themselves the same way.
 const DateTimeFlagHelp = "(RFC 3339 timestamp, or relative: 24h, 7d, now, now-24h)"
 
-// WithDateTimeHelp appends DateTimeFlagHelp to a flag description. The
-// description is whatever the spec supplied, which for a parameter is often
-// nothing at all, so the separator is only added when there is something to
-// separate.
+// WithDateTimeHelp appends DateTimeFlagHelp to a description the spec may not
+// have supplied — parameters often have none.
 func WithDateTimeHelp(description string) string {
 	if description == "" {
 		return DateTimeFlagHelp
@@ -51,21 +44,18 @@ func WithDateTimeHelp(description string) string {
 //   - "now-<duration>" / "now+<duration>", offset from now.
 //   - A bare "<duration>", meaning that long ago: "24h", "7d", "30m", "2w", "1h30m".
 //
-// The relative grammar is the de facto Prometheus/Grafana one rather than ISO 8601
-// durations ("P1D", "PT30M"), because it is what people type at a terminal. The two
-// are disjoint — an ISO duration always starts with an optionally-signed "P" — so
-// ISO support could be added later without ambiguity.
+// The grammar is the de facto Prometheus/Grafana one, not ISO 8601 durations
+// ("P1D"), which are rejected. The two are disjoint — ISO always starts with an
+// optionally-signed "P" — so ISO could be added later without ambiguity.
 //
-// "d" and "w" are fixed spans: 1d is exactly 24h and 1w is exactly 168h. No calendar
-// or DST arithmetic is attempted, which also avoids having to pick a timezone for a
-// CLI talking to a UTC API.
+// "d" and "w" are fixed spans, 24h and 168h, so no calendar arithmetic and no
+// timezone to pick.
 func NormalizeDateTime(value string) (string, error) {
 	raw := strings.TrimSpace(value)
 	if raw == "" {
 		return "", fmt.Errorf("%q is not a timestamp: %s", value, dateTimeHint)
 	}
 
-	// Already RFC 3339: hand it back untouched.
 	if _, err := time.Parse(time.RFC3339, raw); err == nil {
 		return raw, nil
 	}
@@ -84,7 +74,6 @@ func NormalizeDateTime(value string) (string, error) {
 	}
 
 	if rest, ok := strings.CutPrefix(lower, "now"); ok {
-		// "now-24h" / "now+2h": the sign belongs to the offset.
 		if len(rest) > 1 && (rest[0] == '-' || rest[0] == '+') {
 			d, err := parseRelativeDuration(rest[1:])
 			if err != nil {
@@ -99,7 +88,7 @@ func NormalizeDateTime(value string) (string, error) {
 	}
 
 	// A bare duration means "ago". A signed one is rejected: "-24h" is ambiguous
-	// against "now-24h", and a leading "-" is a flag to pflag anyway.
+	// against "now-24h", and pflag reads the leading "-" as a flag anyway.
 	d, err := parseRelativeDuration(lower)
 	if err != nil || d < 0 {
 		return "", fmt.Errorf("%q is not a timestamp: %s", value, dateTimeHint)
@@ -107,9 +96,9 @@ func NormalizeDateTime(value string) (string, error) {
 	return now.Add(-d).Format(time.RFC3339), nil
 }
 
-// NormalizeDateTimeFlag is NormalizeDateTime with the error attributed to the flag
-// the value came from. Generated code calls this so it needs no error-formatting
-// imports of its own.
+// NormalizeDateTimeFlag is NormalizeDateTime with the error attributed to the
+// flag the value came from. Used for body fields; parameters go through
+// NormalizeParam, which already has a label.
 func NormalizeDateTimeFlag(flagName, value string) (string, error) {
 	normalized, err := NormalizeDateTime(value)
 	if err != nil {
@@ -118,9 +107,9 @@ func NormalizeDateTimeFlag(flagName, value string) (string, error) {
 	return normalized, nil
 }
 
-// parseRelativeDuration is time.ParseDuration extended with "d" (24h) and "w"
-// (168h) units. Expanding those into hours up front keeps compounds like "1h30m"
-// and all of ParseDuration's unit validation for free.
+// parseRelativeDuration is time.ParseDuration with "d" (24h) and "w" (168h)
+// units. Expanding them up front keeps compounds like "1h30m" and ParseDuration's
+// unit validation for free.
 func parseRelativeDuration(value string) (time.Duration, error) {
 	expanded := dayOrWeekUnit.ReplaceAllStringFunc(value, func(match string) string {
 		parts := dayOrWeekUnit.FindStringSubmatch(match)

@@ -20,9 +20,8 @@ paths:
           type: string
       - name: since
         in: query
-        # Exercises date-time normalization: relative values like 24h and 7d are
-        # turned into RFC 3339 before the query is built. Required and optional
-        # date-time params render differently, so smoke compiles both shapes.
+        # Required and optional date-time params render differently, so smoke
+        # compiles both shapes and asserts a bad value is refused locally.
         description: Only echo events after this time.
         required: true
         schema:

@@ -685,12 +685,11 @@ func TestApplyBodyFlagsNormalizesDateTime(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal([]byte(body), &decoded))
 
-	// A relative value becomes a real timestamp, roughly a day back.
 	from, err := time.Parse(time.RFC3339, decoded.From)
 	require.NoError(t, err)
 	assert.WithinDuration(t, time.Now().Add(-24*time.Hour), from, time.Minute)
 
-	// An explicit RFC 3339 value, offset and all, goes out byte-for-byte.
+	// Offset and all, byte-for-byte.
 	assert.Equal(t, "2026-08-31T17:40:00+02:00", decoded.To)
 }
 
