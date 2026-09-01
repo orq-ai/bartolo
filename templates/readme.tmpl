@@ -40,7 +40,7 @@ The scaffold also includes:
 Check the generated setup before making requests:
 
 ```sh
-{{ .CommandName }} --json doctor
+{{ .CommandName }} -o json doctor
 ```
 
 ## Authentication
@@ -152,8 +152,8 @@ Bartolo keeps generated and user-owned code separate:
 
 ## Output Conventions
 
-- Collection commands render object results as readable tables when run in an interactive terminal. The generated schema can set the default columns with `x-cli-list-fields`; otherwise the columns are inferred from the response and trimmed to fit the terminal. Use `--jmespath` for a one-off projection and `--json` for the complete response.
-- Prefer `--json` when you want machine-readable output.
+- Collection commands render object results as readable tables when run in an interactive terminal. The generated schema can set the default columns with `x-cli-list-fields`; otherwise the columns are inferred from the response and trimmed to fit the terminal. Use `--jmespath` for a one-off projection and `-o json` for the complete response.
+- Prefer `-o json` when you want machine-readable output.
 - Piping a response also keeps the serialized output stable for scripts and agents.
 - Use `--help` on any command group or command to inspect flags and required args.
 - Use `help-input` when a command accepts a request body from stdin or CLI shorthand.

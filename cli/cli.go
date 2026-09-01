@@ -112,10 +112,6 @@ func Init(config *Config) {
 				return err
 			}
 
-			if viper.GetBool("json") {
-				viper.Set(resolvedOutputFormatKey, "json")
-			}
-
 			if viper.GetBool("verbose") {
 				zerolog.SetGlobalLevel(zerolog.DebugLevel)
 
@@ -167,16 +163,15 @@ func Init(config *Config) {
 	AddGlobalFlag("verbose", "", "Enable verbose log output", false)
 	AddGlobalFlag("output-format", "o", fmt.Sprintf("Output format [%s]", outputFormatList()), outputFormatOrDefault(config.DefaultOutputFormat))
 	AddGlobalFlag("columns", "", "Comma-separated columns to show in table output", "")
-	AddGlobalFlag("json", "", "Alias for --output-format json", false)
 	// Named `jmespath` rather than `query` so it cannot collide with the many
 	// endpoints whose request body or query string has a `query` field. The old
 	// `-q` shorthand went with it: it abbreviated a name that no longer exists.
-	//
-	// Note that `-j` is easily mistaken for `--json`, which deliberately has no
-	// shorthand. Because this flag takes a value, a stray `-j` consumes the next
-	// argument, so keep `--json` shorthand-free.
 	AddGlobalFlag("jmespath", "j", "Filter / project results using JMESPath", "")
-	AddGlobalFlag("raw", "", "Output result of --jmespath as raw rather than an escaped JSON string or list", false)
+	// Unwraps a scalar result rather than choosing a format: a string prints
+	// unquoted and a list of scalars prints one per line, which is what a shell
+	// wants from a --jmespath projection. Anything else is unaffected, and the
+	// format still comes from --output-format.
+	AddGlobalFlag("raw", "", "Print a string or scalar list result unquoted, one item per line, instead of serializing it", false)
 	AddGlobalFlag("server", "", "API base URL, e.g. https://api.example.com", "")
 }
 

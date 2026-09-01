@@ -51,7 +51,7 @@ bartolo generate openapi.json
 
 go mod tidy
 go build -o my-cli
-./my-cli --json doctor
+./my-cli -o json doctor
 ./my-cli --help
 ```
 
@@ -79,8 +79,8 @@ Every generated CLI starts with a useful operator surface:
 - A profile in force is authoritative for its key and takes precedence over the environment; the server is not held to the same rule — a profile saved without `--server` still falls through to `<PREFIX>_SERVER`. See the generated CLI's own README for the exact resolution order, which differs for the key and the server.
 - `request` provides a raw escape hatch for unmodeled endpoints.
 - `default-format` shows or persists the preferred default output format.
-- `-o table` (the default) renders list commands as a table on a terminal, and falls back to TOON elsewhere; `-o json|yaml|toon` and `--json` pick a serialization, and `--columns id,name` picks the table's columns.
-- `--json`, `--output-format`, and `-j`/`--jmespath` make automation and projection straightforward.
+- `-o table` (the default) renders list commands as a table on a terminal, and falls back to TOON elsewhere; `-o json|yaml|toon` picks a serialization, and `--columns id,name` picks the table's columns.
+- `-o`/`--output-format` and `-j`/`--jmespath` make automation and projection straightforward. `--raw` is not a format: it unwraps a scalar result, printing a string unquoted and a list of scalars one per line, which is what a shell wants back from a projection.
 - Generated flags never shadow a global: a body field or parameter named after one (`raw`, `profile`, `output-format`, ...) is exposed as `--body-<name>` or `--param-<name>`.
 - Grouped nouns like `prompts`, `files`, or `human-evals` feel closer to a product CLI than a path translator.
 - String parameters with an `enum` list their values in `--help` and complete them in the shell.
@@ -103,7 +103,7 @@ Bartolo will synthesize a decent CLI from a plain schema, but it gets significan
 | `x-cli-waiters` | Add polling-based waiter commands and follow-up flags. |
 
 For example, a collection operation can define the default interactive
-columns while leaving the complete response available through `--json` or a
+columns while leaving the complete response available through `-o json` or a
 pipe:
 
 ```yaml

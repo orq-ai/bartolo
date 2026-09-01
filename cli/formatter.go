@@ -381,7 +381,7 @@ func renderTable(data interface{}, requestedColumns []string, pinned bool) (bool
 
 // tableFooter summarizes the envelope in one line below the table: how many
 // rows are shown out of how many exist, then whatever else the envelope holds.
-// Pagination plumbing is for scripts reading --json, not for a reader looking
+// Pagination plumbing is for scripts reading `-o json`, not for a reader looking
 // at a table.
 func tableFooter(shown int, label string, metadata map[string]interface{}) (string, error) {
 	if label == "" {

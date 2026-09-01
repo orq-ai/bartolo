@@ -2787,7 +2787,7 @@ func buildREADMEExamples(api *OpenAPI) []*READMEExample {
 	examples := []*READMEExample{
 		{
 			Title:       "Check setup",
-			Command:     binary + " --json doctor",
+			Command:     binary + " -o json doctor",
 			Description: "Verify config, auth source, and selected server before making API calls.",
 		},
 		{

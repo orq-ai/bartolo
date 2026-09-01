@@ -33,7 +33,6 @@ var reservedFlagNames = map[string]string{
 	// Global flags, registered by Init and InitCredentialsFile.
 	"columns":       "global flag",
 	"jmespath":      "global flag",
-	"json":          "global flag",
 	"output-format": "global flag",
 	"profile":       "global flag",
 	"raw":           "global flag",

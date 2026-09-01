@@ -22,6 +22,18 @@ func TestInvalidOutputFormatIsRejected(t *testing.T) {
 	assert.Empty(t, stdout)
 }
 
+// --json used to force JSON past an explicit --output-format, so it was never
+// the alias its help text claimed. `-o json` says the same thing in the one
+// place formats are chosen.
+func TestJSONFlagIsGone(t *testing.T) {
+	initExitTestCLI(t)
+
+	_, stderr, code := executeForExit("group leaf --json")
+
+	assert.NotEqual(t, ExitOK, code)
+	assert.Contains(t, stderr, "unknown flag: --json")
+}
+
 func TestValidOutputFormatIsAccepted(t *testing.T) {
 	for _, tc := range []struct {
 		args string
@@ -33,8 +45,6 @@ func TestValidOutputFormatIsAccepted(t *testing.T) {
 		{"group leaf -o table", "table"},
 		// Values are normalized the same way the persisted default is.
 		{"group leaf -o YAML", "yaml"},
-		// The --json alias still wins over an explicit format.
-		{"group leaf -o yaml --json", "json"},
 	} {
 		t.Run(tc.args, func(t *testing.T) {
 			initExitTestCLI(t)
