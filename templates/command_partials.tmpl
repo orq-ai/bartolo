@@ -24,7 +24,7 @@ blocks need is a field on the operation itself (see Operation.PublicPrefix).
 		{{- else if eq .Type "float64" }}
 			cmd.Flags().Float64("{{ .CLIName | escapeStr }}", 0.0, "{{ .Description | escapeStr }}")
 		{{- else }}
-			cmd.Flags().String("{{ .CLIName | escapeStr }}", "", "{{ .Description | escapeStr }}{{ if .Enum }} (one of: {{ .Enum | joinComma | escapeStr }}){{ end }}")
+			cmd.Flags().String("{{ .CLIName | escapeStr }}", "", {{ if eq .Format "date-time" }}bartolocli.WithDateTimeHelp({{ end }}"{{ .Description | escapeStr }}{{ if .Enum }} (one of: {{ .Enum | joinComma | escapeStr }}){{ end }}"{{ if eq .Format "date-time" }}){{ end }})
 		{{- end }}
 		{{- if .Enum }}
 			_ = cmd.RegisterFlagCompletionFunc("{{ .CLIName | escapeStr }}", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
@@ -87,9 +87,20 @@ blocks need is a field on the operation itself (see Operation.PublicPrefix).
 		without a request; x-cli-no-validate opts out a stricter-than-API schema. */}}
 		{{- range .RequiredParams }}
 			{{- if or .Enum .Format }}
-				if err := bartolocli.CheckParam("argument {{ .Name | slug | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} }); err != nil {
-					return nil, nil, err
-				}
+				{{- /* A date-time also accepts relative shorthand, so the check returns
+				the value to send. Path params are excluded: the URL is already built
+				above, so normalizing here would have nowhere to go. */}}
+				{{- if and (eq .Format "date-time") (ne .In "path") }}
+					{{ .GoName }}Time, err := bartolocli.NormalizeParam("argument {{ .Name | slug | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} })
+					if err != nil {
+						return nil, nil, err
+					}
+					{{ .GoName }} = {{ .GoName }}Time
+				{{- else }}
+					if err := bartolocli.CheckParam("argument {{ .Name | slug | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} }); err != nil {
+						return nil, nil, err
+					}
+				{{- end }}
 			{{- end }}
 		{{- end }}
 
@@ -109,9 +120,17 @@ blocks need is a field on the operation itself (see Operation.PublicPrefix).
 			if bartolocli.FlagPassed(params, "{{ .CLIName | escapeStr }}") || {{ .GoName }} != {{ .TypeNil }} {
 				{{- if or .Enum .Format }}
 					{{- /* Enum and Format are string-only (see getParams), so no fmt.Sprintf — Imports.Fmt is set from `in`, not here. */}}
-					if err := bartolocli.CheckParam("--{{ .CLIName | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} }); err != nil {
-						return nil, nil, err
-					}
+					{{- if eq .Format "date-time" }}
+						{{ .GoName }}Time, err := bartolocli.NormalizeParam("--{{ .CLIName | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} })
+						if err != nil {
+							return nil, nil, err
+						}
+						{{ .GoName }} = {{ .GoName }}Time
+					{{- else }}
+						if err := bartolocli.CheckParam("--{{ .CLIName | escapeStr }}", {{ .GoName }}, "{{ .Format | escapeStr }}", []string{ {{- range .Enum }}"{{ . | escapeStr }}", {{ end -}} }); err != nil {
+							return nil, nil, err
+						}
+					{{- end }}
 				{{- end }}
 				{{- if eq .In "query" }}
 					req = req.AddQuery("{{ .Name | escapeStr }}", fmt.Sprintf("%v", {{ .GoName }}))

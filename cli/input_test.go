@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/orq-ai/bartolo/cli"
 )
@@ -665,4 +666,53 @@ func TestBodyFieldFlagsDoNotCollideWithRequestBodyFlags(t *testing.T) {
 	// The real request-body flags kept their types.
 	assert.Equal(t, "string", cmd.Flags().Lookup("from-file").Value.Type())
 	assert.Equal(t, "bool", cmd.Flags().Lookup("example").Value.Type())
+}
+
+func TestApplyBodyFlagsNormalizesDateTime(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "from", FlagName: "from", Type: "datetime"},
+		{Name: "to", FlagName: "to", Type: "datetime"},
+	}
+
+	body := applyBody(t, fields, map[string][]string{
+		"from": {"24h"},
+		"to":   {"2026-08-31T17:40:00+02:00"},
+	}, ``)
+
+	var decoded struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &decoded))
+
+	// A relative value becomes a real timestamp, roughly a day back.
+	from, err := time.Parse(time.RFC3339, decoded.From)
+	require.NoError(t, err)
+	assert.WithinDuration(t, time.Now().Add(-24*time.Hour), from, time.Minute)
+
+	// An explicit RFC 3339 value, offset and all, goes out byte-for-byte.
+	assert.Equal(t, "2026-08-31T17:40:00+02:00", decoded.To)
+}
+
+func TestApplyBodyFlagsRejectsUnparseableDateTime(t *testing.T) {
+	fields := []cli.BodyField{{Name: "from", FlagName: "from", Type: "datetime"}}
+
+	cmd := &cobra.Command{Use: "test"}
+	cli.AddBodyFieldFlags(cmd, fields)
+	require.NoError(t, cmd.Flags().Set("from", "banana"))
+
+	params := viper.New()
+	require.NoError(t, params.BindPFlags(cmd.Flags()))
+
+	_, err := cli.ApplyBodyFlags(cmd, params, "application/json", ``, fields)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--from")
+	assert.Contains(t, err.Error(), "24h")
+}
+
+func TestDateTimeBodyFlagHelpMentionsRelativeValues(t *testing.T) {
+	cmd := &cobra.Command{Use: "test"}
+	cli.AddBodyFieldFlags(cmd, []cli.BodyField{{Name: "from", FlagName: "from", Type: "datetime"}})
+
+	assert.Contains(t, cmd.Flags().Lookup("from").Usage, cli.DateTimeFlagHelp)
 }

@@ -463,6 +463,9 @@ func TestBodyFieldTypeCoversCommonShapes(t *testing.T) {
                   "metadata": {"type": "object", "additionalProperties": {"type": "string"}},
                   "metadata_any": {"type": "object", "additionalProperties": true},
                   "color": {"type": "string", "enum": ["red", "green", "blue"]},
+                  "from": {"type": "string", "format": "date-time"},
+                  "expires_at": {"anyOf": [{"type": "string", "format": "date-time"}, {"type": "null"}]},
+                  "email": {"type": "string", "format": "email"},
                   "nested": {"type": "object", "properties": {"k": {"type": "string"}}}
                 }
               }
@@ -499,6 +502,13 @@ func TestBodyFieldTypeCoversCommonShapes(t *testing.T) {
 		"metadata":     "string-map",
 		"metadata_any": "string-map",
 		"color":        "enum-string",
+		// format: date-time earns the flag that also accepts relative values.
+		"from": "datetime",
+		// A nullable date-time keeps the nullable-string flag: sending JSON null
+		// matters more there, and one token cannot do both.
+		"expires_at": "string-nullable",
+		// Any other string format is still a plain string flag.
+		"email": "string",
 	}
 	for name, typ := range want {
 		if got[name] != typ {
@@ -1339,6 +1349,111 @@ paths:
 	}
 	if strings.Contains(rendered, `CheckParam("--opaque-cursor"`) {
 		t.Error("x-cli-no-validate should suppress the check")
+	}
+}
+
+func TestGeneratedClientNormalizesDateTimeParams(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Date-time Param API
+  version: "1"
+paths:
+  /v3/traces/facets/{field}:
+    get:
+      operationId: ListFacetValues
+      summary: List facet values
+      parameters:
+        - in: path
+          name: field
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: from
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: cursor
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+`)
+
+	rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", doc))
+
+	// Required and optional alike are normalized, so `--from 24h --to now` works
+	// the same way on a query param as it does on a body field.
+	for _, want := range []string{
+		`bartolocli.NormalizeParam("argument from", paramFrom, "date-time"`,
+		`bartolocli.NormalizeParam("--to", paramTo, "date-time"`,
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("date-time param should be normalized, missing %s in:\n%s", want, rendered)
+		}
+	}
+
+	// Two date-time params in one operation each need their own temporary, or
+	// the generated function does not compile.
+	for _, want := range []string{"paramFromTime", "paramToTime"} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("expected a per-param temporary %s, got:\n%s", want, rendered)
+		}
+	}
+
+	// A param with no format keeps the plain path: nothing to normalize, and no
+	// check to run either.
+	if strings.Contains(rendered, `NormalizeParam("--cursor"`) || strings.Contains(rendered, `CheckParam("--cursor"`) {
+		t.Error("a plain string param should be neither normalized nor checked")
+	}
+}
+
+func TestDateTimeParamFlagAdvertisesRelativeValues(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Date-time Flag Help API
+  version: "1"
+paths:
+  /v3/logs/facets:
+    get:
+      operationId: ListLogFacets
+      summary: List log facets
+      parameters:
+        - in: query
+          name: to
+          description: Upper bound
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+	if len(api.Groups) != 1 {
+		t.Fatalf("expected the operation to land in one group, got %d", len(api.Groups))
+	}
+	group := api.Groups[0]
+	rendered := renderCommandTemplate("templates/generated_group_commands.tmpl", &CommandsTemplateData{
+		API:        api,
+		Group:      group,
+		Operations: group.Operations,
+		NeedsFmt:   commandFileNeedsFmt(group.Operations),
+	})
+
+	if !strings.Contains(rendered, `bartolocli.WithDateTimeHelp("Upper bound")`) {
+		t.Errorf("date-time flag help should point at the shared suffix, got:\n%s", rendered)
 	}
 }
 

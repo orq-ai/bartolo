@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -58,4 +59,38 @@ func TestCheckParamIsUsageError(t *testing.T) {
 	var usage *UsageError
 	assert.ErrorAs(t, CheckParam("--kind", "external", "", []string{"internal", "a2a"}), &usage)
 	assert.NoError(t, CheckParam("--kind", "internal", "", []string{"internal", "a2a"}))
+}
+
+func TestNormalizeParamDateTime(t *testing.T) {
+	pinTime(t)
+
+	got, err := NormalizeParam("--from", "24h", "date-time", nil)
+	assert.NoError(t, err)
+	assert.Equal(t, "2026-08-31T12:00:00Z", got)
+
+	_, err = NormalizeParam("--from", "-P1D", "date-time", nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "--from")
+	assert.Contains(t, err.Error(), "now-24h")
+	// A bad value is a usage error, so the CLI exits 2 rather than 1.
+	var usageErr *UsageError
+	assert.True(t, errors.As(err, &usageErr), "a bad timestamp should be a usage error")
+}
+
+// NormalizeParam stands in for CheckParam at every call site, so it has to keep
+// doing CheckParam's job for the formats it does not normalize.
+func TestNormalizeParamPassesThroughOtherFormats(t *testing.T) {
+	got, err := NormalizeParam("--id", "550e8400-e29b-41d4-a716-446655440000", "uuid", nil)
+	assert.NoError(t, err)
+	assert.Equal(t, "550e8400-e29b-41d4-a716-446655440000", got)
+
+	_, err = NormalizeParam("--id", "not-a-uuid", "uuid", nil)
+	assert.Error(t, err)
+
+	_, err = NormalizeParam("--status", "banana", "", []string{"active", "archived"})
+	assert.Error(t, err)
+
+	got, err = NormalizeParam("--cursor", "opaque", "", nil)
+	assert.NoError(t, err)
+	assert.Equal(t, "opaque", got)
 }

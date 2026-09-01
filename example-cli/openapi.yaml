@@ -18,6 +18,22 @@ paths:
         in: header
         schema:
           type: string
+      - name: since
+        in: query
+        # Exercises date-time normalization: relative values like 24h and 7d are
+        # turned into RFC 3339 before the query is built. Required and optional
+        # date-time params render differently, so smoke compiles both shapes.
+        description: Only echo events after this time.
+        required: true
+        schema:
+          type: string
+          format: date-time
+      - name: until
+        in: query
+        description: Only echo events before this time.
+        schema:
+          type: string
+          format: date-time
       - name: status
         in: query
         # Exercises schema-driven value checking: a value outside the enum is

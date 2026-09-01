@@ -30,6 +30,9 @@ const nullableFlagSentinel = "null"
 //     repeatable scalar list (`--tag a --tag b` or `--tag a,b`).
 //   - "string-map": map of string→string (`--metadata key=value`, repeatable).
 //   - "enum-string": string flag whose value is validated against Enum.
+//   - "datetime": `format: date-time` string. Accepts RFC 3339 verbatim, plus a
+//     bare date and relative values like "24h", "7d" or "now-24h", normalized to
+//     RFC 3339 before the request is built. See NormalizeDateTime.
 //   - "json": fallback for nested objects, arrays of objects, and
 //     polymorphic unions. Value is parsed as JSON before being merged into
 //     the request body.
@@ -132,6 +135,8 @@ func AddBodyFieldFlags(cmd *cobra.Command, fields []BodyField) {
 			cmd.Flags().BoolSlice(name, nil, description+" (repeatable)")
 		case "string-map":
 			cmd.Flags().StringToString(name, nil, description+" (key=value, repeatable)")
+		case "datetime":
+			cmd.Flags().String(name, "", WithDateTimeHelp(description))
 		case "json":
 			cmd.Flags().String(name, "", description+" (JSON value, e.g. '{\"k\":1}' or '[1,2]')")
 		case "json-or-string":
@@ -315,6 +320,12 @@ func ApplyBodyFlags(cmd *cobra.Command, params *viper.Viper, mediaType string, b
 				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = values
+		case "datetime":
+			value, err := NormalizeDateTimeFlag(name, params.GetString(name))
+			if err != nil {
+				return "", err
+			}
+			overrides[field.Name] = value
 		case "json":
 			raw := strings.TrimSpace(params.GetString(name))
 			if raw == "" {

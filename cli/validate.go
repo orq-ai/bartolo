@@ -71,3 +71,24 @@ func CheckParam(label, value, format string, allowed []string) error {
 
 	return nil
 }
+
+// NormalizeParam is CheckParam for a format whose accepted input is wider than
+// what goes on the wire, returning the value to send. Only `date-time` is such a
+// format today: it takes RFC 3339, a bare date, or a relative value like "24h",
+// and always sends RFC 3339. Every other format is checked and passed through
+// unchanged, so this is safe to call in place of CheckParam.
+//
+// Generated code calls this rather than CheckParam so that a value the API would
+// reject fails locally, with a message naming the accepted forms, instead of
+// arriving as a server-side timestamp parse error.
+func NormalizeParam(label, value, format string, allowed []string) (string, error) {
+	if format == "date-time" {
+		normalized, err := NormalizeDateTime(value)
+		if err != nil {
+			return "", NewValueError(fmt.Errorf("%s: %w", label, err))
+		}
+		value = normalized
+	}
+
+	return value, CheckParam(label, value, format, allowed)
+}

@@ -559,6 +559,7 @@ Commands that accept a request body also support:
 - ¬--example¬ to print an example request body and exit without sending a request. It takes precedence over every other body input. Round-trip it: ¬my-cli command --example >body.json¬, edit the file, then ¬my-cli command --from-file body.json¬.
 - ¬--stdin¬ to require piped stdin input explicitly.
 - Generated ¬--field-name¬ flags for simple top-level body properties when Bartolo can infer them safely.
+- Timestamp fields and parameters (¬format: date-time¬) accept RFC 3339 (¬2026-08-31T17:40:00Z¬), a bare date (¬2026-08-31¬), or a relative value — ¬24h¬, ¬7d¬, ¬30m¬, ¬2w¬, ¬now¬, ¬now-24h¬. They are normalized to RFC 3339 before the request is sent, so ¬--from 24h --to now¬ means the last day. A day is exactly 24h and a week exactly 168h.
 
 CLI shorthand still applies on top of any base body so you can override or add fields without editing the source file.
 
