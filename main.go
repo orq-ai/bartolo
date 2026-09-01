@@ -1234,9 +1234,8 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 					enum = enumStrings(p.Value.Schema.Value)
 				}
 				if effective, _ := effectiveBodySchema(p.Value.Schema.Value); effective != nil {
-					// x-cli-no-validate drops constraints stricter than the API.
-					// date-time is not one — it widens input and rejects nothing
-					// the server would take — so it survives the opt-out.
+					// date-time is not a stricter-than-API constraint — it only
+					// widens input — so it survives the opt-out.
 					if !noValidate || effective.Format == "date-time" {
 						format = effective.Format
 					}

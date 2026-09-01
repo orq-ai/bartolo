@@ -75,10 +75,9 @@ func CheckParam(label, value, format string, allowed []string) error {
 	return nil
 }
 
-// NormalizeParam checks a parameter and returns the value to send. It is the
+// NormalizeParam checks a parameter and returns the value to send, and is the
 // only call path in generated code: a format that accepts wider input than it
-// sends is normalized first, and every other one is handed back unchanged.
-// `date-time` is the only one that widens today.
+// sends is normalized first, every other one handed back unchanged.
 func NormalizeParam(label, value, format string, allowed []string) (string, error) {
 	if format == "date-time" {
 		normalized, err := NormalizeDateTime(value)

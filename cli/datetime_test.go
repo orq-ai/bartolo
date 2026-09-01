@@ -46,11 +46,8 @@ func TestNormalizeDateTimeAccepts(t *testing.T) {
 		{"bare weeks", "2w", "2026-08-18T12:00:00Z"},
 		{"bare compound", "1h30m", "2026-09-01T10:30:00Z"},
 		{"fractional days", "0.5d", "2026-09-01T00:00:00Z"},
-		// time.ParseDuration takes a leading dot, so the d/w expansion has to as
-		// well: matching only the tail of ".5d" would read it as .120h.
 		{"fractional days leading dot", ".5d", "2026-09-01T00:00:00Z"},
-		// The expansion is unanchored so a day or week can carry a remainder.
-		// Anchoring it would leave every single-unit case above passing.
+		// Anchoring the expansion would leave every case above passing.
 		{"days and hours", "1d12h", "2026-08-31T00:00:00Z"},
 		{"weeks and days", "1w2d", "2026-08-23T12:00:00Z"},
 		{"uppercase now", "NOW", "2026-09-01T12:00:00Z"},

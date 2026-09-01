@@ -12,8 +12,7 @@ import (
 var timeNow = time.Now
 
 // time.ParseDuration stops at hours, so d and w are expanded before it runs.
-// The number matches what ParseDuration takes, leading dot included: a stricter
-// pattern would expand only the tail of ".5d" and quietly change what it means.
+// Leading dot included, or ".5d" expands only its tail.
 var dayOrWeekUnit = regexp.MustCompile(`(\d*\.?\d+)([dw])`)
 
 // Read as UTC.
@@ -30,12 +29,11 @@ const dateTimeForms = "RFC 3339 (2026-08-31T17:40:00Z), a date (2026-08-31) or "
 
 const dateTimeHint = "use " + dateTimeForms
 
-// DateTimeFlagHelp is referenced by generated code so every date-time flag reads
-// the same.
+// DateTimeFlagHelp is referenced by generated code, so every flag reads alike.
 const DateTimeFlagHelp = "(accepts " + dateTimeForms + ")"
 
-// WithDateTimeHelp appends DateTimeFlagHelp to a description the spec may not
-// have supplied — parameters often have none.
+// WithDateTimeHelp appends DateTimeFlagHelp to a description; parameters often
+// have none.
 func WithDateTimeHelp(description string) string {
 	if description == "" {
 		return DateTimeFlagHelp
@@ -92,9 +90,8 @@ func NormalizeDateTime(value string) (string, error) {
 		return "", notATimestamp(value)
 	}
 
-	// A bare duration means "ago". Its sign is refused rather than honoured:
-	// "-24h" is ambiguous against "now-24h", and pflag reads a leading "-" as a
-	// flag anyway.
+	// A bare duration means "ago", so its own sign is refused: "-24h" is
+	// ambiguous against "now-24h", and pflag reads a leading "-" as a flag.
 	d, err := parseUnsignedDuration(lower)
 	if err != nil {
 		return "", notATimestamp(value)
