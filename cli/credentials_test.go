@@ -378,7 +378,8 @@ func TestMaskIfSecret(t *testing.T) {
 	// rebuild either.
 	assert.Equal(t, "sk****cd", maskIfSecret("api_key", "sk-orq-abcd"))           // 11 runes
 	assert.Equal(t, "sk****op", maskIfSecret("api_key", "sk-orq-abcdefop"))       // 15 runes
-	assert.Equal(t, "sk-o****mnop", maskIfSecret("api_key", "sk-orq-abcdefmnop")) // 16 runes
+	assert.Equal(t, "sk-o****fghi", maskIfSecret("api_key", "sk-orq-abcdefghi"))  // 16 runes: the boundary
+	assert.Equal(t, "sk-o****mnop", maskIfSecret("api_key", "sk-orq-abcdefmnop")) // 17 runes
 	assert.Equal(t, "****-a", maskIfSecret("api_key", "sk-orq-a"))                // 8 runes: tail only
 	assert.Equal(t, "****rq", maskIfSecret("api_key", "sk-orq"))                  // 6 runes
 	assert.Equal(t, "****", maskIfSecret("api_key", "sk"))                        // 2 runes: a tail would be all of it
@@ -393,6 +394,10 @@ func TestMaskIfSecret(t *testing.T) {
 
 	// An empty secret has nothing to hide, and a mask would imply it is set.
 	assert.Equal(t, "", maskIfSecret("api_key", ""))
+
+	// Same for a key present with no value at all: `api_key:` in YAML decodes
+	// to nil, and masking it would report a credential that is not there.
+	assert.Nil(t, maskIfSecret("api_key", nil))
 
 	// An address is not a credential: an OAuth auth_url is where a key is
 	// exchanged, and masking it makes the dump useless for diagnosing which

@@ -436,7 +436,10 @@ func readStdin(stdin *os.File) (string, error) {
 	}
 
 	body := string(input)
-	log.Debug().Msgf("Body from stdin is: %s", body)
+	// The bytes only, never the body: --verbose turns debug logging on, so
+	// printing it here would leak a credential in the request body past every
+	// redactor in http.go.
+	log.Debug().Msgf("Read %d bytes of body from stdin", len(input))
 	return body, nil
 }
 

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -382,8 +383,10 @@ func TestVerboseConfigMaskesAllSensitiveKeys(t *testing.T) {
 
 	profiles := redacted["profiles"].(map[string]interface{})
 	def := profiles["default"].(map[string]interface{})
-	if got := def["api_key"]; got != "sk-o****mnop" {
-		t.Errorf("nested api_key = %v, want sk-o****mnop", got)
+	// The dump shows nothing of a secret, unlike `auth list-profiles`: it is
+	// the output users are asked to paste into a bug report.
+	if got := def["api_key"]; got != "**HIDDEN**" {
+		t.Errorf("nested api_key = %v, want **HIDDEN**", got)
 	}
 	// Non-secret neighbours stay readable, or the dump loses its point.
 	if got := def["base_url"]; got != "https://my.orq.ai" {
@@ -393,11 +396,11 @@ func TestVerboseConfigMaskesAllSensitiveKeys(t *testing.T) {
 		t.Errorf("verbose = %v, want true", got)
 	}
 	// A sensitive key holding a subtree or a non-string is masked whole.
-	if got := redacted["tokens"]; got != "****" {
-		t.Errorf("tokens = %v, want ****", got)
+	if got := redacted["tokens"]; got != "**HIDDEN**" {
+		t.Errorf("tokens = %v, want **HIDDEN**", got)
 	}
-	if got := redacted["raw_token"]; got != "****" {
-		t.Errorf("raw_token = %v, want ****", got)
+	if got := redacted["raw_token"]; got != "**HIDDEN**" {
+		t.Errorf("raw_token = %v, want **HIDDEN**", got)
 	}
 
 	// Redaction must not write the mask back into the live configuration.
@@ -536,7 +539,7 @@ func TestNarrowConfigDirPermissions(t *testing.T) {
 	if err := os.Chmod(dir, 0o755); err != nil {
 		t.Fatalf("seed dir mode: %v", err)
 	}
-	for _, name := range []string{"credentials.json", "config.json", "cache.json"} {
+	for _, name := range []string{"credentials.json", "config.json", "cache.json", "credentials.json.bak", "credentials.yaml", "config.json.orig"} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o644); err != nil {
 			t.Fatalf("seed %s: %v", name, err)
 		}
@@ -546,7 +549,8 @@ func TestNarrowConfigDirPermissions(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "config.json.bak"), []byte("{}"), 0o644); err != nil {
 		t.Fatalf("seed backup: %v", err)
 	}
-	// A file the CLI knows nothing about is covered by the directory instead.
+	// A file the CLI knows nothing about is narrowed too: it is in the
+	// credential directory, so it is treated as if it holds one.
 	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("hi"), 0o644); err != nil {
 		t.Fatalf("seed stranger: %v", err)
 	}
@@ -560,7 +564,9 @@ func TestNarrowConfigDirPermissions(t *testing.T) {
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		t.Errorf("config directory mode = %o, want no group/other bits", perm)
 	}
-	for _, name := range []string{"credentials.json", "config.json", "cache.json", "config.json.bak"} {
+	// Every regular file in the directory, backups and strangers included --
+	// the sweep reads the directory rather than guessing at names.
+	for _, name := range []string{"credentials.json", "config.json", "cache.json", "credentials.json.bak", "credentials.yaml", "config.json.orig", "config.json.bak", "notes.txt"} {
 		info, err := os.Stat(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatalf("stat %s: %v", name, err)
@@ -583,5 +589,149 @@ func TestNarrowConfigDirPermissions(t *testing.T) {
 	}
 	if perm := info.Mode().Perm(); perm != 0o400 {
 		t.Errorf("already-private file mode = %o, want it untouched at 400", perm)
+	}
+}
+
+// The unit tests above all call a redactor directly, so every one of them
+// stays green if the caller stops calling it -- which is exactly how issue #34
+// shipped. This runs a real command with --verbose and reads the log the user
+// would paste into a bug report.
+func TestVerboseConfigDumpDoesNotPrintSecrets(t *testing.T) {
+	const secret = "sk-orq-thisisnottherealkey"
+
+	viper.Reset()
+	Cache = nil
+	Client = nil
+	Root = nil
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".test-verbose"), 0o700); err != nil {
+		t.Fatalf("seed config dir: %v", err)
+	}
+	config := `{"profiles":{"default":{"api_key":"` + secret + `","server":"https://api.example.com"}}}`
+	if err := os.WriteFile(filepath.Join(home, ".test-verbose", "config.json"), []byte(config), 0o600); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+
+	// Before Init: it binds the logger to whatever Stderr is at that moment.
+	logged := new(bytes.Buffer)
+	Stderr = logged
+	Init(&Config{AppName: "test-verbose", EnvPrefix: "TEST_VERBOSE"})
+
+	executeStreams("--verbose help-config")
+
+	out := logged.String()
+	if !strings.Contains(out, "Configuration") {
+		t.Fatalf("expected the verbose configuration dump, got %q", out)
+	}
+	if strings.Contains(out, secret) {
+		t.Fatalf("the verbose dump printed the api key:\n%s", out)
+	}
+	if !strings.Contains(out, "https://api.example.com") {
+		t.Errorf("the dump dropped a non-secret neighbour, which makes it useless:\n%s", out)
+	}
+}
+
+// A URL can carry its credential in userinfo rather than a query parameter,
+// and the request line is printed verbatim under --verbose.
+func TestRedactURLStripsPassword(t *testing.T) {
+	for _, raw := range []string{
+		"https://user:hunter2@api.example.com/v1/widgets",
+		"https://user:hunter2@api.example.com/v1/widgets?page=2",
+	} {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse %s: %v", raw, err)
+		}
+		got := redactURL(u)
+		if strings.Contains(got, "hunter2") {
+			t.Errorf("redactURL(%s) = %q, want no password", raw, got)
+		}
+		if !strings.Contains(got, "user@") {
+			t.Errorf("redactURL(%s) = %q, want the username kept for diagnosis", raw, got)
+		}
+		if u.String() != raw {
+			t.Errorf("redactURL mutated the request URL: %q", u.String())
+		}
+	}
+}
+
+// A redacted body is re-rendered from the decoded tree, so the round trip has
+// to be lossless: an ID past 2^53 must not be rounded, and an ampersand must
+// not turn into &, or the dump misreports the body being debugged.
+func TestRedactBodyKeepsTheRestOfTheBodyExact(t *testing.T) {
+	got := redactBody("application/json", `{"api_key":"secret","id":9007199254740993,"q":"a&b<c"}`)
+
+	if strings.Contains(got, "secret") {
+		t.Fatalf("body still holds the secret: %s", got)
+	}
+	if !strings.Contains(got, "9007199254740993") {
+		t.Errorf("large integer was rounded: %s", got)
+	}
+	if !strings.Contains(got, "a&b<c") {
+		t.Errorf("body was HTML-escaped: %s", got)
+	}
+}
+
+// narrowPermissions chmods through a symlink unless it checks for one, which
+// would let a link planted in the config directory retarget the sweep at a
+// file outside it.
+func TestNarrowConfigDirPermissionsSkipsSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.WriteFile(outside, []byte("hi"), 0o644); err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "credentials.json")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	narrowConfigDirPermissions(dir)
+
+	info, err := os.Stat(outside)
+	if err != nil {
+		t.Fatalf("stat target: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o644 {
+		t.Errorf("a file outside the config directory was chmodded to %o", perm)
+	}
+}
+
+// An address field is exempt from masking so the endpoint stays diagnosable,
+// but an address can carry a credential of its own.
+func TestAddressFieldsAreStrippedNotPrintedRaw(t *testing.T) {
+	settings := map[string]interface{}{
+		"database_url": "postgres://svc:hunter2@db.internal/app",
+		"auth_url":     "https://login.example.com/oauth/authorize",
+		"download_url": "https://s3.example.com/f?X-Amz-Signature=deadbeef",
+		"server":       "api.example.com",
+	}
+
+	redacted := redactSettings(settings)
+
+	if got := redacted["database_url"]; strings.Contains(got.(string), "hunter2") {
+		t.Errorf("database_url = %v, want the password gone", got)
+	}
+	if got := redacted["database_url"]; !strings.Contains(got.(string), "db.internal") {
+		t.Errorf("database_url = %v, want the host kept for diagnosis", got)
+	}
+	if got := redacted["download_url"]; strings.Contains(got.(string), "deadbeef") {
+		t.Errorf("download_url = %v, want the signature masked", got)
+	}
+	// An address with nothing to hide is printed as it is, or the exemption
+	// buys nothing.
+	if got := redacted["auth_url"]; got != "https://login.example.com/oauth/authorize" {
+		t.Errorf("auth_url = %v, want it unchanged", got)
+	}
+	if got := redacted["server"]; got != "api.example.com" {
+		t.Errorf("server = %v, want it unchanged", got)
+	}
+
+	if got := redactHeaderValue("X-Auth-Server", "https://svc:hunter2@api.example.com"); strings.Contains(got, "hunter2") {
+		t.Errorf("X-Auth-Server = %q, want the password gone", got)
+	}
+	if got := redactBody("application/x-www-form-urlencoded", "redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb%3Fapi_key%3Dleaked&state=1"); strings.Contains(got, "leaked") {
+		t.Errorf("form redirect_uri = %q, want its own query redacted", got)
 	}
 }

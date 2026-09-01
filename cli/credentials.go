@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -306,32 +307,40 @@ func sortedKeys(m map[string]interface{}) []string {
 	return keys
 }
 
-// maskIfSecret keeps a credential out of the output, and is the one masker in
-// the package: `auth list-profiles` rows and the `--verbose` configuration
-// dump both render secrets through it. Whether a field counts as a credential
-// is decided by looksSensitiveKey, the same predicate that decides whether
-// `auth setup` prompts for it without echo.
+// maskIfSecret keeps a credential out of rendered configuration: `auth
+// list-profiles` rows and the `--verbose` configuration dump both render
+// secrets through it. Wire redaction lives in http.go and shares only
+// looksSensitiveKey, the same predicate that decides whether `auth setup`
+// prompts for a field without echo.
 func maskIfSecret(name string, value interface{}) interface{} {
 	if !looksSensitiveKey(name) {
 		return value
 	}
 
+	if value == nil {
+		// A key present with no value is not a secret, and masking it would
+		// say one is configured when none is.
+		return value
+	}
+
 	s, ok := value.(string)
 	if !ok {
-		// A number or a bool under a credential name is still a credential,
-		// and there is no first-and-last-four to show of it. A config file may
-		// well hold `api_key: 1234567890`, which YAML decodes as an int.
+		// Anything that is not a string under a credential name is still a
+		// credential, and there is no first-and-last-four to show of it. A
+		// config file may well hold `api_key: 1234567890`, which YAML decodes
+		// as an int.
 		return "****"
 	}
 	if s == "" {
 		return value
 	}
 
-	// The middle is a fixed width rather than the real one, so the output does
-	// not disclose the secret's length either. How much of the ends survives
-	// scales with the secret: four characters either side of a short value
-	// gives away most of it, so a short one keeps only a tail, enough to tell
-	// two profiles' keys apart without reconstructing either.
+	// The middle is a fixed width rather than the real one, so the output
+	// discloses which of four length bands a secret falls in, never its exact
+	// length. How much of the ends survives scales with the secret: four
+	// characters either side of a short value gives away most of it, so a
+	// short one keeps only a tail, enough to tell two profiles' keys apart
+	// without reconstructing either.
 	runes := []rune(s)
 	switch {
 	case len(runes) <= 2:
@@ -352,37 +361,95 @@ func maskIfSecret(name string, value interface{}) interface{} {
 // in full. The copy is new at every level: the maps viper hands out can alias
 // live configuration, and masking in place would overwrite the real values.
 func redactSettings(settings map[string]interface{}) map[string]interface{} {
-	out := make(map[string]interface{}, len(settings))
-	for key, value := range settings {
-		out[key] = redactSettingValue(key, value)
+	redacted, _ := redactTree("", settings, maskHidden)
+	out, ok := redacted.(map[string]interface{})
+	if !ok {
+		// Unreachable: a map[string]interface{} in comes back as one.
+		return map[string]interface{}{}
 	}
 	return out
 }
 
-func redactSettingValue(key string, value interface{}) interface{} {
+// maskHidden is the mask the `--verbose` configuration dump uses, and it shows
+// nothing of the value. The dump is the output users are asked to paste into
+// bug reports, so first-and-last-four of a live key is four characters too
+// many; `auth list-profiles` keeps maskIfSecret's partial reveal, because it
+// is read on the user's own terminal and two profiles' rows have to be
+// tellable apart.
+func maskHidden(_ string, value interface{}) interface{} {
+	// An absent or empty value is not a credential, and masking it would
+	// report one that is not configured.
+	if value == nil {
+		return value
+	}
+	if s, ok := value.(string); ok && s == "" {
+		return value
+	}
+	return "**HIDDEN**"
+}
+
+// redactTree copies value with everything under a sensitive key replaced by
+// mask, at any depth, and reports whether it masked anything. The
+// `--verbose` configuration dump and the HTTP body redaction share this one
+// walk: two copies of it meant two places for the depth bug this closes
+// (issue #34) to come back, and they had already drifted on the mask.
+//
+// A container under a sensitive key is masked whole rather than descended
+// into, since guessing which leaves below are secret is what leaked in the
+// first place. Slice elements carry no key of their own, so they inherit the
+// enclosing one: a list under api_keys is a list of secrets. The typed map and
+// slice cases are not reachable from encoding/json, but viper.Set and the YAML
+// decoder both produce them, and a shape this walk does not know is a shape it
+// returns verbatim.
+func redactTree(key string, value interface{}, mask func(string, interface{}) interface{}) (interface{}, bool) {
+	if looksSensitiveKey(key) {
+		return mask(key, value), true
+	}
+	if namesALocation(strings.ToLower(key)) {
+		redacted := redactAddressValue(value)
+		return redacted, redacted != value
+	}
+
 	switch typed := value.(type) {
 	case map[string]interface{}:
-		// A sensitive key holding a subtree has no safe rendering: mask it
-		// whole rather than descend and hope every leaf below looks sensitive.
-		if looksSensitiveKey(key) {
-			return "****"
+		out := make(map[string]interface{}, len(typed))
+		changed := false
+		for k, v := range typed {
+			redacted, hit := redactTree(k, v, mask)
+			out[k] = redacted
+			changed = changed || hit
 		}
-		return redactSettings(typed)
+		return out, changed
+	case map[interface{}]interface{}:
+		out := make(map[interface{}]interface{}, len(typed))
+		changed := false
+		for k, v := range typed {
+			name, _ := k.(string)
+			redacted, hit := redactTree(name, v, mask)
+			out[k] = redacted
+			changed = changed || hit
+		}
+		return out, changed
 	case []interface{}:
-		if looksSensitiveKey(key) {
-			return "****"
-		}
-		items := make([]interface{}, len(typed))
+		out := make([]interface{}, len(typed))
+		changed := false
 		for i, item := range typed {
-			// The elements carry no key of their own, so they inherit the
-			// enclosing one: a list under api_keys is a list of secrets.
-			items[i] = redactSettingValue(key, item)
+			redacted, hit := redactTree(key, item, mask)
+			out[i] = redacted
+			changed = changed || hit
 		}
-		return items
+		return out, changed
+	case []map[string]interface{}:
+		out := make([]interface{}, len(typed))
+		changed := false
+		for i, item := range typed {
+			redacted, hit := redactTree(key, item, mask)
+			out[i] = redacted
+			changed = changed || hit
+		}
+		return out, changed
 	default:
-		// Everything that is not a container goes through the masker the
-		// profile listing uses, so the two renderings cannot drift apart.
-		return maskIfSecret(key, typed)
+		return value, false
 	}
 }
 
@@ -895,11 +962,8 @@ func looksSensitiveKey(key string) bool {
 // being called.
 //
 // The exemption is by suffix, so it covers `auth_url` without touching
-// `authorization`. A URL that carries its credential inline (a presigned one,
-// say) is masked in the only place it is likely to appear -- the request line,
-// which redactURL masks per query parameter -- but would print in full from a
-// config field named `..._url`. Naming a field that holds a secret after its
-// shape rather than its contents is the narrow case this trades away.
+// `authorization`. An exempted value is not printed raw: it goes through
+// redactAddressValue, since an address can carry a credential of its own.
 func namesALocation(lower string) bool {
 	for _, suffix := range []string{"url", "uri", "endpoint", "host", "server"} {
 		if strings.HasSuffix(lower, suffix) {
@@ -907,6 +971,31 @@ func namesALocation(lower string) bool {
 		}
 	}
 	return false
+}
+
+// redactAddressValue renders a value held under an address name with the
+// credentials it carries removed. Exempting the name from masking is what
+// keeps the endpoint being called diagnosable, but a `database_url` carries a
+// password in its userinfo and a presigned URL carries a signature in its
+// query, so the address is shown stripped rather than shown raw.
+//
+// ponytail: a scheme-relative address with userinfo but no `//`
+// (`svc:pw@db/app`) parses as an opaque URL and survives untouched. Naming a
+// field after its shape rather than its contents is what this trades away; the
+// upgrade path is sensitivity declared per field by the OpenAPI generator
+// instead of inferred from the name.
+func redactAddressValue(value interface{}) interface{} {
+	s, ok := value.(string)
+	if !ok {
+		// Not an address whatever its name says, and nothing here can read it.
+		return value
+	}
+
+	u, err := url.Parse(s)
+	if err != nil {
+		return "**HIDDEN**"
+	}
+	return redactURL(u)
 }
 
 // sanitizeProfileName canonicalizes a profile name. Viper lower-cases config

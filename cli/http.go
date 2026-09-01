@@ -74,38 +74,63 @@ func redactHeaderValue(key, val string) string {
 	if looksSensitiveKey(key) {
 		return "[REDACTED]"
 	}
+	// An `X-Auth-Server` is exempted from masking by its name so the endpoint
+	// stays diagnosable, but it can still hold a URL with a password in it.
+	if namesALocation(strings.ToLower(key)) {
+		if masked, ok := redactAddressValue(val).(string); ok {
+			return masked
+		}
+	}
 	return val
 }
 
-// redactURL renders a URL with the value of every sensitive query parameter masked.
-// An API key can be carried in the query rather than a header (apikey.LocationQuery),
-// and `--verbose` prints the request line, so the URL needs the same treatment the
-// headers get.
+// redactURL renders a URL with its password and the value of every sensitive
+// query parameter masked. An API key can be carried in the query rather than a
+// header (apikey.LocationQuery), and `--verbose` prints the request line, so
+// the URL needs the same treatment the headers get.
 func redactURL(u *url.URL) string {
 	if u == nil {
 		return ""
 	}
-	if u.RawQuery == "" {
-		return u.String()
+
+	// Copy unconditionally: the request is logged before it goes out and must
+	// go out intact, and every exit from here has to run past the userinfo
+	// strip below. An early return for the no-query case printed a
+	// basic-auth password in full.
+	clean := *u
+	if clean.User != nil {
+		clean.User = url.User(clean.User.Username())
 	}
 
-	query := u.Query()
+	query := clean.Query()
+	if redactValues(query) {
+		clean.RawQuery = query.Encode()
+	}
+	return clean.String()
+}
+
+// redactValues masks every sensitive entry in a set of query or form values in
+// place, and reports whether it masked anything. The query string and a form
+// body are the same shape, so they get the same walk.
+func redactValues(values url.Values) bool {
 	redacted := false
-	for name := range query {
-		if !looksSensitiveKey(name) {
+	for name, vals := range values {
+		if looksSensitiveKey(name) {
+			values.Set(name, "[REDACTED]")
+			redacted = true
 			continue
 		}
-		query.Set(name, "[REDACTED]")
-		redacted = true
+		// A `redirect_uri` is exempt from masking by its name, and OAuth
+		// carries one routinely -- with whatever its own query holds.
+		if !namesALocation(strings.ToLower(name)) || len(vals) == 0 {
+			continue
+		}
+		if masked, ok := redactAddressValue(vals[0]).(string); ok && masked != vals[0] {
+			values.Set(name, masked)
+			redacted = true
+		}
 	}
-	if !redacted {
-		return u.String()
-	}
-
-	// Copy: the request is logged before it goes out, and must go out intact.
-	clean := *u
-	clean.RawQuery = query.Encode()
-	return clean.String()
+	return redacted
 }
 
 // redactBody masks credentials inside a request or response body so
@@ -115,10 +140,20 @@ func redactURL(u *url.URL) string {
 // returns it in its response.
 //
 // Only JSON and form-encoded bodies can be redacted, since redaction needs
-// field names. Anything else is logged unchanged, so a credential in an opaque
-// body -- or in a JSON document carried as a string inside another one, which
-// is one value to this walk -- still reaches the log. That is the accepted
-// limit of a key-based rule.
+// field names, and the two are recognised differently: JSON is parsed whatever
+// the declared type says, because a server can return a JSON error body
+// labelled text/plain, while a form body is recognised only by its exact media
+// type.
+//
+// This fails OPEN, deliberately. Every body it cannot parse is logged
+// verbatim: multipart, NDJSON, an event stream, XML, truncated or malformed
+// JSON, a form body sent without its media type, and a JSON document carried
+// as a string inside another one (one value to this walk). A credential in any
+// of those still reaches the log. Failing closed would replace exactly the
+// malformed bodies people turn `--verbose` on to look at with a placeholder,
+// so the leak is the accepted cost of the flag being useful -- but it is a
+// leak, and it is why `--verbose` output is not safe to paste unread.
+//
 // The original text is returned untouched when nothing matched, so a body the
 // user is trying to debug is not silently reformatted.
 func redactBody(contentType, body string) string {
@@ -135,67 +170,43 @@ func redactBody(contentType, body string) string {
 		return redactFormBody(body)
 	}
 
-	// The content type is advisory: a server can return a JSON error body
-	// labelled text/plain. Try to parse regardless, and fall back to the
-	// original text when it is not JSON after all.
 	return redactJSONBody(body)
 }
 
 func redactJSONBody(body string) string {
+	// UseNumber, and SetEscapeHTML(false) below: a body that trips redaction is
+	// re-rendered from the decoded tree, and the default round trip is lossy.
+	// It rounds every integer past 2^53 through float64 and escapes `&`, `<`
+	// and `>`, so the dump would misreport the body it exists to help debug.
+	decoder := json.NewDecoder(strings.NewReader(body))
+	decoder.UseNumber()
+
 	var parsed interface{}
-	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
+	if err := decoder.Decode(&parsed); err != nil {
 		return body
 	}
 
-	redacted, changed := redactJSONValue("", parsed)
+	redacted, changed := redactTree("", parsed, maskRedacted)
 	if !changed {
 		return body
 	}
 
-	out, err := json.MarshalIndent(redacted, "", "  ")
-	if err != nil {
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(redacted); err != nil {
 		// The value came out of encoding/json, so this should not happen; if
 		// it does, dropping the body beats printing the unredacted one.
 		return "[REDACTED BODY]"
 	}
-	return string(out)
+	return strings.TrimRight(out.String(), "\n")
 }
 
-// redactJSONValue walks a decoded JSON document, masking every value whose key
-// looks like a credential at any depth. Array elements inherit the key of the
-// array they are in: a list under "api_keys" is a list of secrets.
-func redactJSONValue(key string, value interface{}) (interface{}, bool) {
-	switch typed := value.(type) {
-	case map[string]interface{}:
-		if looksSensitiveKey(key) {
-			return "[REDACTED]", true
-		}
-		out := make(map[string]interface{}, len(typed))
-		changed := false
-		for k, v := range typed {
-			redacted, hit := redactJSONValue(k, v)
-			out[k] = redacted
-			changed = changed || hit
-		}
-		return out, changed
-	case []interface{}:
-		if looksSensitiveKey(key) {
-			return "[REDACTED]", true
-		}
-		out := make([]interface{}, len(typed))
-		changed := false
-		for i, item := range typed {
-			redacted, hit := redactJSONValue(key, item)
-			out[i] = redacted
-			changed = changed || hit
-		}
-		return out, changed
-	default:
-		if looksSensitiveKey(key) {
-			return "[REDACTED]", true
-		}
-		return typed, false
-	}
+// maskRedacted is the mask redactTree uses for wire bodies, where nothing of
+// the value is worth keeping. The configuration dump passes maskHidden.
+func maskRedacted(string, interface{}) interface{} {
+	return "[REDACTED]"
 }
 
 func redactFormBody(body string) string {
@@ -204,15 +215,7 @@ func redactFormBody(body string) string {
 		return body
 	}
 
-	changed := false
-	for name := range values {
-		if !looksSensitiveKey(name) {
-			continue
-		}
-		values.Set(name, "[REDACTED]")
-		changed = true
-	}
-	if !changed {
+	if !redactValues(values) {
 		return body
 	}
 	return values.Encode()

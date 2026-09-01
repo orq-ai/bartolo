@@ -3,8 +3,10 @@ package cli
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"io/ioutil"
 	"os"
 	"path"
@@ -281,30 +283,44 @@ func outputFormatList() string {
 func narrowConfigDirPermissions(configDir string) {
 	narrowPermissions(configDir, 0700)
 
-	// config.json and config.yaml hold no credentials that this CLI writes --
-	// profiles live in credentials.json -- but viper reads them, so a profile
-	// an older version or a neighbouring tool left there is still live.
-	for _, name := range []string{"credentials.json", "config.json", "config.yaml", "config.yml", "cache.json", "cache.yaml", "cache.yml"} {
-		narrowPermissions(path.Join(configDir, name), 0600)
-
-		// A copy of a credential file is a credential file. Backups are how a
-		// key outlives the profile it belonged to: the live file gets
-		// rewritten 0600 by the next write, the copy beside it does not.
-		for _, suffix := range []string{".bak", ".old", ".orig", ".save"} {
-			narrowPermissions(path.Join(configDir, name+suffix), 0600)
+	// Every regular file in the directory, rather than a list of names. The
+	// set to protect is "what is in there": viper reads config and cache files
+	// in several extensions, a backup an older version or a neighbouring tool
+	// left behind outlives the profile it belonged to, and writeFileAtomic's
+	// own temp file matches no name anyone would think to enumerate.
+	entries, err := os.ReadDir(configDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		// Type() reports the dirent's own kind, so a symlink is skipped here
+		// rather than followed into a chmod outside the directory.
+		if !entry.Type().IsRegular() {
+			continue
 		}
+		narrowPermissions(path.Join(configDir, entry.Name()), 0600)
 	}
 }
 
 func narrowPermissions(name string, want os.FileMode) {
-	info, err := os.Stat(name)
+	// Lstat, not Stat: Chmod follows a symlink, so narrowing one would change
+	// the mode of a file the CLI never meant to touch.
+	info, err := os.Lstat(name)
 	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			// Not the same as absent: the mode could not be read, so nothing
+			// here can say whether it is private.
+			fmt.Fprintf(Stderr, "warning: could not check the permissions on %s: %v\n", name, err)
+		}
+		return
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
 		return
 	}
 
-	// Only ever remove access. A user who has widened a mode past `want` on
-	// purpose is not the case being fixed here; group- and other-readable
-	// credentials are.
+	// Only ever clear bits, never set them: a file the user has already made
+	// stricter than want (0400, say) is left alone. Group- and other-readable
+	// credentials are the case this exists to remove.
 	perm := info.Mode().Perm()
 	if perm&^want == 0 {
 		return
