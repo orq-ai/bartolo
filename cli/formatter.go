@@ -70,20 +70,22 @@ func FormatList(data interface{}, columns ...string) error {
 	return Formatter.Format(data)
 }
 
-// DefaultFormatter can apply JMESPath queries and can output prettyfied JSON,
-// YAML, or TOON output. If Stdout is a TTY, then colorized output is provided.
-// The default formatter uses the `jmespath` and `output-format` configuration
-// values to perform JMESPath queries and set JSON (default), YAML, or TOON
-// output.
+// DefaultFormatter can apply JMESPath queries and can render a table or output
+// prettyfied JSON, YAML, or TOON. If Stdout is a TTY, colorized output is provided.
 type DefaultFormatter struct {
-	tty bool
+	// tty and terminal differ when color is forced onto a pipe.
+	tty      bool
+	terminal bool
 }
 
-// NewDefaultFormatter creates a new formatted with autodetected TTY
-// capabilities.
-func NewDefaultFormatter(tty bool) *DefaultFormatter {
+// NewDefaultFormatter creates a new formatter. tty enables colorized output;
+// terminal reports whether stdout really is a terminal. They are separate
+// arguments because forcing color on makes the first true on a pipe, and a pipe
+// must never render a table.
+func NewDefaultFormatter(tty, terminal bool) *DefaultFormatter {
 	return &DefaultFormatter{
-		tty: tty,
+		tty:      tty,
+		terminal: terminal,
 	}
 }
 
@@ -116,12 +118,32 @@ func (f *DefaultFormatter) format(data interface{}, list bool, columns []string)
 		data = result
 	}
 
+	override := ""
+	if list {
+		override = viper.GetString("columns")
+	}
+
 	if list && f.shouldRenderTable() {
-		if rendered, err := renderTable(data, columns); err != nil {
+		userColumns := false
+		if override != "" {
+			selected, err := splitColumns(override)
+			if err != nil {
+				return err
+			}
+
+			columns, userColumns = selected, true
+		}
+
+		if rendered, err := renderTable(data, columns, userColumns); err != nil {
 			return err
 		} else if rendered {
 			return nil
 		}
+
+		// Falling back silently looks exactly like the bug this path exists to fix.
+		fmt.Fprintf(Stderr, "Not shown as a table: this response is not a recognizable collection. Showing %s instead.\n", configuredSerialization)
+	} else if override != "" {
+		fmt.Fprintf(Stderr, "--columns was ignored: this output is not a table. Showing %s instead.\n", serializationFormat())
 	}
 
 	// Encode to the requested output format using nice formatting.
@@ -176,7 +198,7 @@ func (f *DefaultFormatter) format(data interface{}, list bool, columns []string)
 	}
 
 	if !handled {
-		switch viper.GetString("output-format") {
+		switch serializationFormat() {
 		case "yaml":
 			encoded, err = yaml.Marshal(data)
 
@@ -222,30 +244,95 @@ func (f *DefaultFormatter) format(data interface{}, list bool, columns []string)
 	return nil
 }
 
-func (f *DefaultFormatter) shouldRenderTable() bool {
-	if !f.tty || viper.GetBool("raw") || viper.GetString("output-format") != "json" {
-		return false
+// tableFormat renders a list command as a table for a human at a terminal.
+// tableFallbackFormat is what it serializes to everywhere else when the CLI
+// configured nothing: a piped or redirected run, a non-list command, and a
+// payload that is not a collection. It is JSON because whatever reads a pipe
+// is far more likely to be `jq` than a model; a CLI that knows otherwise says
+// so with Config.SerializationFormat.
+const (
+	tableFormat         = "table"
+	tableFallbackFormat = "json"
+)
+
+// serializationFormat is the format to encode with. `table` is a rendering
+// choice rather than a serialization, so the CLI's configured one stands in.
+func serializationFormat() string {
+	if format := OutputFormat(); format != tableFormat {
+		return format
 	}
 
-	// An explicit --json or -o wins over the interactive table default.
-	if viper.GetBool("json") {
-		return false
+	return configuredSerialization
+}
+
+// serializationOrDefault resolves Config.SerializationFormat. `table` cannot be
+// what a table falls back to, so it is rejected like any unknown value.
+func serializationOrDefault(value string) string {
+	if format, ok := parseOutputFormat(value); ok && format != tableFormat {
+		return format
 	}
-	if Root != nil {
-		if flag := Root.PersistentFlags().Lookup("output-format"); flag != nil && flag.Changed {
-			return false
+
+	return tableFallbackFormat
+}
+
+// splitColumns parses the `--columns` value. A JMESPath projection is the tool
+// for reshaping data; this only picks which of the existing fields to show.
+func splitColumns(value string) ([]string, error) {
+	columns := make([]string, 0, 1)
+	for _, column := range strings.Split(value, ",") {
+		if trimmed := strings.TrimSpace(column); trimmed != "" {
+			columns = append(columns, trimmed)
 		}
 	}
 
-	return true
+	if len(columns) == 0 {
+		return nil, NewValueError(fmt.Errorf("--columns: %q names no columns", value))
+	}
+
+	return columns, nil
+}
+
+func (f *DefaultFormatter) shouldRenderTable() bool {
+	return f.terminal && !viper.GetBool("raw") && OutputFormat() == tableFormat
+}
+
+// checkColumns rejects a column no row has. A misspelled name would otherwise
+// render as a blank column, which reads as missing data rather than a typo.
+func checkColumns(requestedColumns []string, rows []map[string]interface{}) error {
+	if len(requestedColumns) == 0 || len(rows) == 0 {
+		return nil
+	}
+
+	for _, column := range requestedColumns {
+		found := false
+		for _, row := range rows {
+			if _, ok := row[column]; ok {
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			return NewValueError(fmt.Errorf("--columns: %q is not a field of the returned items", column))
+		}
+	}
+
+	return nil
 }
 
 // renderTable reports false for anything that is not a collection so callers
 // can fall back to the requested serialization format.
-func renderTable(data interface{}, requestedColumns []string) (bool, error) {
+func renderTable(data interface{}, requestedColumns []string, userColumns bool) (bool, error) {
 	rows, label, metadata, ok := tableRows(data, requestedColumns)
 	if !ok {
 		return false, nil
+	}
+
+	// Only a name someone typed can be a typo; the spec's own field list cannot.
+	if userColumns {
+		if err := checkColumns(requestedColumns, rows); err != nil {
+			return false, err
+		}
 	}
 
 	headers := append([]string(nil), requestedColumns...)
@@ -274,7 +361,7 @@ func renderTable(data interface{}, requestedColumns []string) (bool, error) {
 		values = append(values, cells)
 	}
 
-	// Columns the schema asked for are never dropped.
+	// Columns someone asked for — by spec or on the command line — are never dropped.
 	if len(requestedColumns) == 0 {
 		headers, values = fitColumns(headers, values, terminalWidth())
 	}
@@ -305,7 +392,7 @@ func renderTable(data interface{}, requestedColumns []string) (bool, error) {
 
 // tableFooter summarizes the envelope in one line below the table: how many
 // rows are shown out of how many exist, then whatever else the envelope holds.
-// Pagination plumbing is for scripts reading --json, not for a reader looking
+// Pagination plumbing is for scripts reading `-o json`, not for a reader looking
 // at a table.
 func tableFooter(shown int, label string, metadata map[string]interface{}) (string, error) {
 	if label == "" {
@@ -422,7 +509,9 @@ func fitColumns(headers []string, values [][]string, width int) ([]string, [][]s
 	return headers[:keep], values
 }
 
-func terminalWidth() int {
+// A var so a test can render at a width it chose rather than whatever the
+// process happens to be attached to.
+var terminalWidth = func() int {
 	if width, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && width > 0 {
 		return width
 	}

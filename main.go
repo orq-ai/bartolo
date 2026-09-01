@@ -237,9 +237,13 @@ type ProjectConfig struct {
 	BartoloReplacePath  string `json:"bartolo_replace_path,omitempty"`
 	BartoloVersion      string `json:"bartolo_version,omitempty"`
 	EnvPrefix           string `json:"env_prefix"`
-	DefaultOutputFormat string `json:"default_output_format,omitempty"`
-	APIKeyEnvVar        string `json:"api_key_env_var,omitempty"`
-	LastSpecPath        string `json:"last_spec_path,omitempty"`
+	SerializationFormat string `json:"serialization_format,omitempty"`
+	// LegacyDefaultOutputFormat carries the pre-table meaning of the field so a
+	// project written by an older bartolo does not silently change what it
+	// serializes to. Written back under the current name on the next sync.
+	LegacyDefaultOutputFormat string `json:"default_output_format,omitempty"`
+	APIKeyEnvVar              string `json:"api_key_env_var,omitempty"`
+	LastSpecPath              string `json:"last_spec_path,omitempty"`
 }
 
 // AuthDoc describes auth setup to show in a generated README.
@@ -2311,6 +2315,11 @@ func loadProjectConfig() *ProjectConfig {
 		return nil
 	}
 
+	if config.SerializationFormat == "" {
+		config.SerializationFormat = config.LegacyDefaultOutputFormat
+	}
+	config.LegacyDefaultOutputFormat = ""
+
 	return &config
 }
 
@@ -2409,13 +2418,24 @@ func promptInterrupted(err error) bool {
 	return err == surveyterminal.InterruptErr
 }
 
-// outputFormats are the values accepted by `--default-format`, mirroring the
-// formats the generated CLIs support.
-var outputFormats = []string{"json", "yaml", "toon"}
+// serializationFormats are the values accepted by `--serialization-format`: the
+// generated CLIs' own list, minus `table`, which is a rendering choice and so
+// cannot be what a table falls back to.
+var serializationFormats = withoutTable(bartolocli.OutputFormats)
+
+func withoutTable(formats []string) []string {
+	kept := make([]string, 0, len(formats))
+	for _, format := range formats {
+		if format != "table" {
+			kept = append(kept, format)
+		}
+	}
+	return kept
+}
 
 func parseOutputFormat(value string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(value))
-	for _, format := range outputFormats {
+	for _, format := range serializationFormats {
 		if normalized == format {
 			return format, true
 		}
@@ -2517,7 +2537,7 @@ func printWizardSummary(color bool, config *ProjectConfig) {
 	}
 	fmt.Printf("%s %s\n", wizardAccent(color, "Env prefix:"), config.EnvPrefix)
 	fmt.Printf("%s %s\n", wizardAccent(color, "API key env var:"), config.APIKeyEnvVar)
-	fmt.Printf("%s %s\n", wizardAccent(color, "Default output:"), config.DefaultOutputFormat)
+	fmt.Printf("%s %s\n", wizardAccent(color, "Serializes to:"), config.SerializationFormat)
 	fmt.Println()
 }
 
@@ -2583,12 +2603,12 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 	apiKeyEnvVar, _ := cmd.Flags().GetString("api-key-env-var")
 	apiKeyEnvVar = strings.TrimSpace(apiKeyEnvVar)
 
-	defaultFormat, _ := cmd.Flags().GetString("default-format")
-	// Reject an unknown format instead of quietly generating a JSON CLI.
-	defaultFormat, ok := parseOutputFormat(defaultFormat)
+	serializationFormat, _ := cmd.Flags().GetString("serialization-format")
+	// Reject an unknown format instead of quietly generating a TOON CLI.
+	serializationFormat, ok := parseOutputFormat(serializationFormat)
 	if !ok {
-		rejected, _ := cmd.Flags().GetString("default-format")
-		return nil, fmt.Errorf("--default-format: %q is not one of [%s]", rejected, strings.Join(outputFormats, ", "))
+		rejected, _ := cmd.Flags().GetString("serialization-format")
+		return nil, fmt.Errorf("--serialization-format: %q is not one of [%s]", rejected, strings.Join(serializationFormats, ", "))
 	}
 
 	interactive, _ := cmd.Flags().GetBool("interactive")
@@ -2650,12 +2670,12 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 		}
 		fmt.Println()
 
-		printWizardStep(color, 3, 3, "Output format", "Choose the default rendering style for generated CLIs. Use the arrow keys to move and Enter to confirm.")
-		defaultFormat, err = promptSelect("Default output format", []selectOption{
-			{Value: "json", Label: "json", Description: "Best for agents and automation."},
+		printWizardStep(color, 3, 3, "Serialization format", "List commands render a table on a terminal. Choose what generated CLIs serialize to everywhere else. Use the arrow keys to move and Enter to confirm.")
+		serializationFormat, err = promptSelect("Serialization format", []selectOption{
+			{Value: "json", Label: "json", Description: "What a pipe, a script, or jq expects."},
 			{Value: "yaml", Label: "yaml", Description: "Easy to scan in terminals."},
-			{Value: "toon", Label: "toon", Description: "Human-oriented serialization of data for LLMs."},
-		}, defaultFormat, color)
+			{Value: "toon", Label: "toon", Description: "Compact serialization aimed at LLMs."},
+		}, serializationFormat, color)
 		if err != nil {
 			return nil, err
 		}
@@ -2671,7 +2691,7 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 			BartoloReplacePath:  bartoloReplacePath,
 			BartoloVersion:      bartoloVersion,
 			EnvPrefix:           summaryEnvPrefix,
-			DefaultOutputFormat: defaultFormat,
+			SerializationFormat: serializationFormat,
 			APIKeyEnvVar:        apiKeyEnvVar,
 		})
 	}
@@ -2702,7 +2722,7 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 		BartoloReplacePath:  bartoloReplacePath,
 		BartoloVersion:      bartoloVersion,
 		EnvPrefix:           envPrefix,
-		DefaultOutputFormat: defaultFormat,
+		SerializationFormat: serializationFormat,
 		APIKeyEnvVar:        apiKeyEnvVar,
 	}, nil
 }
@@ -2786,7 +2806,7 @@ func buildREADMEExamples(api *OpenAPI) []*READMEExample {
 	examples := []*READMEExample{
 		{
 			Title:       "Check setup",
-			Command:     binary + " --json doctor",
+			Command:     binary + " -o json doctor",
 			Description: "Verify config, auth source, and selected server before making API calls.",
 		},
 		{
@@ -2797,7 +2817,7 @@ func buildREADMEExamples(api *OpenAPI) []*READMEExample {
 		{
 			Title:       "Persist the default output format",
 			Command:     binary + " default-format json",
-			Description: "Write the preferred output format into the CLI config so future commands use it automatically.",
+			Description: "Write the preferred output format into the CLI config so future commands use it automatically. Anything other than `table` turns off the tables that list commands render on a terminal; `default-format table` turns them back on.",
 		},
 	}
 
@@ -3101,7 +3121,7 @@ func writeProjectScaffold(config *ProjectConfig, overwrite bool) error {
 		"NameEnv":             config.EnvPrefix,
 		"ModulePath":          config.ModulePath,
 		"APIKeyEnvVar":        config.APIKeyEnvVar,
-		"DefaultOutputFormat": config.DefaultOutputFormat,
+		"SerializationFormat": config.SerializationFormat,
 	}
 
 	sb := renderTemplate("templates/main.tmpl", nil, templateData)
@@ -3195,7 +3215,7 @@ func main() {
 	initCommand.Flags().String("module-path", "", "Go module path for the generated CLI project")
 	initCommand.Flags().String("bartolo-path", "", "Local path to the bartolo repo to use via go.mod replace during development")
 	initCommand.Flags().String("api-key-env-var", "", "Custom API key environment variable for generated CLIs")
-	initCommand.Flags().String("default-format", "json", fmt.Sprintf("Default output format for generated CLIs [%s]", strings.Join(outputFormats, ", ")))
+	initCommand.Flags().String("serialization-format", "json", fmt.Sprintf("What generated CLIs serialize to when not rendering a table [%s]", strings.Join(serializationFormats, ", ")))
 	root.AddCommand(initCommand)
 
 	root.AddCommand(&cobra.Command{

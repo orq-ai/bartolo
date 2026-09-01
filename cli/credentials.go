@@ -133,7 +133,7 @@ func initAuth() {
 
 // newAuthAddCommand registers one spelling of add-profile. A deprecated one
 // prints its own notice to Stderr; cobra's Deprecated field goes through
-// OutOrStderr, which lands on stdout and corrupts `--json`.
+// OutOrStderr, which lands on stdout and corrupts `-o json`.
 func newAuthAddCommand(parent *cobra.Command, use string, deprecationNotice string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   use,

@@ -70,7 +70,8 @@ func TestEchoSuccess(t *testing.T) {
 		t.Fatalf("build example-cli: %v\n%s", err, string(out))
 	}
 
-	// Call the compiled executable CLI to hit our test server.
+	// Call the compiled executable CLI to hit our test server. No -o: this is
+	// also the end-to-end check that a piped run serializes rather than tabulates.
 	out, err := exec.Command(cliPath, "echo", "hello:", "world", "--echo-query=foo", "--x-request-id", "bar").CombinedOutput()
 	if err != nil {
 		fmt.Println(string(out))

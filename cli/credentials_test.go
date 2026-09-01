@@ -215,7 +215,7 @@ func TestAuthAddAliasStillResolves(t *testing.T) {
 }
 
 // The notice must land on stderr so stdout stays parseable. Cobra's own
-// Deprecated field prints through OutOrStderr, which corrupts `--json`.
+// Deprecated field prints through OutOrStderr, which corrupts `-o json`.
 func TestAddProfileDeprecatedAliasWarnsOnStderr(t *testing.T) {
 	initTestCLI(t, "", stubAuthHandler{})
 
@@ -412,7 +412,7 @@ func TestListProfilesMasksSecretsAndHonorsJSON(t *testing.T) {
 	}
 
 	viper.Set("output-format", "json")
-	out := execute("auth profile list --json")
+	out := execute("auth profile list -o json")
 
 	assert.NotContains(t, out, secret)
 
@@ -428,13 +428,13 @@ func TestListProfilesMasksSecretsAndHonorsJSON(t *testing.T) {
 	assert.Equal(t, "https://acme.example.com", decoded.Profiles[0]["server"])
 }
 
-// `auth profile list --json` must emit the same object shape either way: the
+// `auth profile list -o json` must emit the same object shape either way: the
 // "message" key used to appear only when no profiles existed.
 func TestListProfilesJSONShapeIsStableAcrossEmptyAndNonEmpty(t *testing.T) {
 	initTestCLI(t, "", stubAuthHandler{})
 
 	viper.Set("output-format", "json")
-	empty := executeJSON(t, "auth profile list --json")
+	empty := executeJSON(t, "auth profile list -o json")
 
 	_, hasMessageWhenEmpty := empty["message"]
 	assert.True(t, hasMessageWhenEmpty, "expected a \"message\" key when no profiles are configured")
@@ -443,14 +443,14 @@ func TestListProfilesJSONShapeIsStableAcrossEmptyAndNonEmpty(t *testing.T) {
 	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, ""); err != nil {
 		t.Fatalf("saveAuthProfile: %v", err)
 	}
-	_, hasMessageWhenNonEmpty := executeJSON(t, "auth profile list --json")["message"]
+	_, hasMessageWhenNonEmpty := executeJSON(t, "auth profile list -o json")["message"]
 	assert.Equal(t, hasMessageWhenEmpty, hasMessageWhenNonEmpty, "the \"message\" key must be present (or absent) consistently, regardless of profile count")
 }
 
 // Regression test for the Critical defect: cobra's `Deprecated` field prints
 // its notice through the command's *out* writer once one is set, so it used
 // to land on stdout ahead of the JSON payload and break
-// `auth list-profiles --json | jq`. The notice must go to stderr instead,
+// `auth list-profiles -o json | jq`. The notice must go to stderr instead,
 // leaving stdout as valid JSON.
 func TestListProfilesDeprecatedAliasKeepsJSONCleanOnStdout(t *testing.T) {
 	initTestCLI(t, "", stubAuthHandler{})
@@ -460,7 +460,7 @@ func TestListProfilesDeprecatedAliasKeepsJSONCleanOnStdout(t *testing.T) {
 	}
 
 	viper.Set("output-format", "json")
-	stdout, stderr := executeStreams("auth list-profiles --json")
+	stdout, stderr := executeStreams("auth list-profiles -o json")
 
 	var decoded struct {
 		Profiles []map[string]interface{} `json:"profiles"`
@@ -561,7 +561,7 @@ func TestActiveProfileNameAndListingAreCaseInsensitive(t *testing.T) {
 	assert.NoError(t, Root.PersistentFlags().Set("profile", "ACME"))
 
 	assert.Equal(t, "acme", ActiveProfileName())
-	assert.Contains(t, execute("auth profile list --json"), `"active": true`)
+	assert.Contains(t, execute("auth profile list -o json"), `"active": true`)
 }
 
 // ProfileExists must agree with SelectProfile and ActiveProfileName, which
@@ -1098,7 +1098,7 @@ func TestInteractivePromptRejectsEmptyCredential(t *testing.T) {
 func TestAuthProfileCurrentNoneInForce(t *testing.T) {
 	initTestCLI(t, "", stubAuthHandler{})
 
-	decoded := executeJSON(t, "auth profile current --json")
+	decoded := executeJSON(t, "auth profile current -o json")
 
 	assert.Equal(t, "", decoded["active_profile"])
 	assert.Equal(t, "none", decoded["source"])
@@ -1108,7 +1108,7 @@ func TestAuthProfileCurrentNoneInForce(t *testing.T) {
 func TestAuthProfileCurrentFromFlagReportsMissing(t *testing.T) {
 	initTestCLI(t, "", stubAuthHandler{})
 
-	decoded := executeJSON(t, "--profile ghost auth profile current --json")
+	decoded := executeJSON(t, "--profile ghost auth profile current -o json")
 
 	assert.Equal(t, "ghost", decoded["active_profile"])
 	assert.Equal(t, "flag", decoded["source"])
@@ -1122,7 +1122,7 @@ func TestAuthProfileCurrentFromPersistedSelection(t *testing.T) {
 	}
 	execute("auth profile use acme")
 
-	decoded := executeJSON(t, "auth profile current --json")
+	decoded := executeJSON(t, "auth profile current -o json")
 
 	assert.Equal(t, "acme", decoded["active_profile"])
 	assert.Equal(t, "selected", decoded["source"])

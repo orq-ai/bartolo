@@ -49,21 +49,6 @@ func TestReservedFlagNamesCoverEveryGlobalFlag(t *testing.T) {
 	})
 }
 
-// `-j` is easy to read as short for `--json`. Since --jmespath takes a value, a
-// stray `-j` swallows the following argument instead of failing cleanly, so
-// --json must never grow a shorthand that makes the two look interchangeable.
-func TestJSONFlagHasNoShorthand(t *testing.T) {
-	viper.Reset()
-	Cache = nil
-	Client = nil
-	Root = nil
-
-	Init(&Config{AppName: "test-shorthand"})
-
-	assert.Equal(t, "j", Root.PersistentFlags().Lookup("jmespath").Shorthand)
-	assert.Empty(t, Root.PersistentFlags().Lookup("json").Shorthand, "--json must stay shorthand-free so -j is unambiguous")
-}
-
 func TestResolveGeneratedFlagName(t *testing.T) {
 	// Untouched when there is nothing to collide with.
 	assert.Equal(t, "limit", ResolveGeneratedFlagName("body", "limit"))
