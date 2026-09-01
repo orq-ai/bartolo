@@ -379,6 +379,14 @@ func TestMaskIfSecret(t *testing.T) {
 	// Multi-byte secrets are cut on rune boundaries, not bytes.
 	assert.Equal(t, "日本語で****密ですね", maskIfSecret("password", "日本語ですごく長い秘密ですね"))
 
+	// A non-string under a credential name is masked too: YAML decodes a
+	// numeric key as an int, and it is no less a secret for it.
+	assert.Equal(t, "****", maskIfSecret("api_key", 1234567890))
+	assert.Equal(t, "****", maskIfSecret("api_key", map[string]interface{}{"a": "b"}))
+
+	// An empty secret has nothing to hide, and a mask would imply it is set.
+	assert.Equal(t, "", maskIfSecret("api_key", ""))
+
 	// Non-secret fields pass through untouched.
 	assert.Equal(t, "https://api.orq.ai", maskIfSecret("base_url", "https://api.orq.ai"))
 	assert.Equal(t, "prod", maskIfSecret("type", "prod"))

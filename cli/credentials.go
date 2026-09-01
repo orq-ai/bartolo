@@ -306,16 +306,24 @@ func sortedKeys(m map[string]interface{}) []string {
 	return keys
 }
 
-// maskIfSecret keeps a credential out of the output. Whether a field counts as
-// a credential is decided by looksSensitiveKey, the same predicate that decides
-// whether `auth setup` prompts for it without echo.
+// maskIfSecret keeps a credential out of the output, and is the one masker in
+// the package: `auth list-profiles` rows and the `--verbose` configuration
+// dump both render secrets through it. Whether a field counts as a credential
+// is decided by looksSensitiveKey, the same predicate that decides whether
+// `auth setup` prompts for it without echo.
 func maskIfSecret(name string, value interface{}) interface{} {
 	if !looksSensitiveKey(name) {
 		return value
 	}
 
 	s, ok := value.(string)
-	if !ok || s == "" {
+	if !ok {
+		// A number or a bool under a credential name is still a credential,
+		// and there is no first-and-last-four to show of it. A config file may
+		// well hold `api_key: 1234567890`, which YAML decodes as an int.
+		return "****"
+	}
+	if s == "" {
 		return value
 	}
 
@@ -361,13 +369,10 @@ func redactSettingValue(key string, value interface{}) interface{} {
 			items[i] = redactSettingValue(key, item)
 		}
 		return items
-	case string:
-		return maskIfSecret(key, typed)
 	default:
-		if looksSensitiveKey(key) {
-			return "****"
-		}
-		return typed
+		// Everything that is not a container goes through the masker the
+		// profile listing uses, so the two renderings cannot drift apart.
+		return maskIfSecret(key, typed)
 	}
 }
 
