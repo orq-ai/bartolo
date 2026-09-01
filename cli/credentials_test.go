@@ -369,15 +369,34 @@ func TestListProfilesToleratesMissingServer(t *testing.T) {
 
 func TestMaskIfSecret(t *testing.T) {
 	for _, field := range []string{"api_key", "API-Key", "access_token", "client_secret", "password"} {
-		assert.Equal(t, "sk-o********mnop", maskIfSecret(field, "sk-orq-abcdefghijklmnop"), field)
+		assert.Equal(t, "sk-o****mnop", maskIfSecret(field, "sk-orq-abcdefghijklmnop"), field)
 	}
 
-	// A short secret shows nothing at all, and the mask width never tracks the
-	// real length.
-	assert.Equal(t, "********", maskIfSecret("api_key", "sk-orq-abcd"))
+	// A short secret keeps a tail alone: four either side would rebuild it.
+	assert.Equal(t, "sk****cd", maskIfSecret("api_key", "sk-orq-abcd"))           // 11 runes
+	assert.Equal(t, "sk****op", maskIfSecret("api_key", "sk-orq-abcdefop"))       // 15 runes
+	assert.Equal(t, "sk-o****fghi", maskIfSecret("api_key", "sk-orq-abcdefghi"))  // 16 runes: the boundary
+	assert.Equal(t, "sk-o****mnop", maskIfSecret("api_key", "sk-orq-abcdefmnop")) // 17 runes
+	assert.Equal(t, "****-a", maskIfSecret("api_key", "sk-orq-a"))                // 8 runes: tail only
+	assert.Equal(t, "****rq", maskIfSecret("api_key", "sk-orq"))                  // 6 runes
+	assert.Equal(t, "****", maskIfSecret("api_key", "sk"))                        // 2 runes: a tail would be all of it
 
 	// Multi-byte secrets are cut on rune boundaries, not bytes.
-	assert.Equal(t, "日本語で********密ですね", maskIfSecret("password", "日本語ですごく長い秘密ですね"))
+	assert.Equal(t, "日本****すね", maskIfSecret("password", "日本語ですごく長い秘密ですね"))
+
+	// YAML decodes a numeric key as an int, no less a secret for it.
+	assert.Equal(t, "****", maskIfSecret("api_key", 1234567890))
+	assert.Equal(t, "****", maskIfSecret("api_key", map[string]interface{}{"a": "b"}))
+
+	// An empty secret has nothing to hide, and a mask would imply it is set.
+	assert.Equal(t, "", maskIfSecret("api_key", ""))
+
+	// `api_key:` decodes to nil, and a mask would report one that is not set.
+	assert.Nil(t, maskIfSecret("api_key", nil))
+
+	// An auth_url is where a key is exchanged, not a key.
+	assert.Equal(t, "https://id.orq.ai/authorize", maskIfSecret("auth_url", "https://id.orq.ai/authorize"))
+	assert.Equal(t, "https://id.orq.ai/token", maskIfSecret("token_endpoint", "https://id.orq.ai/token"))
 
 	// Non-secret fields pass through untouched.
 	assert.Equal(t, "https://api.orq.ai", maskIfSecret("base_url", "https://api.orq.ai"))
@@ -405,7 +424,7 @@ func TestListProfilesMasksSecretsAndHonorsJSON(t *testing.T) {
 	}
 	assert.Len(t, decoded.Profiles, 1)
 	assert.Equal(t, "acme", decoded.Profiles[0]["name"])
-	assert.Equal(t, "sk-o********mnop", decoded.Profiles[0]["api_key"])
+	assert.Equal(t, "sk-o****mnop", decoded.Profiles[0]["api_key"])
 	assert.Equal(t, "https://acme.example.com", decoded.Profiles[0]["server"])
 }
 

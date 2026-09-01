@@ -3,8 +3,10 @@ package cli
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"io/ioutil"
 	"os"
 	"path"
@@ -115,15 +117,7 @@ func Init(config *Config) {
 			if viper.GetBool("verbose") {
 				zerolog.SetGlobalLevel(zerolog.DebugLevel)
 
-				settings := viper.AllSettings()
-
-				for k := range settings {
-					if looksSensitiveKey(k) {
-						settings[k] = "**HIDDEN**"
-					}
-				}
-
-				log.Info().Fields(settings).Msg("Configuration")
+				log.Info().Fields(redactSettings(viper.AllSettings())).Msg("Configuration")
 			}
 
 			if PreRun != nil {
@@ -238,6 +232,7 @@ func initConfig(appName, envPrefix, apiKeyEnvVar, defaultOutputFormat string) {
 	if err := os.MkdirAll(configDir, 0700); err != nil {
 		panic(err)
 	}
+	narrowConfigDirPermissions(configDir)
 
 	// Load configuration from file(s) if provided.
 	viper.SetConfigName("config")
@@ -273,6 +268,53 @@ var outputFormats = []string{"json", "yaml", "toon"}
 
 func outputFormatList() string {
 	return strings.Join(outputFormats, ", ")
+}
+
+// narrowConfigDirPermissions closes a credential file left world-readable by an
+// older version. writeFileAtomic creates 0600, but a file written before that,
+// or by another tool sharing the directory, keeps its mode forever because
+// nothing ever chmods it. MkdirAll leaves an existing directory's mode alone.
+func narrowConfigDirPermissions(configDir string) {
+	narrowPermissions(configDir, 0700)
+
+	// Every regular file, not a list of names: a guessed list misses backups,
+	// viper's other extensions, and writeFileAtomic's own temp file.
+	entries, err := os.ReadDir(configDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		// Type() is the dirent's own kind, so a symlink is skipped, not followed.
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		narrowPermissions(path.Join(configDir, entry.Name()), 0600)
+	}
+}
+
+func narrowPermissions(name string, want os.FileMode) {
+	// Lstat, not Stat: Chmod follows a symlink out of the directory.
+	info, err := os.Lstat(name)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			// Not absent: nothing here can say whether the file is private.
+			fmt.Fprintf(Stderr, "warning: could not check the permissions on %s: %v\n", name, err)
+		}
+		return
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+
+	// Only ever clear bits: a file already stricter than want is left alone.
+	perm := info.Mode().Perm()
+	if perm&^want == 0 {
+		return
+	}
+
+	if err := os.Chmod(name, perm&want); err != nil {
+		fmt.Fprintf(Stderr, "warning: %s is readable by other users and could not be narrowed: %v\n", name, err)
+	}
 }
 
 func outputFormatOrDefault(value string) string {
