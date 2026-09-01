@@ -118,28 +118,32 @@ func (f *DefaultFormatter) format(data interface{}, list bool, columns []string)
 		data = result
 	}
 
-	// Unlike the spec's columns, ones named on the command line are dropped from the right when the table does not fit.
-	pinned := len(columns) > 0
+	override := ""
 	if list {
-		if override := viper.GetString("columns"); override != "" {
+		override = viper.GetString("columns")
+	}
+
+	if list && f.shouldRenderTable() {
+		userColumns := false
+		if override != "" {
 			selected, err := splitColumns(override)
 			if err != nil {
 				return err
 			}
 
-			columns, pinned = selected, false
+			columns, userColumns = selected, true
 		}
-	}
 
-	if list && f.shouldRenderTable() {
-		if rendered, err := renderTable(data, columns, pinned); err != nil {
+		if rendered, err := renderTable(data, columns, userColumns); err != nil {
 			return err
 		} else if rendered {
 			return nil
 		}
 
 		// Falling back silently looks exactly like the bug this path exists to fix.
-		fmt.Fprintf(Stderr, "Not shown as a table: this response is not a recognizable collection. Showing %s instead.\n", tableFallbackFormat)
+		fmt.Fprintf(Stderr, "Not shown as a table: this response is not a recognizable collection. Showing %s instead.\n", configuredSerialization)
+	} else if override != "" {
+		fmt.Fprintf(Stderr, "--columns was ignored: this output is not a table. Showing %s instead.\n", serializationFormat())
 	}
 
 	// Encode to the requested output format using nice formatting.
@@ -241,17 +245,28 @@ func (f *DefaultFormatter) format(data interface{}, list bool, columns []string)
 }
 
 // tableFormat renders a list command as a table for a human at a terminal.
-// tableFallbackFormat is what it serializes to everywhere else: a piped or
-// redirected run, a non-list command, and a payload that is not a collection.
+// tableFallbackFormat is what it serializes to everywhere else when the CLI
+// configured nothing: a piped or redirected run, a non-list command, and a
+// payload that is not a collection.
 const (
 	tableFormat         = "table"
 	tableFallbackFormat = "toon"
 )
 
 // serializationFormat is the format to encode with. `table` is a rendering
-// choice rather than a serialization, so it stands in for one.
+// choice rather than a serialization, so the CLI's configured one stands in.
 func serializationFormat() string {
-	if format := outputFormat(); format != tableFormat {
+	if format := OutputFormat(); format != tableFormat {
+		return format
+	}
+
+	return configuredSerialization
+}
+
+// serializationOrDefault resolves Config.SerializationFormat. `table` cannot be
+// what a table falls back to, so it is rejected like any unknown value.
+func serializationOrDefault(value string) string {
+	if format, ok := parseOutputFormat(value); ok && format != tableFormat {
 		return format
 	}
 
@@ -276,7 +291,7 @@ func splitColumns(value string) ([]string, error) {
 }
 
 func (f *DefaultFormatter) shouldRenderTable() bool {
-	return f.terminal && !viper.GetBool("raw") && outputFormat() == tableFormat
+	return f.terminal && !viper.GetBool("raw") && OutputFormat() == tableFormat
 }
 
 // checkColumns rejects a column no row has. A misspelled name would otherwise
@@ -305,13 +320,14 @@ func checkColumns(requestedColumns []string, rows []map[string]interface{}) erro
 
 // renderTable reports false for anything that is not a collection so callers
 // can fall back to the requested serialization format.
-func renderTable(data interface{}, requestedColumns []string, pinned bool) (bool, error) {
+func renderTable(data interface{}, requestedColumns []string, userColumns bool) (bool, error) {
 	rows, label, metadata, ok := tableRows(data, requestedColumns)
 	if !ok {
 		return false, nil
 	}
 
-	if !pinned {
+	// Only a name someone typed can be a typo; the spec's own field list cannot.
+	if userColumns {
 		if err := checkColumns(requestedColumns, rows); err != nil {
 			return false, err
 		}
@@ -343,8 +359,8 @@ func renderTable(data interface{}, requestedColumns []string, pinned bool) (bool
 		values = append(values, cells)
 	}
 
-	// Columns the schema asked for are never dropped.
-	if !pinned {
+	// Columns someone asked for — by spec or on the command line — are never dropped.
+	if len(requestedColumns) == 0 {
 		headers, values = fitColumns(headers, values, terminalWidth())
 	}
 
@@ -491,7 +507,9 @@ func fitColumns(headers []string, values [][]string, width int) ([]string, [][]s
 	return headers[:keep], values
 }
 
-func terminalWidth() int {
+// A var so a test can render at a width it chose rather than whatever the
+// process happens to be attached to.
+var terminalWidth = func() int {
 	if width, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && width > 0 {
 		return width
 	}

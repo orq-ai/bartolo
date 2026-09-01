@@ -152,7 +152,8 @@ Bartolo keeps generated and user-owned code separate:
 
 ## Output Conventions
 
-- Collection commands render object results as readable tables when run in an interactive terminal. The generated schema can set the default columns with `x-cli-list-fields`; otherwise the columns are inferred from the response and trimmed to fit the terminal. Use `--jmespath` for a one-off projection and `-o json` for the complete response.
+- `-o table|json|yaml|toon` picks the output. With the default `-o table`, collection commands render object results as readable tables in an interactive terminal and fall back to the CLI's serialization format everywhere else — a pipe, a redirect, a non-list command, or a payload that is not a collection. `--raw` also suppresses the table.
+- The generated schema can set the table's default columns with `x-cli-list-fields`; otherwise they are inferred from the response and trimmed to fit the terminal. Use `--columns id,name` to pick and order them for one invocation, `--jmespath` for a one-off projection, and `-o json` for the complete response.
 - Prefer `-o json` when you want machine-readable output.
 - Piping a response also keeps the serialized output stable for scripts and agents.
 - Use `--help` on any command group or command to inspect flags and required args.

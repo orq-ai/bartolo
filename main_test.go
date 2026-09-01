@@ -110,3 +110,22 @@ func TestEchoExamplePrintsAndExitsZero(t *testing.T) {
 	}
 	assert.JSONEq(t, "{\"hello\": \"world\"}", string(out))
 }
+
+// The one guarantee the ticket called non-negotiable: a pipe is unchanged by
+// the table default. CombinedOutput is a pipe, so no table may reach it.
+func TestPipedDefaultOutputIsNotATable(t *testing.T) {
+	cliPath := filepath.Join(os.TempDir(), "bartolo-example-cli")
+	build := exec.Command("go", "build", "-o", cliPath, "./example-cli")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build example-cli: %v\n%s", err, string(out))
+	}
+
+	out, err := exec.Command(cliPath, "echo", "hello:", "world").CombinedOutput()
+	if err != nil {
+		t.Fatalf("echo: %v\n%s", err, string(out))
+	}
+
+	assert.NotContains(t, string(out), "│")
+	assert.Contains(t, string(out), "hello")
+}

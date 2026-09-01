@@ -31,8 +31,11 @@ import (
 // a fix) cannot disagree about a name without knowing each command's method.
 var reservedFlagNames = map[string]string{
 	// Global flags, registered by Init and InitCredentialsFile.
-	"columns":       "global flag",
-	"jmespath":      "global flag",
+	"columns":  "global flag",
+	"jmespath": "global flag",
+	// Retired in favor of `-o json`. Kept reserved so a spec field named `json`
+	// cannot mint a `--json` that means something else to an old script.
+	"json":          "retired global flag",
 	"output-format": "global flag",
 	"profile":       "global flag",
 	"raw":           "global flag",

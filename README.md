@@ -42,7 +42,7 @@ cd my-cli
 bartolo init
 
 # Or fully scripted
-bartolo init my-cli --default-format json
+bartolo init my-cli --serialization-format toon
 
 # Generate from either YAML or JSON
 bartolo generate openapi.yaml
@@ -55,17 +55,20 @@ go build -o my-cli
 ./my-cli --help
 ```
 
-The default output format is `table`: list commands render a table on a
-terminal, and everything else — a piped or redirected run, a non-list command,
-a response that is not a collection — serializes to TOON instead. A list that
-cannot be tabulated at a terminal says so on stderr rather than quietly
-serializing.
+The default output format is `table`, for every generated CLI: list commands
+render a table on a terminal, and everything else — a piped or redirected run,
+a non-list command, a response that is not a collection — serializes instead. A
+list that cannot be tabulated at a terminal says so on stderr rather than
+quietly serializing.
 
-Pick a different default at generation time with `bartolo init --default-format`,
-or persist one per machine, which also opts out of tables:
+`bartolo init --serialization-format` picks what that serialization is (`toon`
+by default; a CLI meant for agents might pick `json`). It does not decide
+whether tables render — that is a per-machine choice, and pinning anything but
+`table` turns them off:
 
 ```sh
-./my-cli default-format yaml
+./my-cli default-format yaml   # no tables, YAML everywhere
+./my-cli default-format table  # tables back
 ```
 
 ## What You Get
@@ -80,7 +83,7 @@ Every generated CLI starts with a useful operator surface:
 - `request` provides a raw escape hatch for unmodeled endpoints.
 - `default-format` shows or persists the preferred default output format.
 - `-o table` (the default) renders list commands as a table on a terminal, and falls back to TOON elsewhere; `-o json|yaml|toon` picks a serialization, and `--columns id,name` picks the table's columns.
-- `-o`/`--output-format` and `-j`/`--jmespath` make automation and projection straightforward. `--raw` is not a format: it unwraps a scalar result, printing a string unquoted and a list of scalars one per line, which is what a shell wants back from a projection.
+- `-o`/`--output-format` and `-j`/`--jmespath` make automation and projection straightforward. `--raw` is not a format: it unwraps a scalar result, printing a string unquoted and a list of scalars one per line, which is what a shell wants back from a projection — and it suppresses the table, falling back to the serialized form.
 - Generated flags never shadow a global: a body field or parameter named after one (`raw`, `profile`, `output-format`, ...) is exposed as `--body-<name>` or `--param-<name>`.
 - Grouped nouns like `prompts`, `files`, or `human-evals` feel closer to a product CLI than a path translator.
 - String parameters with an `enum` list their values in `--help` and complete them in the shell.
@@ -163,7 +166,7 @@ func main() {
 	cli.Init(&cli.Config{
 		AppName:             "my-cli",
 		EnvPrefix:           "MY_CLI",
-		DefaultOutputFormat: "json",
+		SerializationFormat: "toon",
 		Version:             "1.0.0",
 	})
 

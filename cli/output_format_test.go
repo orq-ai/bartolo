@@ -8,6 +8,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestInvalidOutputFormatIsRejected(t *testing.T) {
@@ -50,7 +51,7 @@ func TestValidOutputFormatIsAccepted(t *testing.T) {
 			_, _, code := executeForExit(tc.args)
 
 			assert.Equal(t, ExitOK, code)
-			assert.Equal(t, tc.want, outputFormat())
+			assert.Equal(t, tc.want, OutputFormat())
 		})
 	}
 }
@@ -86,29 +87,37 @@ func TestDefaultFormatCommandRejectsUnknownFormat(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "a rejected format must not be persisted")
 }
 
-func TestOutputFormatDefaultsToTableAndEnvOverridesIt(t *testing.T) {
+// A CLI's configured serialization is what it falls back to, never what it
+// starts at — the bug RES-1483 reported was the two being the same knob.
+func TestOutputFormatDefaultsToTableWhateverTheCLIConfigured(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		configured string
-		env        string
-		want       string
+		name          string
+		serialization string
+		env           string
+		want          string
+		wantFallback  string
 	}{
-		{"unconfigured", "", "", "table"},
-		{"configured", "toon", "", "toon"},
-		{"from env", "", "yaml", "yaml"},
+		{"unconfigured", "", "", "table", "toon"},
+		{"configured toon", "toon", "", "table", "toon"},
+		{"configured yaml", "yaml", "", "table", "yaml"},
+		{"table cannot be its own fallback", "table", "", "table", "toon"},
+		{"from env", "yaml", "json", "json", "json"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			viper.Reset()
 			t.Setenv("HOME", t.TempDir())
 			t.Setenv("TEST_OUTPUT_FORMAT", tc.env)
 
-			Init(&Config{AppName: "test", EnvPrefix: "TEST", DefaultOutputFormat: tc.configured})
+			Init(&Config{AppName: "test", EnvPrefix: "TEST", SerializationFormat: tc.serialization})
 			Root.RunE = func(cmd *cobra.Command, args []string) error { return nil }
 
 			_, _, code := executeForExit("")
 
 			assert.Equal(t, ExitOK, code)
-			assert.Equal(t, tc.want, outputFormat())
+			assert.Equal(t, tc.want, OutputFormat())
+			assert.Equal(t, tc.wantFallback, serializationFormat())
+			// RES-1483 itself: a configured serialization must not kill the table.
+			assert.Equal(t, tc.want == tableFormat, NewDefaultFormatter(true, true).shouldRenderTable())
 		})
 	}
 }
@@ -119,9 +128,73 @@ func TestOutputFormatIsResolvedPerCommand(t *testing.T) {
 
 	_, _, code := executeForExit("group leaf")
 	assert.Equal(t, ExitOK, code)
-	assert.Equal(t, tableFormat, outputFormat())
+	assert.Equal(t, tableFormat, OutputFormat())
 
 	_, _, code = executeForExit("group leaf -o yaml")
 	assert.Equal(t, ExitOK, code)
-	assert.Equal(t, "yaml", outputFormat())
+	assert.Equal(t, "yaml", OutputFormat())
+}
+
+// A pinned format is how a user opts out of tables, and `table` is how they
+// opt back in — the mechanism this PR chose over an implicit predicate.
+func TestPersistedFormatDecidesWhetherTablesRender(t *testing.T) {
+	for _, tc := range []struct {
+		pinned    string
+		want      string
+		wantTable bool
+	}{
+		{"toon", "toon", false},
+		{"table", "table", true},
+	} {
+		t.Run(tc.pinned, func(t *testing.T) {
+			viper.Reset()
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			require.NoError(t, os.MkdirAll(filepath.Join(home, ".test"), 0700))
+			require.NoError(t, os.WriteFile(filepath.Join(home, ".test", "config.json"),
+				[]byte(`{"output-format": "`+tc.pinned+`"}`), 0600))
+
+			Init(&Config{AppName: "test", EnvPrefix: "TEST", SerializationFormat: "toon"})
+			Root.RunE = func(cmd *cobra.Command, args []string) error { return nil }
+
+			_, _, code := executeForExit("")
+
+			assert.Equal(t, ExitOK, code)
+			assert.Equal(t, tc.want, OutputFormat())
+			assert.Equal(t, tc.wantTable, NewDefaultFormatter(true, true).shouldRenderTable())
+		})
+	}
+}
+
+// An explicit -o beats a pin, so pinning a format is not a one-way door.
+func TestExplicitFormatBeatsAPersistedPin(t *testing.T) {
+	viper.Reset()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".test"), 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".test", "config.json"),
+		[]byte(`{"output-format": "toon"}`), 0600))
+
+	Init(&Config{AppName: "test", EnvPrefix: "TEST"})
+	Root.RunE = func(cmd *cobra.Command, args []string) error { return nil }
+
+	_, _, code := executeForExit("-o table")
+
+	assert.Equal(t, ExitOK, code)
+	assert.Equal(t, tableFormat, OutputFormat())
+}
+
+// Init must derive the table gate from a real terminal, not from forced color,
+// or `--color | cat` starts emitting a table.
+func TestInitKeepsForcedColorOffTheTableGate(t *testing.T) {
+	viper.Reset()
+	t.Setenv("HOME", t.TempDir())
+	viper.Set("color", true)
+
+	Init(&Config{AppName: "test", EnvPrefix: "TEST"})
+
+	formatter, ok := Formatter.(*DefaultFormatter)
+	require.True(t, ok)
+	assert.True(t, formatter.tty, "forced color must still colorize")
+	assert.False(t, formatter.terminal, "test stdout is a pipe, so no table")
 }

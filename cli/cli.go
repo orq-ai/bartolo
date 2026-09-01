@@ -54,19 +54,22 @@ type Config struct {
 	EnvPrefix    string
 	APIKeyEnvVar string
 
-	// DefaultOutputFormat is the initial value of `--output-format`, one of
-	// outputFormats. It defaults to `table`, which renders a list command as a
-	// table for a human at a terminal and serializes everywhere else.
-	DefaultOutputFormat string
+	// SerializationFormat is what the CLI encodes with when it is not rendering
+	// a table: a piped or redirected run, a non-list command, a payload that is
+	// not a collection. One of OutputFormats except `table`, which cannot stand
+	// in for itself; anything else falls back to toon. `--output-format` always
+	// starts at `table`, so a user opts out of tables with `default-format`.
+	SerializationFormat string
 
 	Version string
 }
 
 // Init will set up the CLI.
 func Init(config *Config) {
-	initConfig(config.AppName, config.EnvPrefix, config.APIKeyEnvVar, config.DefaultOutputFormat)
+	initConfig(config.AppName, config.EnvPrefix, config.APIKeyEnvVar, config.SerializationFormat)
 	initCache(config.AppName)
 	authInitialized = false
+	resolvedOutputFormat = ""
 
 	// Forced color makes tty true on a pipe, so tables key off terminal alone.
 	stdoutIsTerminal := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
@@ -105,7 +108,7 @@ func Init(config *Config) {
 			if !ok {
 				return NewValueError(fmt.Errorf("--output-format: %q is not one of [%s]", format, outputFormatList()))
 			}
-			viper.Set(resolvedOutputFormatKey, normalized)
+			resolvedOutputFormat = normalized
 
 			if err := applyServerSetting(cmd); err != nil {
 				return err
@@ -160,13 +163,13 @@ func Init(config *Config) {
 	initAgentCommands()
 
 	AddGlobalFlag("verbose", "", "Enable verbose log output", false)
-	AddGlobalFlag("output-format", "o", fmt.Sprintf("Output format [%s]", outputFormatList()), outputFormatOrDefault(config.DefaultOutputFormat))
+	AddGlobalFlag("output-format", "o", fmt.Sprintf("Output format [%s]", outputFormatList()), tableFormat)
 	AddGlobalFlag("columns", "", "Comma-separated columns to show in table output", "")
 	// Named `jmespath` rather than `query` so it cannot collide with the many
 	// endpoints whose request body or query string has a `query` field. The old
 	// `-q` shorthand went with it: it abbreviated a name that no longer exists.
 	AddGlobalFlag("jmespath", "j", "Filter / project results using JMESPath", "")
-	// Unwraps a scalar result for the shell rather than choosing a format; the format still comes from --output-format.
+	// Unwraps a scalar result for the shell rather than choosing a format, and suppresses the table; the serialization then comes from --output-format.
 	AddGlobalFlag("raw", "", "Print a string or scalar list result unquoted, one item per line, instead of serializing it", false)
 	AddGlobalFlag("server", "", "API base URL, e.g. https://api.example.com", "")
 }
@@ -227,7 +230,7 @@ func loadDotEnvFile(filename string) {
 	}
 }
 
-func initConfig(appName, envPrefix, apiKeyEnvVar, defaultOutputFormat string) {
+func initConfig(appName, envPrefix, apiKeyEnvVar, serializationFormat string) {
 	// One-time setup to ensure the path exists so we can write files into it
 	// later as needed.
 	configDir := path.Join(userHomeDir(), "."+appName)
@@ -259,31 +262,53 @@ func initConfig(appName, envPrefix, apiKeyEnvVar, defaultOutputFormat string) {
 
 	migrateLegacyServerConfig(configDir)
 	viper.SetDefault("api-key-env-var", apiKeyEnvVar)
-	viper.SetDefault("output-format", outputFormatOrDefault(defaultOutputFormat))
+	viper.SetDefault("output-format", tableFormat)
+	configuredSerialization = serializationOrDefault(serializationFormat)
 }
 
-// outputFormats are the values accepted by `--output-format` / `-o` and by the
+// OutputFormats are the values accepted by `--output-format` / `-o` and by the
 // `default-format` command. Help text and error messages are built from this
-// list so they cannot drift apart from what is actually accepted.
-var outputFormats = []string{"json", "yaml", "toon", tableFormat}
+// list so they cannot drift apart from what is actually accepted, and the
+// generator reads the same list so it cannot offer a `--default-format` that
+// the generated CLI would then reject.
+var OutputFormats = []string{"json", "yaml", "toon", tableFormat}
 
 func outputFormatList() string {
-	return strings.Join(outputFormats, ", ")
+	return strings.Join(OutputFormats, ", ")
 }
 
-// resolvedOutputFormatKey holds the format resolved for the command being run.
-// Writing the normalized value back to `output-format` would make it a viper
-// override, which outranks the flag, so the first command run in a process
-// would pin the format for every later one.
-const resolvedOutputFormatKey = "output-format-resolved"
+// resolvedOutputFormat is the format for the command being run. It is process
+// state, not configuration: writing the normalized value back to
+// `output-format` would make it a viper override, which outranks the flag, so
+// the first command run in a process would pin the format for every later one.
+var resolvedOutputFormat string
 
-// outputFormat is the format the running command should produce.
-func outputFormat() string {
-	if resolved := viper.GetString(resolvedOutputFormatKey); resolved != "" {
-		return resolved
+// configuredSerialization is Config.SerializationFormat, resolved once by Init.
+var configuredSerialization = tableFallbackFormat
+
+// OutputFormat is the format the running command should produce. A custom
+// command that renders its own output reads this rather than viper, which
+// still holds the raw, unnormalized value.
+func OutputFormat() string {
+	if resolvedOutputFormat != "" {
+		return resolvedOutputFormat
 	}
 
 	return outputFormatOrDefault(viper.GetString("output-format"))
+}
+
+// SetOutputFormat forces the format for one render, returning the func that
+// puts the command's own format back. A custom command that wants a table from
+// a CLI whose user pinned a serialization needs this; nothing else should.
+func SetOutputFormat(format string) (func(), error) {
+	normalized, ok := parseOutputFormat(format)
+	if !ok {
+		return nil, NewValueError(fmt.Errorf("--output-format: %q is not one of [%s]", format, outputFormatList()))
+	}
+
+	previous := resolvedOutputFormat
+	resolvedOutputFormat = normalized
+	return func() { resolvedOutputFormat = previous }, nil
 }
 
 func outputFormatOrDefault(value string) string {
@@ -295,7 +320,7 @@ func outputFormatOrDefault(value string) string {
 
 func parseOutputFormat(value string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(value))
-	for _, format := range outputFormats {
+	for _, format := range OutputFormats {
 		if normalized == format {
 			return format, true
 		}
@@ -331,13 +356,13 @@ func applyServerSetting(cmd *cobra.Command) error {
 
 func newDefaultFormatCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "default-format [" + strings.Join(outputFormats, "|") + "]",
+		Use:   "default-format [" + strings.Join(OutputFormats, "|") + "]",
 		Short: "Show or persist the default output format",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return Formatter.Format(map[string]interface{}{
-					"output_format": outputFormat(),
+					"output_format": OutputFormat(),
 				})
 			}
 
