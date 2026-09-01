@@ -2672,9 +2672,9 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 
 		printWizardStep(color, 3, 3, "Serialization format", "List commands render a table on a terminal. Choose what generated CLIs serialize to everywhere else. Use the arrow keys to move and Enter to confirm.")
 		serializationFormat, err = promptSelect("Serialization format", []selectOption{
-			{Value: "toon", Label: "toon", Description: "Human-oriented serialization of data for LLMs."},
-			{Value: "json", Label: "json", Description: "Best for agents and automation."},
+			{Value: "json", Label: "json", Description: "What a pipe, a script, or jq expects."},
 			{Value: "yaml", Label: "yaml", Description: "Easy to scan in terminals."},
+			{Value: "toon", Label: "toon", Description: "Compact serialization aimed at LLMs."},
 		}, serializationFormat, color)
 		if err != nil {
 			return nil, err
@@ -3215,7 +3215,7 @@ func main() {
 	initCommand.Flags().String("module-path", "", "Go module path for the generated CLI project")
 	initCommand.Flags().String("bartolo-path", "", "Local path to the bartolo repo to use via go.mod replace during development")
 	initCommand.Flags().String("api-key-env-var", "", "Custom API key environment variable for generated CLIs")
-	initCommand.Flags().String("serialization-format", "toon", fmt.Sprintf("What generated CLIs serialize to when not rendering a table [%s]", strings.Join(serializationFormats, ", ")))
+	initCommand.Flags().String("serialization-format", "json", fmt.Sprintf("What generated CLIs serialize to when not rendering a table [%s]", strings.Join(serializationFormats, ", ")))
 	root.AddCommand(initCommand)
 
 	root.AddCommand(&cobra.Command{

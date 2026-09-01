@@ -97,10 +97,10 @@ func TestOutputFormatDefaultsToTableWhateverTheCLIConfigured(t *testing.T) {
 		want          string
 		wantFallback  string
 	}{
-		{"unconfigured", "", "", "table", "toon"},
+		{"unconfigured", "", "", "table", "json"},
 		{"configured toon", "toon", "", "table", "toon"},
 		{"configured yaml", "yaml", "", "table", "yaml"},
-		{"table cannot be its own fallback", "table", "", "table", "toon"},
+		{"table cannot be its own fallback", "table", "", "table", "json"},
 		{"from env", "yaml", "json", "json", "json"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

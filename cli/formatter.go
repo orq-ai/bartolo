@@ -247,10 +247,12 @@ func (f *DefaultFormatter) format(data interface{}, list bool, columns []string)
 // tableFormat renders a list command as a table for a human at a terminal.
 // tableFallbackFormat is what it serializes to everywhere else when the CLI
 // configured nothing: a piped or redirected run, a non-list command, and a
-// payload that is not a collection.
+// payload that is not a collection. It is JSON because whatever reads a pipe
+// is far more likely to be `jq` than a model; a CLI that knows otherwise says
+// so with Config.SerializationFormat.
 const (
 	tableFormat         = "table"
-	tableFallbackFormat = "toon"
+	tableFallbackFormat = "json"
 )
 
 // serializationFormat is the format to encode with. `table` is a rendering
