@@ -74,8 +74,7 @@ func redactHeaderValue(key, val string) string {
 	if looksSensitiveKey(key) {
 		return "[REDACTED]"
 	}
-	// An `X-Auth-Server` is exempted from masking by its name so the endpoint
-	// stays diagnosable, but it can still hold a URL with a password in it.
+	// An `X-Auth-Server` is exempt by name but can still hold a password.
 	if namesALocation(strings.ToLower(key)) {
 		if masked, ok := redactAddressValue(val).(string); ok {
 			return masked
@@ -93,10 +92,8 @@ func redactURL(u *url.URL) string {
 		return ""
 	}
 
-	// Copy unconditionally: the request is logged before it goes out and must
-	// go out intact, and every exit from here has to run past the userinfo
-	// strip below. An early return for the no-query case printed a
-	// basic-auth password in full.
+	// Copy unconditionally, so every exit runs past the userinfo strip: an
+	// early return for the no-query case printed the password in full.
 	clean := *u
 	if clean.User != nil {
 		clean.User = url.User(clean.User.Username())
@@ -120,8 +117,7 @@ func redactValues(values url.Values) bool {
 			redacted = true
 			continue
 		}
-		// A `redirect_uri` is exempt from masking by its name, and OAuth
-		// carries one routinely -- with whatever its own query holds.
+		// OAuth carries a redirect_uri routinely, with whatever its query holds.
 		if !namesALocation(strings.ToLower(name)) || len(vals) == 0 {
 			continue
 		}
@@ -174,10 +170,8 @@ func redactBody(contentType, body string) string {
 }
 
 func redactJSONBody(body string) string {
-	// UseNumber, and SetEscapeHTML(false) below: a body that trips redaction is
-	// re-rendered from the decoded tree, and the default round trip is lossy.
-	// It rounds every integer past 2^53 through float64 and escapes `&`, `<`
-	// and `>`, so the dump would misreport the body it exists to help debug.
+	// Without UseNumber and SetEscapeHTML(false) the re-render rounds every
+	// integer past 2^53 and escapes `&`, `<` and `>`.
 	decoder := json.NewDecoder(strings.NewReader(body))
 	decoder.UseNumber()
 
@@ -196,8 +190,7 @@ func redactJSONBody(body string) string {
 	encoder.SetEscapeHTML(false)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(redacted); err != nil {
-		// The value came out of encoding/json, so this should not happen; if
-		// it does, dropping the body beats printing the unredacted one.
+		// Should not happen; dropping the body beats printing it unredacted.
 		return "[REDACTED BODY]"
 	}
 	return strings.TrimRight(out.String(), "\n")
@@ -322,14 +315,11 @@ func UnmarshalResponse(resp *gentleman.Response, s interface{}) error {
 	return unmarshalBody(resp.Header, resp.Bytes(), s)
 }
 
-// ResponseError renders a failed response as an error, with the body run
-// through the same redaction the verbose log uses. Every caller that turns a
-// >= 400 response into an error goes through here, so none of them can skip
-// that: this message is printed to stderr on every failed command, not only
-// under `--verbose`, and an error body carries credentials as readily as a
-// successful one -- a 401 that echoes back the token it rejected is ordinary.
-// It is also the text users copy into a bug report, because it is what the CLI
-// showed them when it broke.
+// ResponseError renders a failed response as an error, with the body redacted.
+// Every caller that turns a >= 400 response into an error goes through here, so
+// none can skip that: this prints to stderr on every failed command, not only
+// under `--verbose`, and a 401 that echoes back the token it rejected is
+// ordinary.
 func ResponseError(resp *gentleman.Response) error {
 	if resp == nil {
 		return fmt.Errorf("the request failed with no response")

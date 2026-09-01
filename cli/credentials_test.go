@@ -372,10 +372,7 @@ func TestMaskIfSecret(t *testing.T) {
 		assert.Equal(t, "sk-o****mnop", maskIfSecret(field, "sk-orq-abcdefghijklmnop"), field)
 	}
 
-	// How much of the ends survives scales with the length: four either side
-	// of a middling secret gives away too much of it, and a short one keeps
-	// only a tail -- enough to tell two profiles' keys apart, not enough to
-	// rebuild either.
+	// A short secret keeps a tail alone: four either side would rebuild it.
 	assert.Equal(t, "sk****cd", maskIfSecret("api_key", "sk-orq-abcd"))           // 11 runes
 	assert.Equal(t, "sk****op", maskIfSecret("api_key", "sk-orq-abcdefop"))       // 15 runes
 	assert.Equal(t, "sk-o****fghi", maskIfSecret("api_key", "sk-orq-abcdefghi"))  // 16 runes: the boundary
@@ -387,21 +384,17 @@ func TestMaskIfSecret(t *testing.T) {
 	// Multi-byte secrets are cut on rune boundaries, not bytes.
 	assert.Equal(t, "日本****すね", maskIfSecret("password", "日本語ですごく長い秘密ですね"))
 
-	// A non-string under a credential name is masked too: YAML decodes a
-	// numeric key as an int, and it is no less a secret for it.
+	// YAML decodes a numeric key as an int, no less a secret for it.
 	assert.Equal(t, "****", maskIfSecret("api_key", 1234567890))
 	assert.Equal(t, "****", maskIfSecret("api_key", map[string]interface{}{"a": "b"}))
 
 	// An empty secret has nothing to hide, and a mask would imply it is set.
 	assert.Equal(t, "", maskIfSecret("api_key", ""))
 
-	// Same for a key present with no value at all: `api_key:` in YAML decodes
-	// to nil, and masking it would report a credential that is not there.
+	// `api_key:` decodes to nil, and a mask would report one that is not set.
 	assert.Nil(t, maskIfSecret("api_key", nil))
 
-	// An address is not a credential: an OAuth auth_url is where a key is
-	// exchanged, and masking it makes the dump useless for diagnosing which
-	// endpoint was called.
+	// An auth_url is where a key is exchanged, not a key.
 	assert.Equal(t, "https://id.orq.ai/authorize", maskIfSecret("auth_url", "https://id.orq.ai/authorize"))
 	assert.Equal(t, "https://id.orq.ai/token", maskIfSecret("token_endpoint", "https://id.orq.ai/token"))
 

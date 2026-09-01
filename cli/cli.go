@@ -271,30 +271,20 @@ func outputFormatList() string {
 }
 
 // narrowConfigDirPermissions closes a credential file left world-readable by an
-// older version. Writes go through writeFileAtomic, which creates its temp file
-// 0600 and renames it into place, so anything this CLI has written since is
-// already private -- but a file written before that, or by another tool sharing
-// the directory, keeps its original mode forever because nothing ever chmods
-// it. MkdirAll has the same gap: it leaves an existing directory's mode alone.
-//
-// The directory is narrowed too, which also covers files not on this list: a
-// backup an older version left behind is unreachable once the directory is not
-// traversable by anyone else.
+// older version. writeFileAtomic creates 0600, but a file written before that,
+// or by another tool sharing the directory, keeps its mode forever because
+// nothing ever chmods it. MkdirAll leaves an existing directory's mode alone.
 func narrowConfigDirPermissions(configDir string) {
 	narrowPermissions(configDir, 0700)
 
-	// Every regular file in the directory, rather than a list of names. The
-	// set to protect is "what is in there": viper reads config and cache files
-	// in several extensions, a backup an older version or a neighbouring tool
-	// left behind outlives the profile it belonged to, and writeFileAtomic's
-	// own temp file matches no name anyone would think to enumerate.
+	// Every regular file, not a list of names: a guessed list misses backups,
+	// viper's other extensions, and writeFileAtomic's own temp file.
 	entries, err := os.ReadDir(configDir)
 	if err != nil {
 		return
 	}
 	for _, entry := range entries {
-		// Type() reports the dirent's own kind, so a symlink is skipped here
-		// rather than followed into a chmod outside the directory.
+		// Type() is the dirent's own kind, so a symlink is skipped, not followed.
 		if !entry.Type().IsRegular() {
 			continue
 		}
@@ -303,13 +293,11 @@ func narrowConfigDirPermissions(configDir string) {
 }
 
 func narrowPermissions(name string, want os.FileMode) {
-	// Lstat, not Stat: Chmod follows a symlink, so narrowing one would change
-	// the mode of a file the CLI never meant to touch.
+	// Lstat, not Stat: Chmod follows a symlink out of the directory.
 	info, err := os.Lstat(name)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			// Not the same as absent: the mode could not be read, so nothing
-			// here can say whether it is private.
+			// Not absent: nothing here can say whether the file is private.
 			fmt.Fprintf(Stderr, "warning: could not check the permissions on %s: %v\n", name, err)
 		}
 		return
@@ -318,17 +306,13 @@ func narrowPermissions(name string, want os.FileMode) {
 		return
 	}
 
-	// Only ever clear bits, never set them: a file the user has already made
-	// stricter than want (0400, say) is left alone. Group- and other-readable
-	// credentials are the case this exists to remove.
+	// Only ever clear bits: a file already stricter than want is left alone.
 	perm := info.Mode().Perm()
 	if perm&^want == 0 {
 		return
 	}
 
 	if err := os.Chmod(name, perm&want); err != nil {
-		// Worth a line: the file stays readable by others, which is the
-		// condition this exists to remove.
 		fmt.Fprintf(Stderr, "warning: %s is readable by other users and could not be narrowed: %v\n", name, err)
 	}
 }

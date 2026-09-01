@@ -318,29 +318,22 @@ func maskIfSecret(name string, value interface{}) interface{} {
 	}
 
 	if value == nil {
-		// A key present with no value is not a secret, and masking it would
-		// say one is configured when none is.
+		// Masking an unset key would report a credential that is not there.
 		return value
 	}
 
 	s, ok := value.(string)
 	if !ok {
-		// Anything that is not a string under a credential name is still a
-		// credential, and there is no first-and-last-four to show of it. A
-		// config file may well hold `api_key: 1234567890`, which YAML decodes
-		// as an int.
+		// YAML decodes `api_key: 1234567890` as an int, no less a secret.
 		return "****"
 	}
 	if s == "" {
 		return value
 	}
 
-	// The middle is a fixed width rather than the real one, so the output
-	// discloses which of four length bands a secret falls in, never its exact
-	// length. How much of the ends survives scales with the secret: four
-	// characters either side of a short value gives away most of it, so a
-	// short one keeps only a tail, enough to tell two profiles' keys apart
-	// without reconstructing either.
+	// The middle is fixed width, so only a length band leaks, never the exact
+	// length. A short secret keeps a tail alone: four either side would give
+	// away most of it.
 	runes := []rune(s)
 	switch {
 	case len(runes) <= 2:
@@ -370,15 +363,12 @@ func redactSettings(settings map[string]interface{}) map[string]interface{} {
 	return out
 }
 
-// maskHidden is the mask the `--verbose` configuration dump uses, and it shows
-// nothing of the value. The dump is the output users are asked to paste into
-// bug reports, so first-and-last-four of a live key is four characters too
-// many; `auth list-profiles` keeps maskIfSecret's partial reveal, because it
-// is read on the user's own terminal and two profiles' rows have to be
-// tellable apart.
+// maskHidden shows nothing of a value. The `--verbose` dump is what users
+// paste into bug reports, so first-and-last-four of a live key is four
+// characters too many; `auth list-profiles` keeps maskIfSecret's partial
+// reveal, since two profiles' rows have to be tellable apart.
 func maskHidden(_ string, value interface{}) interface{} {
-	// An absent or empty value is not a credential, and masking it would
-	// report one that is not configured.
+	// Masking an unset value would report a credential that is not there.
 	if value == nil {
 		return value
 	}
@@ -389,18 +379,15 @@ func maskHidden(_ string, value interface{}) interface{} {
 }
 
 // redactTree copies value with everything under a sensitive key replaced by
-// mask, at any depth, and reports whether it masked anything. The
-// `--verbose` configuration dump and the HTTP body redaction share this one
-// walk: two copies of it meant two places for the depth bug this closes
-// (issue #34) to come back, and they had already drifted on the mask.
+// mask, at any depth, and reports whether it masked anything. The `--verbose`
+// dump and the HTTP body redaction share this one walk: two copies meant two
+// places for issue #34 to come back, and they had already drifted on the mask.
 //
-// A container under a sensitive key is masked whole rather than descended
-// into, since guessing which leaves below are secret is what leaked in the
-// first place. Slice elements carry no key of their own, so they inherit the
-// enclosing one: a list under api_keys is a list of secrets. The typed map and
-// slice cases are not reachable from encoding/json, but viper.Set and the YAML
-// decoder both produce them, and a shape this walk does not know is a shape it
-// returns verbatim.
+// A container under a sensitive key is masked whole, since guessing which
+// leaves below are secret is what leaked in the first place. Slice elements
+// inherit the enclosing key: a list under api_keys is a list of secrets. The
+// typed map and slice cases come from viper.Set and the YAML decoder, not from
+// encoding/json; a shape this walk does not know is returned verbatim.
 func redactTree(key string, value interface{}, mask func(string, interface{}) interface{}) (interface{}, bool) {
 	if looksSensitiveKey(key) {
 		return mask(key, value), true

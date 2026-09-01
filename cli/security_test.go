@@ -373,8 +373,7 @@ func TestVerboseConfigMaskesAllSensitiveKeys(t *testing.T) {
 
 	redacted := redactSettings(settings)
 
-	// Assert on the absence of the secret anywhere in the rendering, so this
-	// fails for any leaking shape, not only the ones enumerated above.
+	// Absence anywhere in the rendering, so any leaking shape fails this.
 	rendered, err := json.Marshal(redacted)
 	if err != nil {
 		t.Fatalf("marshal redacted settings: %v", err)
@@ -385,8 +384,7 @@ func TestVerboseConfigMaskesAllSensitiveKeys(t *testing.T) {
 
 	profiles := redacted["profiles"].(map[string]interface{})
 	def := profiles["default"].(map[string]interface{})
-	// The dump shows nothing of a secret, unlike `auth list-profiles`: it is
-	// the output users are asked to paste into a bug report.
+	// The dump shows nothing of a secret, unlike `auth list-profiles`.
 	if got := def["api_key"]; got != "**HIDDEN**" {
 		t.Errorf("nested api_key = %v, want **HIDDEN**", got)
 	}
@@ -482,9 +480,8 @@ func TestCredentialsSaveRoundTripsAndStays0600(t *testing.T) {
 	})
 }
 
-// The verbose log redacts headers and the URL, so a body that carries the same
-// credential must not walk past it: an OAuth exchange posts client_secret and
-// gets back access_token, and a key-minting endpoint returns the new key.
+// An OAuth exchange posts client_secret and gets back access_token, so a body
+// must not walk past the header and URL redaction.
 func TestRedactBody(t *testing.T) {
 	const secret = "sk-orq-abcdefghijklmnop"
 
@@ -533,9 +530,8 @@ func TestRedactBody(t *testing.T) {
 	})
 }
 
-// Writes go through writeFileAtomic and land 0600, but a file an older version
-// or a neighbouring tool left behind keeps its mode forever unless something
-// narrows it.
+// writeFileAtomic lands 0600, but a file an older version left behind keeps
+// its mode forever unless something narrows it.
 func TestNarrowConfigDirPermissions(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o755); err != nil {
@@ -546,13 +542,11 @@ func TestNarrowConfigDirPermissions(t *testing.T) {
 			t.Fatalf("seed %s: %v", name, err)
 		}
 	}
-	// A backup of a credential file is a credential file: the live one gets
-	// rewritten 0600 by the next write, the copy beside it never does.
+	// The live file is rewritten 0600 by the next write, the copy beside it never is.
 	if err := os.WriteFile(filepath.Join(dir, "config.json.bak"), []byte("{}"), 0o644); err != nil {
 		t.Fatalf("seed backup: %v", err)
 	}
-	// A file the CLI knows nothing about is narrowed too: it is in the
-	// credential directory, so it is treated as if it holds one.
+	// A file the CLI knows nothing about is in the credential directory too.
 	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("hi"), 0o644); err != nil {
 		t.Fatalf("seed stranger: %v", err)
 	}
@@ -566,8 +560,7 @@ func TestNarrowConfigDirPermissions(t *testing.T) {
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		t.Errorf("config directory mode = %o, want no group/other bits", perm)
 	}
-	// Every regular file in the directory, backups and strangers included --
-	// the sweep reads the directory rather than guessing at names.
+	// Backups and strangers included: the sweep reads the directory.
 	for _, name := range []string{"credentials.json", "config.json", "cache.json", "credentials.json.bak", "credentials.yaml", "config.json.orig", "config.json.bak", "notes.txt"} {
 		info, err := os.Stat(filepath.Join(dir, name))
 		if err != nil {
@@ -594,10 +587,8 @@ func TestNarrowConfigDirPermissions(t *testing.T) {
 	}
 }
 
-// The unit tests above all call a redactor directly, so every one of them
-// stays green if the caller stops calling it -- which is exactly how issue #34
-// shipped. This runs a real command with --verbose and reads the log the user
-// would paste into a bug report.
+// Every unit test above calls a redactor directly, so all of them stay green
+// if the caller stops calling it, which is how issue #34 shipped.
 func TestVerboseConfigDumpDoesNotPrintSecrets(t *testing.T) {
 	const secret = "sk-orq-thisisnottherealkey"
 
@@ -700,8 +691,7 @@ func TestNarrowConfigDirPermissionsSkipsSymlinks(t *testing.T) {
 	}
 }
 
-// An address field is exempt from masking so the endpoint stays diagnosable,
-// but an address can carry a credential of its own.
+// An address field is exempt from masking, but can carry a credential.
 func TestAddressFieldsAreStrippedNotPrintedRaw(t *testing.T) {
 	settings := map[string]interface{}{
 		"database_url": "postgres://svc:hunter2@db.internal/app",
@@ -738,9 +728,8 @@ func TestAddressFieldsAreStrippedNotPrintedRaw(t *testing.T) {
 	}
 }
 
-// The error a failed request turns into is printed on every run, not only
-// under --verbose, and it is what users copy into a bug report. An error body
-// carries credentials as readily as a successful one.
+// A failed request's error prints on every run, not only under --verbose, and
+// an error body carries credentials as readily as a successful one.
 func TestResponseErrorRedactsTheBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
