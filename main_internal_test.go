@@ -321,7 +321,7 @@ func TestResolveInitConfigUsesFlagsWithoutPrompting(t *testing.T) {
 	cmd.Flags().Bool("interactive", false, "")
 	cmd.Flags().String("module-path", "github.com/acme/demo-cli", "")
 	cmd.Flags().String("api-key-env-var", "MY_TEAM_TOKEN", "")
-	cmd.Flags().String("default-format", "yaml", "")
+	cmd.Flags().String("serialization-format", "yaml", "")
 
 	config, err := resolveInitConfig(cmd, []string{"demo-cli"})
 	if err != nil {
@@ -337,8 +337,8 @@ func TestResolveInitConfigUsesFlagsWithoutPrompting(t *testing.T) {
 	if config.ModulePath != "github.com/acme/demo-cli" {
 		t.Fatalf("expected module path github.com/acme/demo-cli, got %q", config.ModulePath)
 	}
-	if config.DefaultOutputFormat != "yaml" {
-		t.Fatalf("expected default output format yaml, got %q", config.DefaultOutputFormat)
+	if config.SerializationFormat != "yaml" {
+		t.Fatalf("expected serialization format yaml, got %q", config.SerializationFormat)
 	}
 	if config.APIKeyEnvVar != "MY_TEAM_TOKEN" {
 		t.Fatalf("expected api key env var MY_TEAM_TOKEN, got %q", config.APIKeyEnvVar)
@@ -350,7 +350,7 @@ func TestResolveInitConfigRejectsInvalidAPIKeyEnvVar(t *testing.T) {
 	cmd.Flags().Bool("interactive", false, "")
 	cmd.Flags().String("module-path", "", "")
 	cmd.Flags().String("api-key-env-var", "123_BAD", "")
-	cmd.Flags().String("default-format", "json", "")
+	cmd.Flags().String("serialization-format", "json", "")
 
 	if _, err := resolveInitConfig(cmd, []string{"demo-cli"}); err == nil {
 		t.Fatal("expected invalid api key env var error")
@@ -362,19 +362,19 @@ func TestResolveInitConfigRejectsInvalidModulePath(t *testing.T) {
 	cmd.Flags().Bool("interactive", false, "")
 	cmd.Flags().String("module-path", "github.com/acme/demo cli", "")
 	cmd.Flags().String("api-key-env-var", "", "")
-	cmd.Flags().String("default-format", "json", "")
+	cmd.Flags().String("serialization-format", "json", "")
 
 	if _, err := resolveInitConfig(cmd, []string{"demo-cli"}); err == nil {
 		t.Fatal("expected invalid module path error")
 	}
 }
 
-func TestResolveInitConfigRejectsUnknownDefaultFormat(t *testing.T) {
+func TestResolveInitConfigRejectsUnknownSerializationFormat(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().Bool("interactive", false, "")
 	cmd.Flags().String("module-path", "", "")
 	cmd.Flags().String("api-key-env-var", "", "")
-	cmd.Flags().String("default-format", "not-a-format", "")
+	cmd.Flags().String("serialization-format", "not-a-format", "")
 
 	_, err := resolveInitConfig(cmd, []string{"demo-cli"})
 	if err == nil {
@@ -405,7 +405,7 @@ func TestGenerateFromJSONFixtureBuildsCLI(t *testing.T) {
 		BartoloReplacePath:  repoRoot,
 		BartoloVersion:      bartoloVersion,
 		EnvPrefix:           "ORQ",
-		DefaultOutputFormat: "json",
+		SerializationFormat: "json",
 		APIKeyEnvVar:        "ORQ_API_KEY",
 	}
 	if err := writeProjectScaffold(config, false); err != nil {
@@ -1818,5 +1818,32 @@ paths:
 	}
 	if strings.Contains(op.Long, "\n- a legacy") {
 		t.Errorf("a paragraph break should not start a second argument, got:\n%s", op.Long)
+	}
+}
+
+// A project written before `table` existed recorded its serialization under the
+// old key; reading it as empty would silently switch the CLI to toon.
+func TestLoadProjectConfigReadsTheLegacyFormatKey(t *testing.T) {
+	oldWD, _ := os.Getwd()
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir tempdir: %v", err)
+	}
+	defer os.Chdir(oldWD)
+
+	if err := os.WriteFile(projectConfigFilename,
+		[]byte(`{"app_name":"demo","env_prefix":"DEMO","default_output_format":"json"}`), 0600); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	config := loadProjectConfig()
+	if config == nil {
+		t.Fatal("expected a project config")
+	}
+	if config.SerializationFormat != "json" {
+		t.Fatalf("expected serialization format json, got %q", config.SerializationFormat)
+	}
+	if config.LegacyDefaultOutputFormat != "" {
+		t.Fatalf("the legacy key must not be written back, got %q", config.LegacyDefaultOutputFormat)
 	}
 }

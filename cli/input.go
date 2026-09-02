@@ -492,7 +492,9 @@ func readStdin(stdin *os.File) (string, error) {
 	}
 
 	body := string(input)
-	log.Debug().Msgf("Body from stdin is: %s", body)
+	// --verbose turns debug logging on, so the body here would walk past
+	// every redactor in http.go.
+	log.Debug().Msgf("Read %d bytes of body from stdin", len(input))
 	return body, nil
 }
 

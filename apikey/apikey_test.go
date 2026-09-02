@@ -152,7 +152,7 @@ func putProfileInForce(t *testing.T, via string, name string, missing bool) {
 			return
 		}
 
-		stdout, stderr := runCLI(t, "auth profile use "+name)
+		stdout, stderr := runCLI(t, "auth profile use "+name+" -o json")
 		if !strings.Contains(stdout, `"active_profile"`) {
 			t.Fatalf("auth profile use %s did not persist a selection: stdout=%q stderr=%q", name, stdout, stderr)
 		}

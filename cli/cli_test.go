@@ -118,10 +118,10 @@ func TestDefaultFormatCommandPersistsConfig(t *testing.T) {
 
 	Init(&Config{
 		AppName:             "test-default",
-		DefaultOutputFormat: "yaml",
+		SerializationFormat: "yaml",
 	})
 
-	assert.Equal(t, "yaml", viper.GetString("output-format"))
+	assert.Equal(t, tableFormat, viper.GetString("output-format"))
 
 	out := execute("default-format toon")
 	assert.Contains(t, out, "output_format: toon")
