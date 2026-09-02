@@ -12,8 +12,9 @@ var updateGolden = flag.Bool("update", false, "rewrite the golden template rende
 
 // goldenSpec exercises the parts of the command templates that drifted when the
 // same blocks were copy-pasted per file: a grouped and an ungrouped operation,
-// every optional parameter type, enum/format/x-cli-no-validate parameters, a
-// body with an enum field, and a destructive operation.
+// every optional parameter type, enum/format/x-cli-no-validate parameters,
+// required and optional date-time parameters, a body with an enum and a
+// date-time field, and a destructive operation.
 const goldenSpec = `
 openapi: 3.0.3
 info:
@@ -32,6 +33,12 @@ paths:
         - {name: limit, in: query, schema: {type: integer}}
         - {name: ratio, in: query, schema: {type: number}}
         - {name: kind, in: query, schema: {type: string, enum: [internal, a2a]}}
+        # Two in one operation, so each normalization needs its own scope.
+        - {name: from, in: query, required: true, schema: {type: string, format: date-time}}
+        - {name: to, in: query, schema: {type: string, format: date-time}}
+        # Shares the Go name a from-derived temporary would take, which is why
+        # the normalization is scoped to a block rather than named after a param.
+        - {name: from-time, in: query, required: true, schema: {type: string}}
         - name: cursor
           in: query
           x-cli-no-validate: true
@@ -53,6 +60,7 @@ paths:
               type: object
               properties:
                 status: {type: string, enum: [active, archived]}
+                created_after: {type: string, format: date-time}
       responses:
         "200": {description: ok}
   /widgets/{id}:

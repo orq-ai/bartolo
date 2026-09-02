@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	bartolocli "github.com/orq-ai/bartolo/cli"
+
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/spf13/cobra"
 )
@@ -463,6 +465,9 @@ func TestBodyFieldTypeCoversCommonShapes(t *testing.T) {
                   "metadata": {"type": "object", "additionalProperties": {"type": "string"}},
                   "metadata_any": {"type": "object", "additionalProperties": true},
                   "color": {"type": "string", "enum": ["red", "green", "blue"]},
+                  "from": {"type": "string", "format": "date-time"},
+                  "expires_at": {"anyOf": [{"type": "string", "format": "date-time"}, {"type": "null"}]},
+                  "email": {"type": "string", "format": "email"},
                   "nested": {"type": "object", "properties": {"k": {"type": "string"}}}
                 }
               }
@@ -499,6 +504,10 @@ func TestBodyFieldTypeCoversCommonShapes(t *testing.T) {
 		"metadata":     "string-map",
 		"metadata_any": "string-map",
 		"color":        "enum-string",
+		"from":         "datetime",
+		// Nullable date-time keeps both behaviours; any other format stays plain.
+		"expires_at": "datetime-nullable",
+		"email":      "string",
 	}
 	for name, typ := range want {
 		if got[name] != typ {
@@ -1321,8 +1330,8 @@ paths:
 
 	rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", doc))
 
-	if !strings.Contains(rendered, `bartolocli.CheckParam("argument agent-id", paramAgentId, "uuid"`) {
-		t.Error("required path param with format: uuid should be checked")
+	if !strings.Contains(rendered, `bartolocli.NormalizeParam("argument agent-id", paramAgentId, "uuid"`) {
+		t.Errorf("required path param with format: uuid should be checked, got:\n%s", rendered)
 	}
 
 	// The enum sits behind an anyOf/null wrapper, which must be resolved, and
@@ -1339,6 +1348,214 @@ paths:
 	}
 	if strings.Contains(rendered, `CheckParam("--opaque-cursor"`) {
 		t.Error("x-cli-no-validate should suppress the check")
+	}
+}
+
+func TestGeneratedClientNormalizesDateTimeParams(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Date-time Param API
+  version: "1"
+paths:
+  /v3/traces/facets/{field}:
+    get:
+      operationId: ListFacetValues
+      summary: List facet values
+      parameters:
+        - in: path
+          name: field
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: from
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: from-time
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: cursor
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+`)
+
+	rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", doc))
+
+	// Required and optional alike.
+	for _, want := range []string{
+		`bartolocli.NormalizeParam("argument from", paramFrom, "date-time"`,
+		`bartolocli.NormalizeParam("--to", paramTo, "date-time"`,
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("date-time param should be normalized, missing %s in:\n%s", want, rendered)
+		}
+	}
+
+	// Each normalization writes back to its own parameter.
+	for _, want := range []string{"paramFrom = normalized", "paramTo = normalized"} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("a normalized value should be written back, missing %q in:\n%s", want, rendered)
+		}
+	}
+
+	// `from` and `from-time` both yield paramFromTime. A temporary by that name
+	// would assign the sibling at function scope — and still compile — sending
+	// from's value under both names. Hence the block.
+	if strings.Contains(rendered, "paramFromTime, err :=") {
+		t.Errorf("the temporary must not take a sibling parameter's name, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, `req = req.AddQuery("from-time", paramFromTime)`) {
+		t.Errorf("a sibling parameter should keep its own value, got:\n%s", rendered)
+	}
+
+	// No format: nothing to normalize, nothing to check.
+	if strings.Contains(rendered, `NormalizeParam("--cursor"`) || strings.Contains(rendered, `CheckParam("--cursor"`) {
+		t.Error("a plain string param should be neither normalized nor checked")
+	}
+}
+
+// Normalization has to beat the URL substitution, or the relative value reaches
+// the server verbatim. The empty check stays ahead of both, for its message.
+func TestPathDateTimeParamNormalizesBeforeTheURLIsBuilt(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Path Date-time API
+  version: "1"
+paths:
+  /events/{at}:
+    get:
+      operationId: GetAt
+      parameters:
+        - {name: at, in: path, required: true, schema: {type: string, format: date-time}}
+      responses:
+        "200":
+          description: ok
+`)
+
+	rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", doc))
+
+	normalize := strings.Index(rendered, `NormalizeParam("argument at"`)
+	substitute := strings.Index(rendered, `strings.Replace(url, "{at}"`)
+	empty := strings.Index(rendered, "cannot be empty")
+
+	if normalize < 0 || substitute < 0 || empty < 0 {
+		t.Fatalf("expected an empty check, a normalization and a substitution, got:\n%s", rendered)
+	}
+	if !(empty < normalize && normalize < substitute) {
+		t.Errorf("want empty check, then normalization, then substitution, got offsets %d/%d/%d in:\n%s", empty, normalize, substitute, rendered)
+	}
+}
+
+func TestDateTimeParamFlagAdvertisesRelativeValues(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Date-time Flag Help API
+  version: "1"
+paths:
+  /v3/logs/facets:
+    get:
+      operationId: ListLogFacets
+      summary: List log facets
+      parameters:
+        - in: query
+          name: to
+          description: Upper bound
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+	if len(api.Groups) != 1 {
+		t.Fatalf("expected the operation to land in one group, got %d", len(api.Groups))
+	}
+	group := api.Groups[0]
+	rendered := renderCommandTemplate("templates/generated_group_commands.tmpl", &CommandsTemplateData{
+		API:        api,
+		Group:      group,
+		Operations: group.Operations,
+		NeedsFmt:   commandFileNeedsFmt(group.Operations),
+	})
+
+	if !strings.Contains(rendered, `bartolocli.WithDateTimeHelp("Upper bound")`) {
+		t.Errorf("date-time flag help should point at the shared suffix, got:\n%s", rendered)
+	}
+}
+
+// The body-flag paragraph advertises relative timestamps, so it must only
+// appear where a field actually normalizes.
+func TestTimestampHelpOnlyWhereAFieldNormalizes(t *testing.T) {
+	const specFmt = `
+openapi: 3.0.3
+info:
+  title: Body Help API
+  version: "1"
+paths:
+  /things:
+    post:
+      operationId: MakeThing
+      summary: Make a thing
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+%s
+      responses:
+        "200":
+          description: ok
+`
+
+	const sentence = "Timestamp fields (`format: date-time`)"
+
+	for _, tc := range []struct {
+		name  string
+		props string
+		want  bool
+	}{
+		{"plain date-time", "                name: {type: string}\n                at: {type: string, format: date-time}", true},
+		{"no timestamp at all", "                name: {type: string}\n                count: {type: integer}", false},
+		{"nullable date-time", "                at: {type: string, format: date-time, nullable: true}", true},
+		// Resolves to a slice flag, which sends elements as typed.
+		{"array of date-times", "                at: {type: array, items: {type: string, format: date-time}}", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(specFmt, tc.props)))
+			if len(api.Groups) != 1 {
+				t.Fatalf("expected one group, got %d", len(api.Groups))
+			}
+			group := api.Groups[0]
+			rendered := renderCommandTemplate("templates/generated_group_commands.tmpl", &CommandsTemplateData{
+				API:        api,
+				Group:      group,
+				Operations: group.Operations,
+				NeedsFmt:   commandFileNeedsFmt(group.Operations),
+			})
+
+			if got := strings.Contains(rendered, sentence); got != tc.want {
+				t.Errorf("advertised relative timestamps = %v, want %v, in:\n%s", got, tc.want, rendered)
+			}
+		})
 	}
 }
 
@@ -1366,12 +1583,64 @@ paths:
           description: ok
 `
 
-	if rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(spec, "false")))); !strings.Contains(rendered, `CheckParam("--cursor"`) {
+	if rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(spec, "false")))); !strings.Contains(rendered, `NormalizeParam("--cursor"`) {
 		t.Errorf("x-cli-no-validate: false should leave the check in place, got:\n%s", rendered)
 	}
 
-	if rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(spec, "true")))); strings.Contains(rendered, `CheckParam("--cursor"`) {
+	if rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(spec, "true")))); strings.Contains(rendered, `NormalizeParam("--cursor"`) {
 		t.Errorf("x-cli-no-validate: true should suppress the check, got:\n%s", rendered)
+	}
+}
+
+// date-time is not a stricter-than-API constraint, so it survives the opt-out.
+func TestNoValidateKeepsDateTimeNormalization(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Ext Date-time API
+  version: "1"
+paths:
+  /things:
+    get:
+      operationId: ListThings
+      parameters:
+        - in: query
+          name: from
+          x-cli-no-validate: true
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: kind
+          x-cli-no-validate: true
+          schema:
+            type: string
+            enum: [a, b]
+      responses:
+        "200":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+	rendered := renderCommandTemplate("templates/generated_client.tmpl", api)
+
+	if !strings.Contains(rendered, `NormalizeParam("--from", paramFrom, "date-time"`) {
+		t.Errorf("date-time should still normalize under the opt-out, got:\n%s", rendered)
+	}
+	// The enum it was actually pointed at is still dropped.
+	if strings.Contains(rendered, `NormalizeParam("--kind"`) {
+		t.Errorf("an enum should still be dropped by the opt-out, got:\n%s", rendered)
+	}
+
+	group := api.Groups[0]
+	commands := renderCommandTemplate("templates/generated_group_commands.tmpl", &CommandsTemplateData{
+		API:        api,
+		Group:      group,
+		Operations: group.Operations,
+		NeedsFmt:   commandFileNeedsFmt(group.Operations),
+	})
+	if !strings.Contains(commands, "bartolocli.WithDateTimeHelp") {
+		t.Errorf("the flag help should survive the opt-out too, got:\n%s", commands)
 	}
 }
 
@@ -1483,6 +1752,73 @@ func renderRootAndGroup(t *testing.T, spec string) (string, string) {
 	}
 
 	return root, group
+}
+
+func TestRequiredArgsHelp(t *testing.T) {
+	if got := requiredArgsHelp(nil); got != "" {
+		t.Errorf("no params should render nothing, got %q", got)
+	}
+
+	got := requiredArgsHelp([]*Param{
+		{Name: "from", Description: "Lower bound", Format: "date-time"},
+		{Name: "kind", Description: "Which stream", Enum: []string{"traces", "logs"}},
+		{Name: "at", Format: "date-time", Enum: []string{"now", "yesterday"}},
+		{Name: "id", Format: "uuid"},
+	})
+
+	for _, want := range []string{
+		"## Arguments",
+		"- `from` — " + bartolocli.WithDateTimeHelp("Lower bound"),
+		"- `kind` — Which stream (one of: traces, logs)",
+		"- `at` — " + bartolocli.WithDateTimeHelp("(one of: now, yesterday)"),
+		"- `id`",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "`id` —") {
+		t.Errorf("a param with no description should have no dash, got:\n%s", got)
+	}
+}
+
+func TestParamDescriptionIsOneLine(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.0
+info:
+  title: Example
+  version: 1.0.0
+paths:
+  /things/{id}:
+    get:
+      operationId: getThing
+      summary: Get a thing
+      parameters:
+        - in: path
+          name: id
+          required: true
+          description: |-
+            The thing to fetch.
+
+            - a legacy id still works
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+	if len(api.Groups) != 1 || len(api.Groups[0].Operations) != 1 {
+		t.Fatalf("expected 1 grouped operation, got %d groups", len(api.Groups))
+	}
+	op := api.Groups[0].Operations[0]
+	if want := "The thing to fetch. - a legacy id still works"; op.RequiredParams[0].Description != want {
+		t.Errorf("want %q, got %q", want, op.RequiredParams[0].Description)
+	}
+	if strings.Contains(op.Long, "\n- a legacy") {
+		t.Errorf("a paragraph break should not start a second argument, got:\n%s", op.Long)
+	}
 }
 
 // A project written before `table` existed recorded its serialization under the

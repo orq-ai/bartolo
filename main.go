@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -460,6 +461,13 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 					"Scalar, nullable scalar (pass `null` for JSON null), enum, repeatable list (`--field a --field b`), " +
 					"and string map (`--field key=value`) fields use typed flags. " +
 					"Nested objects, arrays of objects, and polymorphic unions accept a JSON string (e.g. `--field '{\"k\":1}'`)."
+				// An enum or array date-time keeps its own flag type and is sent
+				// as typed, so the syntax must not be promised there.
+				if slices.ContainsFunc(bodyFields, func(f *BodyField) bool {
+					return f != nil && (f.Type == "datetime" || f.Type == "datetime-nullable")
+				}) {
+					description += " Timestamp fields (`format: date-time`) also accept a bare date or a relative value such as `24h`, `7d` or `now-24h`."
+				}
 			}
 			if len(renamedFlags) > 0 {
 				description += "\n\nRenamed flags (the original names belong to global flags):\n"
@@ -495,6 +503,15 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				if short == "" {
 					short = leafName
 				}
+			}
+
+			if args := requiredArgsHelp(requiredParams); args != "" {
+				// Cobra prints Long or Short, never both, so a Long that exists
+				// only for this section still has to carry the summary.
+				if description == "" {
+					description = short
+				}
+				description += args
 			}
 
 			use := usage(leafName, requiredParams)
@@ -761,6 +778,34 @@ func slug(operationID string) string {
 	}
 
 	return strings.Trim(string(out), "-")
+}
+
+// A required parameter reaches the user as a bare name on the usage line and
+// nowhere else, so its description, format and enum are repeated here. The
+// suffixes compose in the same order the params template applies them.
+func requiredArgsHelp(params []*Param) string {
+	if len(params) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("\n\n## Arguments\n")
+	for _, p := range params {
+		desc := strings.TrimSpace(p.Description)
+		if len(p.Enum) > 0 {
+			desc = strings.TrimSpace(desc + " (one of: " + strings.Join(p.Enum, ", ") + ")")
+		}
+		if p.Format == "date-time" {
+			desc = bartolocli.WithDateTimeHelp(desc)
+		}
+
+		b.WriteString("\n- `" + slug(p.Name) + "`")
+		if desc != "" {
+			b.WriteString(" — " + desc)
+		}
+	}
+
+	return b.String()
 }
 
 func usage(name string, requiredParams []*Param) string {
@@ -1224,10 +1269,17 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 			// Resolved here, not at render time, so there is nothing to skip further down.
 			var enum []string
 			var format string
-			if t == "string" && !extBool(p.Value.Extensions[ExtNoValidate]) && p.Value.Schema != nil {
-				enum = enumStrings(p.Value.Schema.Value)
+			if t == "string" && p.Value.Schema != nil {
+				noValidate := extBool(p.Value.Extensions[ExtNoValidate])
+				if !noValidate {
+					enum = enumStrings(p.Value.Schema.Value)
+				}
 				if effective, _ := effectiveBodySchema(p.Value.Schema.Value); effective != nil {
-					format = effective.Format
+					// date-time is not a stricter-than-API constraint — it only
+					// widens input — so it survives the opt-out.
+					if !noValidate || effective.Format == "date-time" {
+						format = effective.Format
+					}
 				}
 			}
 
@@ -1240,6 +1292,10 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 			if p.Value.Extensions[ExtDescription] != nil {
 				description = extStr(p.Value.Extensions[ExtDescription])
 			}
+			// A parameter description reaches the user as one line of flag
+			// usage or one bullet of the Arguments section, so a spec's
+			// paragraph breaks would split the line or start a second bullet.
+			description = strings.Join(strings.Fields(description), " ")
 
 			allParams = append(allParams, &Param{
 				Name:        p.Value.Name,
@@ -1564,10 +1620,29 @@ func bodyFieldType(schema *openapi3.Schema) string {
 	if base == "" {
 		return "json"
 	}
+	if base == "string" && isDateTimeSchema(effective, schema) {
+		// Nullable keeps both: NormalizeDateTime always rejects the "null"
+		// sentinel, so checking it first cannot shadow a timestamp.
+		if nullable {
+			return "datetime-nullable"
+		}
+		return "datetime"
+	}
 	if nullable {
 		return base + "-nullable"
 	}
 	return base
+}
+
+// isDateTimeSchema takes the original too: effectiveBodySchema returns the
+// branch of a single-branch anyOf/oneOf, and the wrapper may hold the `format`.
+func isDateTimeSchema(effective, original *openapi3.Schema) bool {
+	for _, schema := range []*openapi3.Schema{effective, original} {
+		if schema != nil && schema.Format == "date-time" {
+			return true
+		}
+	}
+	return false
 }
 
 // unionHasStringBranch reports whether a multi-branch `oneOf`/`anyOf` schema has

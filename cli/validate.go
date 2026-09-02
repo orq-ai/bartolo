@@ -55,6 +55,9 @@ func ValidateFormat(label, value, format string) error {
 // the CLI exits 2. Request-body fields are checked the same way, in
 // ApplyBodyFlags.
 //
+// Exported with no caller here: current templates reach it through
+// NormalizeParam, but CLIs generated before that change still call it.
+//
 // A schema that is stricter than the API it describes — `format: uuid` on an
 // API that issues prefixed IDs, an enum list that lags the deployed server —
 // would make this reject a request the server would have accepted. That is what
@@ -70,4 +73,23 @@ func CheckParam(label, value, format string, allowed []string) error {
 	}
 
 	return nil
+}
+
+// NormalizeParam checks a parameter and returns the value to send, and is the
+// only call path in generated code: a format that accepts wider input than it
+// sends is normalized first, every other one handed back unchanged.
+func NormalizeParam(label, value, format string, allowed []string) (string, error) {
+	if format == "date-time" {
+		normalized, err := NormalizeDateTime(value)
+		if err != nil {
+			return "", NewValueError(fmt.Errorf("%s: %w", label, err))
+		}
+		value = normalized
+	}
+
+	if err := CheckParam(label, value, format, allowed); err != nil {
+		return "", err
+	}
+
+	return value, nil
 }

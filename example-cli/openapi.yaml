@@ -18,6 +18,21 @@ paths:
         in: header
         schema:
           type: string
+      - name: since
+        in: query
+        # Required and optional date-time params render differently, so smoke
+        # compiles both shapes and asserts a bad value is refused locally.
+        description: Only echo events after this time.
+        required: true
+        schema:
+          type: string
+          format: date-time
+      - name: until
+        in: query
+        description: Only echo events before this time.
+        schema:
+          type: string
+          format: date-time
       - name: status
         in: query
         # Exercises schema-driven value checking: a value outside the enum is

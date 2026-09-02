@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/orq-ai/bartolo/cli"
 )
@@ -665,4 +666,99 @@ func TestBodyFieldFlagsDoNotCollideWithRequestBodyFlags(t *testing.T) {
 	// The real request-body flags kept their types.
 	assert.Equal(t, "string", cmd.Flags().Lookup("from-file").Value.Type())
 	assert.Equal(t, "bool", cmd.Flags().Lookup("example").Value.Type())
+}
+
+func TestApplyBodyFlagsNormalizesDateTime(t *testing.T) {
+	cli.PinTimeForTest(t, bodyTestNow)
+
+	fields := []cli.BodyField{
+		{Name: "from", FlagName: "from", Type: "datetime"},
+		{Name: "to", FlagName: "to", Type: "datetime"},
+	}
+
+	body := applyBody(t, fields, map[string][]string{
+		"from": {"24h"},
+		"to":   {"2026-08-31T17:40:00+02:00"},
+	}, ``)
+
+	var decoded struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &decoded))
+
+	assert.Equal(t, "2026-08-31T12:00:00Z", decoded.From)
+
+	// Offset and all, byte-for-byte.
+	assert.Equal(t, "2026-08-31T17:40:00+02:00", decoded.To)
+}
+
+var bodyTestNow = time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+
+// A nullable date-time normalizes like any other and still sends JSON null.
+func TestApplyBodyFlagsNullableDateTime(t *testing.T) {
+	cli.PinTimeForTest(t, bodyTestNow)
+
+	fields := []cli.BodyField{{Name: "expires_at", FlagName: "expires-at", Type: "datetime-nullable"}}
+
+	for _, tc := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"relative", "24h", `{"expires_at":"2026-08-31T12:00:00Z"}`},
+		{"explicit null", "null", `{"expires_at":null}`},
+		{"rfc3339 verbatim", "2026-08-31T17:40:00+02:00", `{"expires_at":"2026-08-31T17:40:00+02:00"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.JSONEq(t, tc.want, applyBody(t, fields, map[string][]string{"expires-at": {tc.value}}, ``))
+		})
+	}
+}
+
+// `from: 24h` means what `--from 24h` means.
+func TestShorthandNormalizesDateTimeFields(t *testing.T) {
+	cli.PinTimeForTest(t, bodyTestNow)
+
+	fields := []cli.BodyField{
+		{Name: "from", FlagName: "from", Type: "datetime"},
+		{Name: "note", FlagName: "note", Type: "string"},
+	}
+
+	cmd := &cobra.Command{Use: "test"}
+	cli.AddBodyFieldFlags(cmd, fields)
+	params := viper.New()
+	require.NoError(t, params.BindPFlags(cmd.Flags()))
+
+	body, err := cli.GetBodyWithFlags(cmd, "application/json", []string{"from: 24h, note: hi"}, params, fields)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"from":"2026-08-31T12:00:00Z","note":"hi"}`, body)
+
+	_, err = cli.GetBodyWithFlags(cmd, "application/json", []string{"from: banana"}, params, fields)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "from")
+	assert.Contains(t, err.Error(), "is not a timestamp")
+}
+
+func TestApplyBodyFlagsRejectsUnparseableDateTime(t *testing.T) {
+	fields := []cli.BodyField{{Name: "from", FlagName: "from", Type: "datetime"}}
+
+	cmd := &cobra.Command{Use: "test"}
+	cli.AddBodyFieldFlags(cmd, fields)
+	require.NoError(t, cmd.Flags().Set("from", "banana"))
+
+	params := viper.New()
+	require.NoError(t, params.BindPFlags(cmd.Flags()))
+
+	_, err := cli.ApplyBodyFlags(cmd, params, "application/json", ``, fields)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--from")
+	assert.Contains(t, err.Error(), "24h")
+}
+
+func TestDateTimeBodyFlagHelpMentionsRelativeValues(t *testing.T) {
+	cmd := &cobra.Command{Use: "test"}
+	cli.AddBodyFieldFlags(cmd, []cli.BodyField{{Name: "from", FlagName: "from", Type: "datetime"}})
+
+	assert.Contains(t, cmd.Flags().Lookup("from").Usage, cli.DateTimeFlagHelp)
 }

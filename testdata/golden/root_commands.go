@@ -20,16 +20,16 @@ func registerRootCommands(root *cobra.Command) {
 		var examples string
 
 		cmd := &cobra.Command{
-			Use:     "get-thing id",
+			Use:     "get-thing id from from-time",
 			Short:   "Get a thing",
-			Long:    bartolocli.Markdown(""),
+			Long:    bartolocli.Markdown("Get a thing\n\n## Arguments\n\n- `id`\n- `from` — (accepts RFC 3339 (2026-08-31T17:40:00Z), a date (2026-08-31) or date and time (2026-08-31 14:00:00), or a relative value such as 24h, 7d, 2w, 30m, now, now-24h, now+1h)\n- `from-time`"),
 			Example: examples,
-			Args:    cobra.MinimumNArgs(1),
+			Args:    cobra.MinimumNArgs(3),
 			RunE: func(cmd *cobra.Command, args []string) error {
 
 				bartolocli.MarkPassedFlags(cmd, params)
 
-				_, decoded, err := ExampleGetThing(args[0], params)
+				_, decoded, err := ExampleGetThing(args[0], args[1], args[2], params)
 				if err != nil {
 					return bartolocli.OperationError(err)
 				}
@@ -51,6 +51,7 @@ func registerRootCommands(root *cobra.Command) {
 		_ = cmd.RegisterFlagCompletionFunc("kind", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
 			return []string{"internal", "a2a"}, cobra.ShellCompDirectiveNoFileComp
 		})
+		cmd.Flags().String("to", "", bartolocli.WithDateTimeHelp(""))
 		cmd.Flags().String("cursor", "", "")
 		cmd.Flags().String("sess", "", " (one of: a, b)")
 		_ = cmd.RegisterFlagCompletionFunc("sess", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
