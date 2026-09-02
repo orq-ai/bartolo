@@ -1288,6 +1288,10 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 			if p.Value.Extensions[ExtDescription] != nil {
 				description = extStr(p.Value.Extensions[ExtDescription])
 			}
+			// A parameter description reaches the user as one line of flag
+			// usage or one bullet of the Arguments section, so a spec's
+			// paragraph breaks would split the line or start a second bullet.
+			description = strings.Join(strings.Fields(description), " ")
 
 			allParams = append(allParams, &Param{
 				Name:        p.Value.Name,

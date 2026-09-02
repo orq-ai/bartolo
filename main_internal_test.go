@@ -1781,3 +1781,42 @@ func TestRequiredArgsHelp(t *testing.T) {
 		t.Errorf("a param with no description should have no dash, got:\n%s", got)
 	}
 }
+
+func TestParamDescriptionIsOneLine(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.0
+info:
+  title: Example
+  version: 1.0.0
+paths:
+  /things/{id}:
+    get:
+      operationId: getThing
+      summary: Get a thing
+      parameters:
+        - in: path
+          name: id
+          required: true
+          description: |-
+            The thing to fetch.
+
+            - a legacy id still works
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+	if len(api.Groups) != 1 || len(api.Groups[0].Operations) != 1 {
+		t.Fatalf("expected 1 grouped operation, got %d groups", len(api.Groups))
+	}
+	op := api.Groups[0].Operations[0]
+	if want := "The thing to fetch. - a legacy id still works"; op.RequiredParams[0].Description != want {
+		t.Errorf("want %q, got %q", want, op.RequiredParams[0].Description)
+	}
+	if strings.Contains(op.Long, "\n- a legacy") {
+		t.Errorf("a paragraph break should not start a second argument, got:\n%s", op.Long)
+	}
+}
