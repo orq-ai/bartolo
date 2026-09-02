@@ -156,7 +156,7 @@ blocks need is a field on the operation itself (see Operation.PublicPrefix).
 				return nil, nil, errors.Wrap(err, "unmarshalling response failed")
 			}
 		} else {
-			return nil, nil, errors.Errorf("HTTP %d: %s", resp.StatusCode, resp.String())
+			return nil, nil, bartolocli.ResponseError(resp)
 		}
 
 		after := bartolocli.HandleAfter(handlerPath, params, resp, decoded)

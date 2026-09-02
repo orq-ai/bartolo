@@ -125,7 +125,7 @@ func ExampleGetThing(paramId string, paramFrom string, paramFromTime string, par
 			return nil, nil, errors.Wrap(err, "unmarshalling response failed")
 		}
 	} else {
-		return nil, nil, errors.Errorf("HTTP %d: %s", resp.StatusCode, resp.String())
+		return nil, nil, bartolocli.ResponseError(resp)
 	}
 
 	after := bartolocli.HandleAfter(handlerPath, params, resp, decoded)
@@ -163,7 +163,7 @@ func ExampleCreateWidget(params *viper.Viper, body string) (*gentleman.Response,
 			return nil, nil, errors.Wrap(err, "unmarshalling response failed")
 		}
 	} else {
-		return nil, nil, errors.Errorf("HTTP %d: %s", resp.StatusCode, resp.String())
+		return nil, nil, bartolocli.ResponseError(resp)
 	}
 
 	after := bartolocli.HandleAfter(handlerPath, params, resp, decoded)
@@ -202,7 +202,7 @@ func ExampleDeleteWidget(paramId string, params *viper.Viper) (*gentleman.Respon
 			return nil, nil, errors.Wrap(err, "unmarshalling response failed")
 		}
 	} else {
-		return nil, nil, errors.Errorf("HTTP %d: %s", resp.StatusCode, resp.String())
+		return nil, nil, bartolocli.ResponseError(resp)
 	}
 
 	after := bartolocli.HandleAfter(handlerPath, params, resp, decoded)

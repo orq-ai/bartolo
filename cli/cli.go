@@ -3,8 +3,10 @@ package cli
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"io/ioutil"
 	"os"
 	"path"
@@ -50,24 +52,30 @@ var tty bool
 
 // Config is used to pass settings to the CLI.
 type Config struct {
-	AppName             string
-	EnvPrefix           string
-	APIKeyEnvVar        string
-	DefaultOutputFormat string
-	Version             string
+	AppName      string
+	EnvPrefix    string
+	APIKeyEnvVar string
+
+	// SerializationFormat is what the CLI encodes with when it is not rendering
+	// a table: a piped or redirected run, a non-list command, a payload that is
+	// not a collection. One of OutputFormats except `table`, which cannot stand
+	// in for itself; anything else falls back to toon. `--output-format` always
+	// starts at `table`, so a user opts out of tables with `default-format`.
+	SerializationFormat string
+
+	Version string
 }
 
 // Init will set up the CLI.
 func Init(config *Config) {
-	initConfig(config.AppName, config.EnvPrefix, config.APIKeyEnvVar, config.DefaultOutputFormat)
+	initConfig(config.AppName, config.EnvPrefix, config.APIKeyEnvVar, config.SerializationFormat)
 	initCache(config.AppName)
 	authInitialized = false
+	resolvedOutputFormat = ""
 
-	// Determine if we are using a TTY or colored output is forced-on.
-	tty = false
-	if isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()) || viper.GetBool("color") {
-		tty = true
-	}
+	// Forced color makes tty true on a pipe, so tables key off terminal alone.
+	stdoutIsTerminal := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+	tty = stdoutIsTerminal || viper.GetBool("color")
 
 	if viper.GetBool("nocolor") {
 		// If forced off, ignore all of the above!
@@ -87,7 +95,7 @@ func Init(config *Config) {
 	UserAgentMiddleware()
 	LogMiddleware(tty)
 
-	Formatter = NewDefaultFormatter(tty)
+	Formatter = NewDefaultFormatter(tty, stdoutIsTerminal)
 
 	Root = &cobra.Command{
 		Use:     filepath.Base(os.Args[0]),
@@ -102,28 +110,16 @@ func Init(config *Config) {
 			if !ok {
 				return NewValueError(fmt.Errorf("--output-format: %q is not one of [%s]", format, outputFormatList()))
 			}
-			viper.Set("output-format", normalized)
+			resolvedOutputFormat = normalized
 
 			if err := applyServerSetting(cmd); err != nil {
 				return err
 			}
 
-			if viper.GetBool("json") {
-				viper.Set("output-format", "json")
-			}
-
 			if viper.GetBool("verbose") {
 				zerolog.SetGlobalLevel(zerolog.DebugLevel)
 
-				settings := viper.AllSettings()
-
-				for k := range settings {
-					if looksSensitiveKey(k) {
-						settings[k] = "**HIDDEN**"
-					}
-				}
-
-				log.Info().Fields(settings).Msg("Configuration")
+				log.Info().Fields(redactSettings(viper.AllSettings())).Msg("Configuration")
 			}
 
 			if PreRun != nil {
@@ -161,17 +157,14 @@ func Init(config *Config) {
 	initAgentCommands()
 
 	AddGlobalFlag("verbose", "", "Enable verbose log output", false)
-	AddGlobalFlag("output-format", "o", fmt.Sprintf("Output format [%s]", outputFormatList()), outputFormatOrDefault(config.DefaultOutputFormat))
-	AddGlobalFlag("json", "", "Alias for --output-format json", false)
+	AddGlobalFlag("output-format", "o", fmt.Sprintf("Output format [%s]", outputFormatList()), tableFormat)
+	AddGlobalFlag("columns", "", "Comma-separated columns to show in table output", "")
 	// Named `jmespath` rather than `query` so it cannot collide with the many
 	// endpoints whose request body or query string has a `query` field. The old
 	// `-q` shorthand went with it: it abbreviated a name that no longer exists.
-	//
-	// Note that `-j` is easily mistaken for `--json`, which deliberately has no
-	// shorthand. Because this flag takes a value, a stray `-j` consumes the next
-	// argument, so keep `--json` shorthand-free.
 	AddGlobalFlag("jmespath", "j", "Filter / project results using JMESPath", "")
-	AddGlobalFlag("raw", "", "Output result of --jmespath as raw rather than an escaped JSON string or list", false)
+	// Unwraps a scalar result for the shell rather than choosing a format, and suppresses the table; the serialization then comes from --output-format.
+	AddGlobalFlag("raw", "", "Print a string or scalar list result unquoted, one item per line, instead of serializing it", false)
 	AddGlobalFlag("server", "", "API base URL, e.g. https://api.example.com", "")
 }
 
@@ -231,13 +224,14 @@ func loadDotEnvFile(filename string) {
 	}
 }
 
-func initConfig(appName, envPrefix, apiKeyEnvVar, defaultOutputFormat string) {
+func initConfig(appName, envPrefix, apiKeyEnvVar, serializationFormat string) {
 	// One-time setup to ensure the path exists so we can write files into it
 	// later as needed.
 	configDir := path.Join(userHomeDir(), "."+appName)
 	if err := os.MkdirAll(configDir, 0700); err != nil {
 		panic(err)
 	}
+	narrowConfigDirPermissions(configDir)
 
 	// Load configuration from file(s) if provided.
 	viper.SetConfigName("config")
@@ -263,28 +257,112 @@ func initConfig(appName, envPrefix, apiKeyEnvVar, defaultOutputFormat string) {
 
 	migrateLegacyServerConfig(configDir)
 	viper.SetDefault("api-key-env-var", apiKeyEnvVar)
-	viper.SetDefault("output-format", outputFormatOrDefault(defaultOutputFormat))
+	viper.SetDefault("output-format", tableFormat)
+	configuredSerialization = serializationOrDefault(serializationFormat)
 }
 
-// outputFormats are the values accepted by `--output-format` / `-o` and by the
+// OutputFormats are the values accepted by `--output-format` / `-o` and by the
 // `default-format` command. Help text and error messages are built from this
-// list so they cannot drift apart from what is actually accepted.
-var outputFormats = []string{"json", "yaml", "toon"}
+// list so they cannot drift apart from what is actually accepted, and the
+// generator reads the same list so it cannot offer a `--default-format` that
+// the generated CLI would then reject.
+var OutputFormats = []string{"json", "yaml", "toon", tableFormat}
 
 func outputFormatList() string {
-	return strings.Join(outputFormats, ", ")
+	return strings.Join(OutputFormats, ", ")
+}
+
+// resolvedOutputFormat is the format for the command being run. It is process
+// state, not configuration: writing the normalized value back to
+// `output-format` would make it a viper override, which outranks the flag, so
+// the first command run in a process would pin the format for every later one.
+var resolvedOutputFormat string
+
+// configuredSerialization is Config.SerializationFormat, resolved once by Init.
+var configuredSerialization = tableFallbackFormat
+
+// OutputFormat is the format the running command should produce. A custom
+// command that renders its own output reads this rather than viper, which
+// still holds the raw, unnormalized value.
+func OutputFormat() string {
+	if resolvedOutputFormat != "" {
+		return resolvedOutputFormat
+	}
+
+	return outputFormatOrDefault(viper.GetString("output-format"))
+}
+
+// SetOutputFormat forces the format for one render, returning the func that
+// puts the command's own format back. A custom command that wants a table from
+// a CLI whose user pinned a serialization needs this; nothing else should.
+func SetOutputFormat(format string) (func(), error) {
+	normalized, ok := parseOutputFormat(format)
+	if !ok {
+		return nil, NewValueError(fmt.Errorf("--output-format: %q is not one of [%s]", format, outputFormatList()))
+	}
+
+	previous := resolvedOutputFormat
+	resolvedOutputFormat = normalized
+	return func() { resolvedOutputFormat = previous }, nil
+}
+
+// narrowConfigDirPermissions closes a credential file left world-readable by an
+// older version. writeFileAtomic creates 0600, but a file written before that,
+// or by another tool sharing the directory, keeps its mode forever because
+// nothing ever chmods it. MkdirAll leaves an existing directory's mode alone.
+func narrowConfigDirPermissions(configDir string) {
+	narrowPermissions(configDir, 0700)
+
+	// Every regular file, not a list of names: a guessed list misses backups,
+	// viper's other extensions, and writeFileAtomic's own temp file.
+	entries, err := os.ReadDir(configDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		// Type() is the dirent's own kind, so a symlink is skipped, not followed.
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		narrowPermissions(path.Join(configDir, entry.Name()), 0600)
+	}
+}
+
+func narrowPermissions(name string, want os.FileMode) {
+	// Lstat, not Stat: Chmod follows a symlink out of the directory.
+	info, err := os.Lstat(name)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			// Not absent: nothing here can say whether the file is private.
+			fmt.Fprintf(Stderr, "warning: could not check the permissions on %s: %v\n", name, err)
+		}
+		return
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+
+	// Only ever clear bits: a file already stricter than want is left alone.
+	perm := info.Mode().Perm()
+	if perm&^want == 0 {
+		return
+	}
+
+	if err := os.Chmod(name, perm&want); err != nil {
+		fmt.Fprintf(Stderr, "warning: %s is readable by other users and could not be narrowed: %v\n", name, err)
+	}
 }
 
 func outputFormatOrDefault(value string) string {
 	if format, ok := parseOutputFormat(value); ok {
 		return format
 	}
-	return "json"
+	return tableFormat
 }
 
 func parseOutputFormat(value string) (string, bool) {
 	normalized := strings.ToLower(strings.TrimSpace(value))
-	for _, format := range outputFormats {
+	for _, format := range OutputFormats {
 		if normalized == format {
 			return format, true
 		}
@@ -320,13 +398,13 @@ func applyServerSetting(cmd *cobra.Command) error {
 
 func newDefaultFormatCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "default-format [" + strings.Join(outputFormats, "|") + "]",
+		Use:   "default-format [" + strings.Join(OutputFormats, "|") + "]",
 		Short: "Show or persist the default output format",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return Formatter.Format(map[string]interface{}{
-					"output_format": viper.GetString("output-format"),
+					"output_format": OutputFormat(),
 				})
 			}
 

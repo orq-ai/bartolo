@@ -215,7 +215,7 @@ func TestAuthAddAliasStillResolves(t *testing.T) {
 }
 
 // The notice must land on stderr so stdout stays parseable. Cobra's own
-// Deprecated field prints through OutOrStderr, which corrupts `--json`.
+// Deprecated field prints through OutOrStderr, which corrupts `-o json`.
 func TestAddProfileDeprecatedAliasWarnsOnStderr(t *testing.T) {
 	initTestCLI(t, "", stubAuthHandler{})
 
@@ -369,15 +369,34 @@ func TestListProfilesToleratesMissingServer(t *testing.T) {
 
 func TestMaskIfSecret(t *testing.T) {
 	for _, field := range []string{"api_key", "API-Key", "access_token", "client_secret", "password"} {
-		assert.Equal(t, "sk-o********mnop", maskIfSecret(field, "sk-orq-abcdefghijklmnop"), field)
+		assert.Equal(t, "sk-o****mnop", maskIfSecret(field, "sk-orq-abcdefghijklmnop"), field)
 	}
 
-	// A short secret shows nothing at all, and the mask width never tracks the
-	// real length.
-	assert.Equal(t, "********", maskIfSecret("api_key", "sk-orq-abcd"))
+	// A short secret keeps a tail alone: four either side would rebuild it.
+	assert.Equal(t, "sk****cd", maskIfSecret("api_key", "sk-orq-abcd"))           // 11 runes
+	assert.Equal(t, "sk****op", maskIfSecret("api_key", "sk-orq-abcdefop"))       // 15 runes
+	assert.Equal(t, "sk-o****fghi", maskIfSecret("api_key", "sk-orq-abcdefghi"))  // 16 runes: the boundary
+	assert.Equal(t, "sk-o****mnop", maskIfSecret("api_key", "sk-orq-abcdefmnop")) // 17 runes
+	assert.Equal(t, "****-a", maskIfSecret("api_key", "sk-orq-a"))                // 8 runes: tail only
+	assert.Equal(t, "****rq", maskIfSecret("api_key", "sk-orq"))                  // 6 runes
+	assert.Equal(t, "****", maskIfSecret("api_key", "sk"))                        // 2 runes: a tail would be all of it
 
 	// Multi-byte secrets are cut on rune boundaries, not bytes.
-	assert.Equal(t, "日本語で********密ですね", maskIfSecret("password", "日本語ですごく長い秘密ですね"))
+	assert.Equal(t, "日本****すね", maskIfSecret("password", "日本語ですごく長い秘密ですね"))
+
+	// YAML decodes a numeric key as an int, no less a secret for it.
+	assert.Equal(t, "****", maskIfSecret("api_key", 1234567890))
+	assert.Equal(t, "****", maskIfSecret("api_key", map[string]interface{}{"a": "b"}))
+
+	// An empty secret has nothing to hide, and a mask would imply it is set.
+	assert.Equal(t, "", maskIfSecret("api_key", ""))
+
+	// `api_key:` decodes to nil, and a mask would report one that is not set.
+	assert.Nil(t, maskIfSecret("api_key", nil))
+
+	// An auth_url is where a key is exchanged, not a key.
+	assert.Equal(t, "https://id.orq.ai/authorize", maskIfSecret("auth_url", "https://id.orq.ai/authorize"))
+	assert.Equal(t, "https://id.orq.ai/token", maskIfSecret("token_endpoint", "https://id.orq.ai/token"))
 
 	// Non-secret fields pass through untouched.
 	assert.Equal(t, "https://api.orq.ai", maskIfSecret("base_url", "https://api.orq.ai"))
@@ -393,7 +412,7 @@ func TestListProfilesMasksSecretsAndHonorsJSON(t *testing.T) {
 	}
 
 	viper.Set("output-format", "json")
-	out := execute("auth profile list --json")
+	out := execute("auth profile list -o json")
 
 	assert.NotContains(t, out, secret)
 
@@ -405,17 +424,17 @@ func TestListProfilesMasksSecretsAndHonorsJSON(t *testing.T) {
 	}
 	assert.Len(t, decoded.Profiles, 1)
 	assert.Equal(t, "acme", decoded.Profiles[0]["name"])
-	assert.Equal(t, "sk-o********mnop", decoded.Profiles[0]["api_key"])
+	assert.Equal(t, "sk-o****mnop", decoded.Profiles[0]["api_key"])
 	assert.Equal(t, "https://acme.example.com", decoded.Profiles[0]["server"])
 }
 
-// `auth profile list --json` must emit the same object shape either way: the
+// `auth profile list -o json` must emit the same object shape either way: the
 // "message" key used to appear only when no profiles existed.
 func TestListProfilesJSONShapeIsStableAcrossEmptyAndNonEmpty(t *testing.T) {
 	initTestCLI(t, "", stubAuthHandler{})
 
 	viper.Set("output-format", "json")
-	empty := executeJSON(t, "auth profile list --json")
+	empty := executeJSON(t, "auth profile list -o json")
 
 	_, hasMessageWhenEmpty := empty["message"]
 	assert.True(t, hasMessageWhenEmpty, "expected a \"message\" key when no profiles are configured")
@@ -424,14 +443,14 @@ func TestListProfilesJSONShapeIsStableAcrossEmptyAndNonEmpty(t *testing.T) {
 	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, ""); err != nil {
 		t.Fatalf("saveAuthProfile: %v", err)
 	}
-	_, hasMessageWhenNonEmpty := executeJSON(t, "auth profile list --json")["message"]
+	_, hasMessageWhenNonEmpty := executeJSON(t, "auth profile list -o json")["message"]
 	assert.Equal(t, hasMessageWhenEmpty, hasMessageWhenNonEmpty, "the \"message\" key must be present (or absent) consistently, regardless of profile count")
 }
 
 // Regression test for the Critical defect: cobra's `Deprecated` field prints
 // its notice through the command's *out* writer once one is set, so it used
 // to land on stdout ahead of the JSON payload and break
-// `auth list-profiles --json | jq`. The notice must go to stderr instead,
+// `auth list-profiles -o json | jq`. The notice must go to stderr instead,
 // leaving stdout as valid JSON.
 func TestListProfilesDeprecatedAliasKeepsJSONCleanOnStdout(t *testing.T) {
 	initTestCLI(t, "", stubAuthHandler{})
@@ -441,7 +460,7 @@ func TestListProfilesDeprecatedAliasKeepsJSONCleanOnStdout(t *testing.T) {
 	}
 
 	viper.Set("output-format", "json")
-	stdout, stderr := executeStreams("auth list-profiles --json")
+	stdout, stderr := executeStreams("auth list-profiles -o json")
 
 	var decoded struct {
 		Profiles []map[string]interface{} `json:"profiles"`
@@ -542,7 +561,7 @@ func TestActiveProfileNameAndListingAreCaseInsensitive(t *testing.T) {
 	assert.NoError(t, Root.PersistentFlags().Set("profile", "ACME"))
 
 	assert.Equal(t, "acme", ActiveProfileName())
-	assert.Contains(t, execute("auth profile list --json"), `"active": true`)
+	assert.Contains(t, execute("auth profile list -o json"), `"active": true`)
 }
 
 // ProfileExists must agree with SelectProfile and ActiveProfileName, which
@@ -1079,7 +1098,7 @@ func TestInteractivePromptRejectsEmptyCredential(t *testing.T) {
 func TestAuthProfileCurrentNoneInForce(t *testing.T) {
 	initTestCLI(t, "", stubAuthHandler{})
 
-	decoded := executeJSON(t, "auth profile current --json")
+	decoded := executeJSON(t, "auth profile current -o json")
 
 	assert.Equal(t, "", decoded["active_profile"])
 	assert.Equal(t, "none", decoded["source"])
@@ -1089,7 +1108,7 @@ func TestAuthProfileCurrentNoneInForce(t *testing.T) {
 func TestAuthProfileCurrentFromFlagReportsMissing(t *testing.T) {
 	initTestCLI(t, "", stubAuthHandler{})
 
-	decoded := executeJSON(t, "--profile ghost auth profile current --json")
+	decoded := executeJSON(t, "--profile ghost auth profile current -o json")
 
 	assert.Equal(t, "ghost", decoded["active_profile"])
 	assert.Equal(t, "flag", decoded["source"])
@@ -1103,7 +1122,7 @@ func TestAuthProfileCurrentFromPersistedSelection(t *testing.T) {
 	}
 	execute("auth profile use acme")
 
-	decoded := executeJSON(t, "auth profile current --json")
+	decoded := executeJSON(t, "auth profile current -o json")
 
 	assert.Equal(t, "acme", decoded["active_profile"])
 	assert.Equal(t, "selected", decoded["source"])

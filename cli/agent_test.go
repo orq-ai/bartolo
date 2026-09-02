@@ -26,7 +26,7 @@ func TestDoctorCommand(t *testing.T) {
 			},
 		})
 
-		out := execute("doctor")
+		out := execute("doctor -o json")
 
 		var decoded map[string]interface{}
 		if err := json.Unmarshal([]byte(out), &decoded); err != nil {
@@ -52,7 +52,7 @@ func TestDoctorCommand(t *testing.T) {
 		viper.Set("profile", "")
 		execute("auth profile use acme")
 
-		out := execute("doctor")
+		out := execute("doctor -o json")
 
 		var decoded map[string]interface{}
 		if err := json.Unmarshal([]byte(out), &decoded); err != nil {
@@ -77,7 +77,7 @@ func TestRequestCommand(t *testing.T) {
 		AppName: "test",
 	})
 
-	out := execute("request get " + server.URL + "/hello")
+	out := execute("request get " + server.URL + "/hello -o json")
 
 	var decoded map[string]interface{}
 	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
@@ -102,7 +102,7 @@ func TestServerUseCommand(t *testing.T) {
 		{"description": "Staging", "url": "https://staging.example.com"},
 	})
 
-	out := execute("server use 1")
+	out := execute("server use 1 -o json")
 
 	var decoded map[string]interface{}
 	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
