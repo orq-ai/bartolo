@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	bartolocli "github.com/orq-ai/bartolo/cli"
+
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/spf13/cobra"
 )
@@ -1760,21 +1762,21 @@ func TestRequiredArgsHelp(t *testing.T) {
 	got := requiredArgsHelp([]*Param{
 		{Name: "from", Description: "Lower bound", Format: "date-time"},
 		{Name: "kind", Description: "Which stream", Enum: []string{"traces", "logs"}},
+		{Name: "at", Format: "date-time", Enum: []string{"now", "yesterday"}},
 		{Name: "id", Format: "uuid"},
 	})
 
 	for _, want := range []string{
 		"## Arguments",
-		// Same suffix an optional date-time flag carries.
-		"- `from` — Lower bound (accepts ",
+		"- `from` — " + bartolocli.WithDateTimeHelp("Lower bound"),
 		"- `kind` — Which stream (one of: traces, logs)",
+		"- `at` — " + bartolocli.WithDateTimeHelp("(one of: now, yesterday)"),
 		"- `id`",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
 	}
-	// A description-less param carries no trailing dash.
 	if strings.Contains(got, "`id` —") {
 		t.Errorf("a param with no description should have no dash, got:\n%s", got)
 	}

@@ -403,7 +403,6 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 			if operation.Extensions[ExtDescription] != nil {
 				description = extStr(operation.Extensions[ExtDescription])
 			}
-			description += requiredArgsHelp(requiredParams)
 
 			reqInfo := getRequestInfo(operation)
 			reqMt, reqSchema, reqExamples, bodyFields := reqInfo.mediaType, reqInfo.summary, reqInfo.examples, reqInfo.bodyFields
@@ -500,6 +499,15 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				if short == "" {
 					short = leafName
 				}
+			}
+
+			if args := requiredArgsHelp(requiredParams); args != "" {
+				// Cobra prints Long or Short, never both, so a Long that exists
+				// only for this section still has to carry the summary.
+				if description == "" {
+					description = short
+				}
+				description += args
 			}
 
 			use := usage(leafName, requiredParams)
@@ -768,11 +776,9 @@ func slug(operationID string) string {
 	return strings.Trim(string(out), "-")
 }
 
-// requiredArgsHelp renders the positional arguments into a Long section. A
-// required parameter appears only as a bare name on the usage line otherwise —
-// its description, format and enum reach the user nowhere. The suffixes match
-// what an optional flag of the same shape carries (see AddBodyFieldFlags and the
-// params template), so a required and an optional date-time read alike.
+// A required parameter reaches the user as a bare name on the usage line and
+// nowhere else, so its description, format and enum are repeated here. The
+// suffixes compose in the same order the params template applies them.
 func requiredArgsHelp(params []*Param) string {
 	if len(params) == 0 {
 		return ""
@@ -782,11 +788,11 @@ func requiredArgsHelp(params []*Param) string {
 	b.WriteString("\n\n## Arguments\n")
 	for _, p := range params {
 		desc := strings.TrimSpace(p.Description)
-		switch {
-		case p.Format == "date-time":
-			desc = bartolocli.WithDateTimeHelp(desc)
-		case len(p.Enum) > 0:
+		if len(p.Enum) > 0 {
 			desc = strings.TrimSpace(desc + " (one of: " + strings.Join(p.Enum, ", ") + ")")
+		}
+		if p.Format == "date-time" {
+			desc = bartolocli.WithDateTimeHelp(desc)
 		}
 
 		b.WriteString("\n- `" + slug(p.Name) + "`")
