@@ -47,7 +47,8 @@ func notATimestamp(value string) error {
 
 // NormalizeDateTime converts a user-supplied timestamp into RFC 3339.
 //
-//   - RFC 3339, returned verbatim so offsets and sub-second precision survive.
+//   - RFC 3339, returned unchanged apart from trimmed whitespace, so offsets
+//     and sub-second precision survive.
 //   - "2026-08-31", "2026-08-31 15:04:05" or "2026-08-31T15:04:05", read as UTC.
 //   - "now", "now-24h", "now+1h".
 //   - A bare duration, meaning that long ago: "24h", "7d", "30m", "2w", "1h30m".
