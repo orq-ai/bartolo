@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 
+	bartolocli "github.com/orq-ai/bartolo/cli"
+
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/spf13/cobra"
 )
@@ -1750,6 +1752,73 @@ func renderRootAndGroup(t *testing.T, spec string) (string, string) {
 	}
 
 	return root, group
+}
+
+func TestRequiredArgsHelp(t *testing.T) {
+	if got := requiredArgsHelp(nil); got != "" {
+		t.Errorf("no params should render nothing, got %q", got)
+	}
+
+	got := requiredArgsHelp([]*Param{
+		{Name: "from", Description: "Lower bound", Format: "date-time"},
+		{Name: "kind", Description: "Which stream", Enum: []string{"traces", "logs"}},
+		{Name: "at", Format: "date-time", Enum: []string{"now", "yesterday"}},
+		{Name: "id", Format: "uuid"},
+	})
+
+	for _, want := range []string{
+		"## Arguments",
+		"- `from` — " + bartolocli.WithDateTimeHelp("Lower bound"),
+		"- `kind` — Which stream (one of: traces, logs)",
+		"- `at` — " + bartolocli.WithDateTimeHelp("(one of: now, yesterday)"),
+		"- `id`",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "`id` —") {
+		t.Errorf("a param with no description should have no dash, got:\n%s", got)
+	}
+}
+
+func TestParamDescriptionIsOneLine(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.0
+info:
+  title: Example
+  version: 1.0.0
+paths:
+  /things/{id}:
+    get:
+      operationId: getThing
+      summary: Get a thing
+      parameters:
+        - in: path
+          name: id
+          required: true
+          description: |-
+            The thing to fetch.
+
+            - a legacy id still works
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+	if len(api.Groups) != 1 || len(api.Groups[0].Operations) != 1 {
+		t.Fatalf("expected 1 grouped operation, got %d groups", len(api.Groups))
+	}
+	op := api.Groups[0].Operations[0]
+	if want := "The thing to fetch. - a legacy id still works"; op.RequiredParams[0].Description != want {
+		t.Errorf("want %q, got %q", want, op.RequiredParams[0].Description)
+	}
+	if strings.Contains(op.Long, "\n- a legacy") {
+		t.Errorf("a paragraph break should not start a second argument, got:\n%s", op.Long)
+	}
 }
 
 // A project written before `table` existed recorded its serialization under the

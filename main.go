@@ -505,6 +505,15 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				}
 			}
 
+			if args := requiredArgsHelp(requiredParams); args != "" {
+				// Cobra prints Long or Short, never both, so a Long that exists
+				// only for this section still has to carry the summary.
+				if description == "" {
+					description = short
+				}
+				description += args
+			}
+
 			use := usage(leafName, requiredParams)
 			commandPath := use
 			if group != nil {
@@ -769,6 +778,34 @@ func slug(operationID string) string {
 	}
 
 	return strings.Trim(string(out), "-")
+}
+
+// A required parameter reaches the user as a bare name on the usage line and
+// nowhere else, so its description, format and enum are repeated here. The
+// suffixes compose in the same order the params template applies them.
+func requiredArgsHelp(params []*Param) string {
+	if len(params) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("\n\n## Arguments\n")
+	for _, p := range params {
+		desc := strings.TrimSpace(p.Description)
+		if len(p.Enum) > 0 {
+			desc = strings.TrimSpace(desc + " (one of: " + strings.Join(p.Enum, ", ") + ")")
+		}
+		if p.Format == "date-time" {
+			desc = bartolocli.WithDateTimeHelp(desc)
+		}
+
+		b.WriteString("\n- `" + slug(p.Name) + "`")
+		if desc != "" {
+			b.WriteString(" — " + desc)
+		}
+	}
+
+	return b.String()
 }
 
 func usage(name string, requiredParams []*Param) string {
@@ -1255,6 +1292,10 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 			if p.Value.Extensions[ExtDescription] != nil {
 				description = extStr(p.Value.Extensions[ExtDescription])
 			}
+			// A parameter description reaches the user as one line of flag
+			// usage or one bullet of the Arguments section, so a spec's
+			// paragraph breaks would split the line or start a second bullet.
+			description = strings.Join(strings.Fields(description), " ")
 
 			allParams = append(allParams, &Param{
 				Name:        p.Value.Name,
