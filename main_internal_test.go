@@ -1751,3 +1751,31 @@ func renderRootAndGroup(t *testing.T, spec string) (string, string) {
 
 	return root, group
 }
+
+func TestRequiredArgsHelp(t *testing.T) {
+	if got := requiredArgsHelp(nil); got != "" {
+		t.Errorf("no params should render nothing, got %q", got)
+	}
+
+	got := requiredArgsHelp([]*Param{
+		{Name: "from", Description: "Lower bound", Format: "date-time"},
+		{Name: "kind", Description: "Which stream", Enum: []string{"traces", "logs"}},
+		{Name: "id", Format: "uuid"},
+	})
+
+	for _, want := range []string{
+		"## Arguments",
+		// Same suffix an optional date-time flag carries.
+		"- `from` — Lower bound (accepts ",
+		"- `kind` — Which stream (one of: traces, logs)",
+		"- `id`",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	// A description-less param carries no trailing dash.
+	if strings.Contains(got, "`id` —") {
+		t.Errorf("a param with no description should have no dash, got:\n%s", got)
+	}
+}

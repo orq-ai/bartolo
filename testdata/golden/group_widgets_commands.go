@@ -120,7 +120,7 @@ func registerwidgetsCommands(root *cobra.Command) {
 		cmd := &cobra.Command{
 			Use:     "delete id",
 			Short:   "Delete a widget",
-			Long:    bartolocli.Markdown(""),
+			Long:    bartolocli.Markdown("\n\n## Arguments\n\n- `id`"),
 			Example: examples,
 			Args:    cobra.MinimumNArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {

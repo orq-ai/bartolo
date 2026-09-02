@@ -22,7 +22,7 @@ func registerRootCommands(root *cobra.Command) {
 		cmd := &cobra.Command{
 			Use:     "get-thing id from from-time",
 			Short:   "Get a thing",
-			Long:    bartolocli.Markdown(""),
+			Long:    bartolocli.Markdown("\n\n## Arguments\n\n- `id`\n- `from` — (accepts RFC 3339 (2026-08-31T17:40:00Z), a date (2026-08-31) or date and time (2026-08-31 14:00:00), or a relative value such as 24h, 7d, 2w, 30m, now, now-24h, now+1h)\n- `from-time`"),
 			Example: examples,
 			Args:    cobra.MinimumNArgs(3),
 			RunE: func(cmd *cobra.Command, args []string) error {
