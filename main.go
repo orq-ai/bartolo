@@ -1591,8 +1591,8 @@ func bodyFieldType(schema *openapi3.Schema) string {
 
 // isDateTimeSchema takes the original too: effectiveBodySchema returns the
 // branch of a single-branch anyOf/oneOf, and the wrapper may hold the `format`.
-func isDateTimeSchema(schemas ...*openapi3.Schema) bool {
-	for _, schema := range schemas {
+func isDateTimeSchema(effective, original *openapi3.Schema) bool {
+	for _, schema := range []*openapi3.Schema{effective, original} {
 		if schema != nil && schema.Format == "date-time" {
 			return true
 		}
