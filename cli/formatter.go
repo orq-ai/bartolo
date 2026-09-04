@@ -50,6 +50,9 @@ const (
 	// maxCellWidth keeps one long value from pushing other columns off screen.
 	maxCellWidth = 40
 
+	// maxCellItems is how many entries of a list value a cell shows before "…".
+	maxCellItems = 3
+
 	// defaultTableWidth is used when the terminal size is unavailable.
 	defaultTableWidth = 120
 )
@@ -488,7 +491,7 @@ func autoColumns(rows []map[string]interface{}) []string {
 	for _, row := range rows {
 		for key, value := range row {
 			switch value.(type) {
-			case nil, map[string]interface{}, []interface{}, []map[string]interface{}:
+			case nil, map[string]interface{}:
 			default:
 				scalar[key] = true
 			}
@@ -695,11 +698,19 @@ func objectRowsFromMaps(values []map[string]interface{}, allowEmpty bool) ([]map
 }
 
 func tableValue(value interface{}) (string, error) {
-	if value == nil {
+	switch typed := value.(type) {
+	case nil:
 		return "", nil
-	}
-	if stringValue, ok := value.(string); ok {
-		return stringValue, nil
+	case string:
+		return typed, nil
+	case []interface{}:
+		return listValue(typed)
+	case []map[string]interface{}:
+		items := make([]interface{}, len(typed))
+		for i, item := range typed {
+			items[i] = item
+		}
+		return listValue(items)
 	}
 
 	encoded, err := json.Marshal(value)
@@ -707,4 +718,20 @@ func tableValue(value interface{}) (string, error) {
 		return "", err
 	}
 	return string(encoded), nil
+}
+
+func listValue(items []interface{}) (string, error) {
+	parts := make([]string, 0, maxCellItems+1)
+	for i, item := range items {
+		if i == maxCellItems {
+			parts = append(parts, "…")
+			break
+		}
+		text, err := tableValue(item)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, text)
+	}
+	return strings.Join(parts, ", "), nil
 }
