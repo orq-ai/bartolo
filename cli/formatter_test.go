@@ -147,6 +147,25 @@ func TestDefaultFormatterRendersResourceNamedWrapper(t *testing.T) {
 	assert.Contains(t, out.String(), "│ one │")
 }
 
+func TestDefaultFormatterPrefersPopulatedWrapperOverEmptySibling(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
+		"matches":  []interface{}{map[string]interface{}{"id": "one"}},
+		"warnings": []interface{}{},
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "│ ID  │")
+	assert.Contains(t, out.String(), "│ one │")
+}
+
 func TestDefaultFormatterKeepsAmbiguousObjectAsJSON(t *testing.T) {
 	viper.Reset()
 	viper.Set("output-format", "json")
@@ -182,6 +201,45 @@ func TestDefaultFormatterReportsEmptyCollection(t *testing.T) {
 	})
 	assert.NoError(t, err)
 	assert.Equal(t, "No results.\n", out.String())
+}
+
+func TestDefaultFormatterReportsEmptyCustomNamedEnvelope(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+
+	out, errOut := new(bytes.Buffer), new(bytes.Buffer)
+	originalOut, originalErr := Stdout, Stderr
+	Stdout, Stderr = out, errOut
+	t.Cleanup(func() { Stdout, Stderr = originalOut, originalErr })
+
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
+		"matches": []interface{}{},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, "No results.\n", out.String())
+	assert.Empty(t, errOut.String())
+}
+
+func TestDefaultFormatterKeepsAmbiguousEmptyEnvelopeSerialized(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+
+	out, errOut := new(bytes.Buffer), new(bytes.Buffer)
+	originalOut, originalErr := Stdout, Stderr
+	Stdout, Stderr = out, errOut
+	t.Cleanup(func() { Stdout, Stderr = originalOut, originalErr })
+
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
+		"before": []interface{}{},
+		"after":  []interface{}{},
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, errOut.String(), "Not shown as a table")
+	assert.Contains(t, out.String(), "before")
 }
 
 func TestDefaultFormatterSummarizesEnvelopeInFooter(t *testing.T) {

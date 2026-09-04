@@ -170,9 +170,9 @@ info:
   title: List fields API
   version: "1"
 paths:
-  /files:
-    get:
-      operationId: listFiles
+  /files/search:
+    post:
+      operationId: searchFiles
       x-cli-list-fields:
         - name
         - id
@@ -206,8 +206,121 @@ paths:
 		t.Fatalf("unexpected list fields %q", got)
 	}
 	if !op.IsList {
-		t.Fatal("collection GET operation with list fields should use list formatting")
+		t.Fatal("POST operation with list fields should use list formatting")
 	}
+}
+
+func TestProcessAPIListExtensionControlsClassification(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		extensions string
+		wantList   bool
+	}{
+		{
+			name:       "explicit true marks a non-GET operation",
+			method:     "patch",
+			path:       "/files/{file_id}",
+			extensions: "      x-cli-list: true\n",
+			wantList:   true,
+		},
+		{
+			name:       "explicit false suppresses GET inference",
+			method:     "get",
+			path:       "/files",
+			extensions: "      x-cli-list: false\n",
+			wantList:   false,
+		},
+		{
+			name:   "list fields override explicit false",
+			method: "post",
+			path:   "/files/search",
+			extensions: "      x-cli-list: false\n" +
+				"      x-cli-list-fields: [name, id]\n",
+			wantList: true,
+		},
+		{
+			name:       "empty list fields do not mark a POST operation",
+			method:     "post",
+			path:       "/files/search",
+			extensions: "      x-cli-list-fields: []\n",
+			wantList:   false,
+		},
+		{
+			name:     "unmarked POST array response is not inferred",
+			method:   "post",
+			path:     "/files/search",
+			wantList: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := loadTestSpec(t, fmt.Sprintf(`
+openapi: 3.0.3
+info:
+  title: Explicit list API
+  version: "1"
+paths:
+  %s:
+    %s:
+      operationId: testListClassification
+%s      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  matches:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string}
+                        name: {type: string}
+`, tt.path, tt.method, tt.extensions))
+
+			api := ProcessAPI("example", doc)
+			operations := append([]*Operation(nil), api.Operations...)
+			for _, group := range api.Groups {
+				operations = append(operations, group.Operations...)
+			}
+			if len(operations) != 1 {
+				t.Fatalf("expected one generated operation, got %d", len(operations))
+			}
+			if got := operations[0].IsList; got != tt.wantList {
+				t.Fatalf("IsList = %t, want %t", got, tt.wantList)
+			}
+		})
+	}
+}
+
+func TestProcessAPIRejectsNonBooleanListExtension(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Malformed list API
+  version: "1"
+paths:
+  /files:
+    get:
+      operationId: listFiles
+      x-cli-list: "yes"
+      responses:
+        "200":
+          description: ok
+`)
+
+	defer func() {
+		if recover() == nil {
+			t.Fatal("a non-boolean x-cli-list should fail generation instead of being ignored")
+		}
+	}()
+
+	ProcessAPI("example", doc)
 }
 
 func TestProcessAPIRecognizesNestedCollectionResponse(t *testing.T) {

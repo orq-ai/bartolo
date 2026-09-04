@@ -545,23 +545,31 @@ func tableRows(data interface{}, requestedColumns []string) ([]map[string]interf
 		}
 	}
 
-	// Otherwise accept a wrapper named after the resource, such as `schedules`,
-	// as long as there is exactly one array of objects to choose from.
-	found := ""
-	var rows []map[string]interface{}
+	// Otherwise accept a wrapper named after the resource, such as `schedules`.
+	// A sole populated array wins even beside empty siblings such as
+	// `warnings: []`; a sole empty array only stands in when nothing is
+	// populated. Anything else is ambiguous and left to the serialized output.
+	populatedKey, emptyKey := "", ""
+	var populatedRows, emptyRows []map[string]interface{}
+	populated, empty := 0, 0
 	for key, value := range object {
-		result, valid := objectRowsValue(value, false)
+		result, valid := objectRowsValue(value, true)
 		if !valid {
 			continue
 		}
-		if found != "" {
-			// Ambiguous: leave it to the serialized output.
-			return nil, "", nil, false
+		if len(result) > 0 {
+			populated++
+			populatedKey, populatedRows = key, result
+			continue
 		}
-		found, rows = key, result
+		empty++
+		emptyKey, emptyRows = key, result
 	}
-	if found != "" {
-		return rows, found, object, true
+	if populated == 1 {
+		return populatedRows, populatedKey, object, true
+	}
+	if populated == 0 && empty == 1 {
+		return emptyRows, emptyKey, object, true
 	}
 	return nil, "", nil, false
 }

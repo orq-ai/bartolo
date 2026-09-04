@@ -99,27 +99,32 @@ Bartolo will synthesize a decent CLI from a plain schema, but it gets significan
 | `x-cli-group` | Force an operation into a higher-level noun. |
 | `x-cli-hidden` | Hide a path or operation from normal help. |
 | `x-cli-ignore` | Exclude a path, operation, or parameter entirely. |
-| `x-cli-list-fields` | Set the default columns for an interactive collection response. |
+| `x-cli-list` | Set to `true` to mark an operation as a collection, or `false` to suppress automatic collection detection. |
+| `x-cli-list-fields` | Set and order the default columns for an interactive collection response; a non-empty list also marks the operation as a collection. |
 | `x-cli-name` | Override a generated CLI name for an API, operation, or parameter. |
 | `x-cli-no-validate` | Set to `true` to skip the client-side `enum`/`format` check for a parameter, for a schema that is stricter than the API it describes. |
 | `x-cli-help-section` | Put a top-level command under a titled section in `--help`. |
 | `x-cli-waiters` | Add polling-based waiter commands and follow-up flags. |
 
-For example, a collection operation can define the default interactive
-columns while leaving the complete response available through `-o json` or a
-pipe:
+Collection paths and responses are inferred automatically for GET operations.
+For other HTTP methods, use `x-cli-list: true` to opt into inferred columns or
+provide `x-cli-list-fields`. A non-empty field list also marks the operation as
+a collection, while `x-cli-list: false` disables automatic GET inference.
+
+For example, a POST search can define the default interactive columns while
+leaving the complete response available through `-o json` or a pipe:
 
 ```yaml
 paths:
-  /widgets:
-    get:
+  /widgets/search:
+    post:
       x-cli-list-fields:
         - id
         - name
         - status
 ```
 
-Without the extension the columns are inferred from the response: nested
+Without `x-cli-list-fields` the columns are inferred from the response: nested
 objects and arrays are skipped, long values are truncated, and columns that do
 not fit the terminal are dropped from the right.
 

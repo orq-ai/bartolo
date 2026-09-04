@@ -100,6 +100,7 @@ const (
 	ExtGroup       = "x-cli-group"
 	ExtIgnore      = "x-cli-ignore"
 	ExtHidden      = "x-cli-hidden"
+	ExtList        = "x-cli-list"
 	ExtListFields  = "x-cli-list-fields"
 	ExtName        = "x-cli-name"
 	ExtHelpSection = "x-cli-help-section"
@@ -396,6 +397,14 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 			if operation.Extensions[ExtListFields] != nil {
 				mustDecodeExt(operation.Extensions[ExtListFields], &listFields)
 			}
+			var listOverride *bool
+			if operation.Extensions[ExtList] != nil {
+				mustDecodeExt(operation.Extensions[ExtList], &listOverride)
+			}
+			markedList := len(listFields) > 0 || (listOverride != nil && *listOverride)
+			inferenceDisabled := listOverride != nil && !*listOverride
+			isList := markedList || (!inferenceDisabled && strings.EqualFold(method, "get") &&
+				(isCollectionPath(path) || isCollectionResponse(operation)))
 
 			params := getParams(item, method)
 			requiredParams := getRequiredParams(params)
@@ -572,7 +581,7 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				BodyExample:    reqInfo.exampleBody,
 				BodyFields:     bodyFields,
 				Hidden:         hidden,
-				IsList:         strings.EqualFold(method, "get") && (isCollectionPath(path) || isCollectionResponse(operation) || len(listFields) > 0),
+				IsList:         isList,
 				ListFields:     listFields,
 				Group:          group,
 				HelpSection:    getPreferredStringExt(operation.Extensions, ExtHelpSection),
