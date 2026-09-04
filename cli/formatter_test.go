@@ -124,9 +124,36 @@ func TestDefaultFormatterSkipsNestedColumnsAndTruncatesCells(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Contains(t, out.String(), "│ ID  │")
 	assert.NotContains(t, out.String(), "PROMPT")
-	assert.NotContains(t, out.String(), "METADATA")
+	assert.Contains(t, out.String(), "METADATA")
+	assert.Contains(t, out.String(), "│ a, b ")
 	assert.Contains(t, out.String(), strings.Repeat("x", maxCellWidth-1)+"…")
 	assert.NotContains(t, out.String(), strings.Repeat("x", maxCellWidth+1))
+}
+
+func TestDefaultFormatterAbbreviatesLongListCells(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"id":     "one",
+			"tags":   []interface{}{"a", "b", "c", "d", "e"},
+			"scores": []interface{}{0.5, 1},
+			"items":  []interface{}{map[string]interface{}{"k": "v"}},
+			"none":   []interface{}{},
+		},
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "a, b, c, …")
+	assert.Contains(t, out.String(), "0.5, 1")
+	assert.Contains(t, out.String(), `{"k":"v"}`)
+	assert.Contains(t, out.String(), "NONE")
 }
 
 func TestDefaultFormatterRendersResourceNamedWrapper(t *testing.T) {
