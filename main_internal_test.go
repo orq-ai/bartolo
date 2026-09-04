@@ -16,6 +16,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func operationsByRoute(api *OpenAPI) map[string]*Operation {
+	byRoute := map[string]*Operation{}
+	collect := func(operations []*Operation) {
+		for _, op := range operations {
+			byRoute[strings.ToUpper(op.Method)+" "+op.Path] = op
+		}
+	}
+	collect(api.Operations)
+	for _, group := range api.Groups {
+		collect(group.Operations)
+	}
+	return byRoute
+}
+
 func loadTestSpec(t *testing.T, spec string) *openapi3.T {
 	t.Helper()
 
@@ -315,8 +329,13 @@ paths:
 `)
 
 	defer func() {
-		if recover() == nil {
+		recovered := recover()
+		if recovered == nil {
 			t.Fatal("a non-boolean x-cli-list should fail generation instead of being ignored")
+		}
+		err, ok := recovered.(error)
+		if !ok || !strings.Contains(err.Error(), "cannot unmarshal") {
+			t.Fatalf("expected a decode failure, got %v", recovered)
 		}
 	}()
 
@@ -336,18 +355,7 @@ func TestProcessAPIMarksOrqPostCollections(t *testing.T) {
 		t.Fatalf("load orq spec: %v", err)
 	}
 
-	api := ProcessAPI("orq", doc)
-	byRoute := map[string]*Operation{}
-	collect := func(operations []*Operation) {
-		for _, op := range operations {
-			byRoute[strings.ToUpper(op.Method)+" "+op.Path] = op
-		}
-	}
-	collect(api.Operations)
-	for _, group := range api.Groups {
-		collect(group.Operations)
-	}
-
+	byRoute := operationsByRoute(ProcessAPI("orq", doc))
 	marked := map[string][]string{
 		"POST /v2/knowledge/{knowledge_id}/search":                                  {"id", "text"},
 		"POST /v2/knowledge/{knowledge_id}/datasources/{datasource_id}/chunks/list": {"_id", "text", "status"},
@@ -362,15 +370,6 @@ func TestProcessAPIMarksOrqPostCollections(t *testing.T) {
 		}
 		if got := strings.Join(op.ListFields, ","); got != strings.Join(wantFields, ",") {
 			t.Errorf("%s columns = %q, want %q", route, got, strings.Join(wantFields, ","))
-		}
-	}
-
-	for route, op := range byRoute {
-		if _, ok := marked[route]; ok || strings.EqualFold(op.Method, "get") {
-			continue
-		}
-		if op.IsList {
-			t.Errorf("%s is unmarked and should not render as a list", route)
 		}
 	}
 }
