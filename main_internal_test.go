@@ -323,6 +323,58 @@ paths:
 	ProcessAPI("example", doc)
 }
 
+// The vendored orq.ai spec is the reason ENG-2942 exists: its POST collection
+// endpoints rendered as raw JSON. Drive the real document so a classifier or
+// extension change cannot quietly stop marking them.
+func TestProcessAPIMarksOrqPostCollections(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "orq", "openapi.json"))
+	if err != nil {
+		t.Fatalf("read orq spec: %v", err)
+	}
+	doc, err := loadOpenAPIDocument(data)
+	if err != nil {
+		t.Fatalf("load orq spec: %v", err)
+	}
+
+	api := ProcessAPI("orq", doc)
+	byRoute := map[string]*Operation{}
+	collect := func(operations []*Operation) {
+		for _, op := range operations {
+			byRoute[strings.ToUpper(op.Method)+" "+op.Path] = op
+		}
+	}
+	collect(api.Operations)
+	for _, group := range api.Groups {
+		collect(group.Operations)
+	}
+
+	marked := map[string][]string{
+		"POST /v2/knowledge/{knowledge_id}/search":                                  {"id", "text"},
+		"POST /v2/knowledge/{knowledge_id}/datasources/{datasource_id}/chunks/list": {"_id", "text", "status"},
+	}
+	for route, wantFields := range marked {
+		op, ok := byRoute[route]
+		if !ok {
+			t.Fatalf("%s is missing from the generated CLI", route)
+		}
+		if !op.IsList {
+			t.Errorf("%s should render as a list", route)
+		}
+		if got := strings.Join(op.ListFields, ","); got != strings.Join(wantFields, ",") {
+			t.Errorf("%s columns = %q, want %q", route, got, strings.Join(wantFields, ","))
+		}
+	}
+
+	for route, op := range byRoute {
+		if _, ok := marked[route]; ok || strings.EqualFold(op.Method, "get") {
+			continue
+		}
+		if op.IsList {
+			t.Errorf("%s is unmarked and should not render as a list", route)
+		}
+	}
+}
+
 func TestProcessAPIRecognizesNestedCollectionResponse(t *testing.T) {
 	doc := loadTestSpec(t, `
 openapi: 3.0.3
