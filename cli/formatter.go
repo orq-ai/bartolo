@@ -50,6 +50,9 @@ const (
 	// maxCellWidth keeps one long value from pushing other columns off screen.
 	maxCellWidth = 40
 
+	// maxCellItems is how many entries of a list value a cell shows before "…".
+	maxCellItems = 3
+
 	// defaultTableWidth is used when the terminal size is unavailable.
 	defaultTableWidth = 120
 )
@@ -458,7 +461,7 @@ func autoColumns(rows []map[string]interface{}) []string {
 	for _, row := range rows {
 		for key, value := range row {
 			switch value.(type) {
-			case nil, map[string]interface{}, []interface{}, []map[string]interface{}:
+			case nil, map[string]interface{}:
 			default:
 				scalar[key] = true
 			}
@@ -545,23 +548,31 @@ func tableRows(data interface{}, requestedColumns []string) ([]map[string]interf
 		}
 	}
 
-	// Otherwise accept a wrapper named after the resource, such as `schedules`,
-	// as long as there is exactly one array of objects to choose from.
-	found := ""
-	var rows []map[string]interface{}
+	// Otherwise accept a wrapper named after the resource, such as `schedules`.
+	// A sole populated array wins even beside empty siblings such as
+	// `warnings: []`; a sole empty array only stands in when nothing is
+	// populated. Anything else is ambiguous and left to the serialized output.
+	populatedKey, emptyKey := "", ""
+	var populatedRows, emptyRows []map[string]interface{}
+	populated, empty := 0, 0
 	for key, value := range object {
-		result, valid := objectRowsValue(value, false)
+		result, valid := objectRowsValue(value, true)
 		if !valid {
 			continue
 		}
-		if found != "" {
-			// Ambiguous: leave it to the serialized output.
-			return nil, "", nil, false
+		if len(result) > 0 {
+			populated++
+			populatedKey, populatedRows = key, result
+			continue
 		}
-		found, rows = key, result
+		empty++
+		emptyKey, emptyRows = key, result
 	}
-	if found != "" {
-		return rows, found, object, true
+	if populated == 1 {
+		return populatedRows, populatedKey, object, true
+	}
+	if populated == 0 && empty == 1 {
+		return emptyRows, emptyKey, object, true
 	}
 	return nil, "", nil, false
 }
@@ -599,11 +610,19 @@ func objectRowsFromMaps(values []map[string]interface{}, allowEmpty bool) ([]map
 }
 
 func tableValue(value interface{}) (string, error) {
-	if value == nil {
+	switch typed := value.(type) {
+	case nil:
 		return "", nil
-	}
-	if stringValue, ok := value.(string); ok {
-		return stringValue, nil
+	case string:
+		return typed, nil
+	case []interface{}:
+		return listValue(typed)
+	case []map[string]interface{}:
+		items := make([]interface{}, len(typed))
+		for i, item := range typed {
+			items[i] = item
+		}
+		return listValue(items)
 	}
 
 	encoded, err := json.Marshal(value)
@@ -611,4 +630,20 @@ func tableValue(value interface{}) (string, error) {
 		return "", err
 	}
 	return string(encoded), nil
+}
+
+func listValue(items []interface{}) (string, error) {
+	parts := make([]string, 0, maxCellItems+1)
+	for i, item := range items {
+		if i == maxCellItems {
+			parts = append(parts, "…")
+			break
+		}
+		text, err := tableValue(item)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, text)
+	}
+	return strings.Join(parts, ", "), nil
 }

@@ -16,6 +16,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func operationsByRoute(api *OpenAPI) map[string]*Operation {
+	byRoute := map[string]*Operation{}
+	collect := func(operations []*Operation) {
+		for _, op := range operations {
+			byRoute[strings.ToUpper(op.Method)+" "+op.Path] = op
+		}
+	}
+	collect(api.Operations)
+	for _, group := range api.Groups {
+		collect(group.Operations)
+	}
+	return byRoute
+}
+
 func loadTestSpec(t *testing.T, spec string) *openapi3.T {
 	t.Helper()
 
@@ -170,9 +184,9 @@ info:
   title: List fields API
   version: "1"
 paths:
-  /files:
-    get:
-      operationId: listFiles
+  /files/search:
+    post:
+      operationId: searchFiles
       x-cli-list-fields:
         - name
         - id
@@ -206,7 +220,157 @@ paths:
 		t.Fatalf("unexpected list fields %q", got)
 	}
 	if !op.IsList {
-		t.Fatal("collection GET operation with list fields should use list formatting")
+		t.Fatal("POST operation with list fields should use list formatting")
+	}
+}
+
+func TestProcessAPIListExtensionControlsClassification(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		extensions string
+		wantList   bool
+	}{
+		{
+			name:       "explicit true marks a non-GET operation",
+			method:     "patch",
+			path:       "/files/{file_id}",
+			extensions: "      x-cli-list: true\n",
+			wantList:   true,
+		},
+		{
+			name:       "explicit false suppresses GET inference",
+			method:     "get",
+			path:       "/files",
+			extensions: "      x-cli-list: false\n",
+			wantList:   false,
+		},
+		{
+			name:   "list fields override explicit false",
+			method: "post",
+			path:   "/files/search",
+			extensions: "      x-cli-list: false\n" +
+				"      x-cli-list-fields: [name, id]\n",
+			wantList: true,
+		},
+		{
+			name:       "empty list fields do not mark a POST operation",
+			method:     "post",
+			path:       "/files/search",
+			extensions: "      x-cli-list-fields: []\n",
+			wantList:   false,
+		},
+		{
+			name:     "unmarked POST array response is not inferred",
+			method:   "post",
+			path:     "/files/search",
+			wantList: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := loadTestSpec(t, fmt.Sprintf(`
+openapi: 3.0.3
+info:
+  title: Explicit list API
+  version: "1"
+paths:
+  %s:
+    %s:
+      operationId: testListClassification
+%s      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  matches:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string}
+                        name: {type: string}
+`, tt.path, tt.method, tt.extensions))
+
+			api := ProcessAPI("example", doc)
+			operations := append([]*Operation(nil), api.Operations...)
+			for _, group := range api.Groups {
+				operations = append(operations, group.Operations...)
+			}
+			if len(operations) != 1 {
+				t.Fatalf("expected one generated operation, got %d", len(operations))
+			}
+			if got := operations[0].IsList; got != tt.wantList {
+				t.Fatalf("IsList = %t, want %t", got, tt.wantList)
+			}
+		})
+	}
+}
+
+func TestProcessAPIRejectsNonBooleanListExtension(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Malformed list API
+  version: "1"
+paths:
+  /files:
+    get:
+      operationId: listFiles
+      x-cli-list: "yes"
+      responses:
+        "200":
+          description: ok
+`)
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("a non-boolean x-cli-list should fail generation instead of being ignored")
+		}
+		err, ok := recovered.(error)
+		if !ok || !strings.Contains(err.Error(), "cannot unmarshal") {
+			t.Fatalf("expected a decode failure, got %v", recovered)
+		}
+	}()
+
+	ProcessAPI("example", doc)
+}
+
+// The vendored orq.ai spec is the reason ENG-2942 exists: its POST collection
+// endpoints rendered as raw JSON. Drive the real document so a classifier or
+// extension change cannot quietly stop marking them.
+func TestProcessAPIMarksOrqPostCollections(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "orq", "openapi.json"))
+	if err != nil {
+		t.Fatalf("read orq spec: %v", err)
+	}
+	doc, err := loadOpenAPIDocument(data)
+	if err != nil {
+		t.Fatalf("load orq spec: %v", err)
+	}
+
+	byRoute := operationsByRoute(ProcessAPI("orq", doc))
+	marked := map[string][]string{
+		"POST /v2/knowledge/{knowledge_id}/search":                                  {"id", "text"},
+		"POST /v2/knowledge/{knowledge_id}/datasources/{datasource_id}/chunks/list": {"_id", "text", "status"},
+	}
+	for route, wantFields := range marked {
+		op, ok := byRoute[route]
+		if !ok {
+			t.Fatalf("%s is missing from the generated CLI", route)
+		}
+		if !op.IsList {
+			t.Errorf("%s should render as a list", route)
+		}
+		if got := strings.Join(op.ListFields, ","); got != strings.Join(wantFields, ",") {
+			t.Errorf("%s columns = %q, want %q", route, got, strings.Join(wantFields, ","))
+		}
 	}
 }
 
