@@ -137,7 +137,7 @@ func ExampleGetThing(paramId string, paramFrom string, paramFromTime string, par
 }
 
 // ExampleCreateWidget Create a widget
-func ExampleCreateWidget(params *viper.Viper, body string) (*gentleman.Response, interface{}, error) {
+func ExampleCreateWidget(params *viper.Viper, body string) (*gentleman.Response, map[string]interface{}, error) {
 	handlerPath := "widgets create"
 	server := bartolocli.ResolveServer()
 
@@ -156,7 +156,7 @@ func ExampleCreateWidget(params *viper.Viper, body string) (*gentleman.Response,
 		return nil, nil, errors.Wrap(err, "request failed")
 	}
 
-	var decoded interface{}
+	var decoded map[string]interface{}
 
 	if resp.StatusCode < 400 {
 		if err := bartolocli.UnmarshalResponse(resp, &decoded); err != nil {
@@ -168,7 +168,7 @@ func ExampleCreateWidget(params *viper.Viper, body string) (*gentleman.Response,
 
 	after := bartolocli.HandleAfter(handlerPath, params, resp, decoded)
 	if after != nil {
-		decoded = after
+		decoded = after.(map[string]interface{})
 	}
 
 	return resp, decoded, nil
@@ -208,6 +208,40 @@ func ExampleDeleteWidget(paramId string, params *viper.Viper) (*gentleman.Respon
 	after := bartolocli.HandleAfter(handlerPath, params, resp, decoded)
 	if after != nil {
 		decoded = after
+	}
+
+	return resp, decoded, nil
+}
+
+// ExampleSearchWidgets Search widgets
+func ExampleSearchWidgets(params *viper.Viper) (*gentleman.Response, map[string]interface{}, error) {
+	handlerPath := "widgets search"
+	server := bartolocli.ResolveServer()
+
+	url := server + "/widgets/search"
+
+	req := bartolocli.Client.Post().URL(url)
+
+	bartolocli.HandleBefore(handlerPath, params, req)
+
+	resp, err := req.Do()
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "request failed")
+	}
+
+	var decoded map[string]interface{}
+
+	if resp.StatusCode < 400 {
+		if err := bartolocli.UnmarshalResponse(resp, &decoded); err != nil {
+			return nil, nil, errors.Wrap(err, "unmarshalling response failed")
+		}
+	} else {
+		return nil, nil, bartolocli.ResponseError(resp)
+	}
+
+	after := bartolocli.HandleAfter(handlerPath, params, resp, decoded)
+	if after != nil {
+		decoded = after.(map[string]interface{})
 	}
 
 	return resp, decoded, nil

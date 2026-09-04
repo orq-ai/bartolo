@@ -62,7 +62,36 @@ paths:
                 status: {type: string, enum: [active, archived]}
                 created_after: {type: string, format: date-time}
       responses:
-        "200": {description: ok}
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  warnings:
+                    type: array
+                    items: {type: string}
+  /widgets/search:
+    post:
+      operationId: SearchWidgets
+      summary: Search widgets
+      x-cli-list-fields: [name, id]
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  matches:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string}
+                        name: {type: string}
   /widgets/{id}:
     delete:
       operationId: DeleteWidget
