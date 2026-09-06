@@ -337,6 +337,29 @@ func TestDefaultFormatterPrefersPopulatedWrapperOverEmptySibling(t *testing.T) {
 	assert.Contains(t, out.String(), "│ one │")
 }
 
+func TestDefaultFormatterInfersColumnsFromJMESPathProjection(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "data[].{id: id, model: model.id}")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
+		"data": []interface{}{map[string]interface{}{
+			"id":    "ag_1",
+			"name":  "support",
+			"model": map[string]interface{}{"id": "gpt-5"},
+		}},
+	}, "id", "name")
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "MODEL")
+	assert.Contains(t, out.String(), "gpt-5")
+	assert.NotContains(t, out.String(), "NAME")
+}
+
 func TestDefaultFormatterKeepsAmbiguousObjectAsJSON(t *testing.T) {
 	viper.Reset()
 	viper.Set("output-format", "json")

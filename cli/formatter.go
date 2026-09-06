@@ -118,7 +118,8 @@ func (f *DefaultFormatter) format(data interface{}, list bool, columns []string)
 			return err
 		}
 
-		data = result
+		// The schema's columns describe the original rows, not the projection.
+		data, columns = result, nil
 	}
 
 	override := ""
