@@ -306,7 +306,7 @@ func checkColumns(requestedColumns []string, rows []map[string]interface{}) erro
 	for _, column := range requestedColumns {
 		found := false
 		for _, row := range rows {
-			if _, ok := row[column]; ok {
+			if _, ok := tableField(row, column); ok {
 				found = true
 				break
 			}
@@ -318,6 +318,36 @@ func checkColumns(requestedColumns []string, rows []map[string]interface{}) erro
 	}
 
 	return nil
+}
+
+// tableField resolves a column name against a row. A direct key wins so
+// existing responses with a literal dot in a key keep working; otherwise a
+// dotted name walks nested JSON objects.
+func tableField(row map[string]interface{}, column string) (interface{}, bool) {
+	if value, ok := row[column]; ok {
+		return value, true
+	}
+
+	parts := strings.Split(column, ".")
+	if len(parts) < 2 {
+		return nil, false
+	}
+
+	var value interface{} = row
+	for _, part := range parts {
+		if part == "" {
+			return nil, false
+		}
+		object, ok := value.(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		value, ok = object[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return value, true
 }
 
 // renderTable reports false for anything that is not a collection so callers
@@ -352,7 +382,8 @@ func renderTable(data interface{}, requestedColumns []string, userColumns bool) 
 	for _, row := range rows {
 		cells := make([]string, len(headers))
 		for i, key := range headers {
-			value, err := tableValue(row[key])
+			rawValue, _ := tableField(row, key)
+			value, err := tableValue(rawValue)
 			if err != nil {
 				return false, err
 			}

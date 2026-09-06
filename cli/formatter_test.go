@@ -129,6 +129,80 @@ func TestDefaultFormatterSkipsNestedColumnsAndTruncatesCells(t *testing.T) {
 	assert.NotContains(t, out.String(), strings.Repeat("x", maxCellWidth+1))
 }
 
+func TestDefaultFormatterRendersDeclaredNestedColumns(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"id":    "agent_1",
+			"model": map[string]interface{}{"id": "model_1"},
+		},
+	}, "model.id")
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "│ MODEL . ID │")
+	assert.Contains(t, out.String(), "│ model_1    │")
+}
+
+func TestDefaultFormatterRendersExplicitNestedColumns(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	viper.Set("columns", "model.id")
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"id":    "agent_1",
+			"model": map[string]interface{}{"id": "model_1"},
+		},
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "│ MODEL . ID │")
+	assert.Contains(t, out.String(), "│ model_1    │")
+}
+
+func TestTableFieldPrefersLiteralDottedKey(t *testing.T) {
+	row := map[string]interface{}{
+		"model.id": "literal",
+		"model":    map[string]interface{}{"id": "nested"},
+	}
+
+	value, ok := tableField(row, "model.id")
+	assert.True(t, ok)
+	assert.Equal(t, "literal", value)
+}
+
+func TestDefaultFormatterRejectsUnknownNestedColumn(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	viper.Set("columns", "model.name")
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"model": map[string]interface{}{"id": "model_1"},
+		},
+	}, "model.name")
+	assert.ErrorContains(t, err, `--columns: "model.name" is not a field of the returned items`)
+	assert.Empty(t, out.String())
+}
+
 func TestDefaultFormatterRendersResourceNamedWrapper(t *testing.T) {
 	viper.Reset()
 	viper.Set("output-format", tableFormat)

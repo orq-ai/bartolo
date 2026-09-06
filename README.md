@@ -121,7 +121,9 @@ paths:
 
 Without the extension the columns are inferred from the response: nested
 objects and arrays are skipped, long values are truncated, and columns that do
-not fit the terminal are dropped from the right.
+not fit the terminal are dropped from the right. Declared or explicit columns
+can reach into nested objects with a dotted path such as `model.id` or
+`--columns model.id`.
 
 Bartolo also groups operations automatically from:
 
