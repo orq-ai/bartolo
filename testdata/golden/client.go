@@ -168,7 +168,11 @@ func ExampleCreateWidget(params *viper.Viper, body string) (*gentleman.Response,
 
 	after := bartolocli.HandleAfter(handlerPath, params, resp, decoded)
 	if after != nil {
-		decoded = after.(map[string]interface{})
+		replaced, ok := after.(map[string]interface{})
+		if !ok {
+			return nil, nil, errors.Errorf("after handler for %q returned %T, expected map[string]interface{}", handlerPath, after)
+		}
+		decoded = replaced
 	}
 
 	return resp, decoded, nil
@@ -241,7 +245,11 @@ func ExampleSearchWidgets(params *viper.Viper) (*gentleman.Response, map[string]
 
 	after := bartolocli.HandleAfter(handlerPath, params, resp, decoded)
 	if after != nil {
-		decoded = after.(map[string]interface{})
+		replaced, ok := after.(map[string]interface{})
+		if !ok {
+			return nil, nil, errors.Errorf("after handler for %q returned %T, expected map[string]interface{}", handlerPath, after)
+		}
+		decoded = replaced
 	}
 
 	return resp, decoded, nil

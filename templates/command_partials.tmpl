@@ -161,7 +161,15 @@ blocks need is a field on the operation itself (see Operation.PublicPrefix).
 
 		after := bartolocli.HandleAfter(handlerPath, params, resp, decoded)
 		if after != nil {
-			decoded = after{{ if ne .ReturnType "interface{}" }}.({{ .ReturnType }}){{ end }}
+{{- if ne .ReturnType "interface{}" }}
+			replaced, ok := after.({{ .ReturnType }})
+			if !ok {
+				return nil, nil, errors.Errorf("after handler for %q returned %T, expected {{ .ReturnType }}", handlerPath, after)
+			}
+			decoded = replaced
+{{- else }}
+			decoded = after
+{{- end }}
 		}
 
 		return resp, decoded, nil
