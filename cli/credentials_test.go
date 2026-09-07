@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/rs/zerolog"
-	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 )
@@ -73,8 +72,7 @@ func resetAuthSingletons() {
 	authInitialized = false
 	authCommand = nil
 	profileCommand = nil
-	authAddCommands = nil
-	authAddDeprecationNotices = map[*cobra.Command]string{}
+	authAddCommand = nil
 	AuthHandlers = make(map[string]AuthHandler)
 	registeredServers = nil
 }
@@ -172,7 +170,7 @@ func bootCLI(t *testing.T, home string) *bytes.Buffer {
 func TestAddProfileStoresServerFromGlobalFlag(t *testing.T) {
 	home := initTestCLI(t, "", stubAuthHandler{})
 
-	execute("auth add-profile --server https://orq.acme.internal acme secret")
+	execute("auth profile add --server https://orq.acme.internal acme secret")
 
 	viper.Set("profile", "acme")
 	profile := GetProfile()
@@ -192,50 +190,12 @@ func TestAddProfileIgnoresEnvAndConfigServer(t *testing.T) {
 	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
 	UseAuth("", stubAuthHandler{})
 
-	execute("auth add-profile acme secret")
+	execute("auth profile add acme secret")
 
 	viper.Set("profile", "acme")
 	if got, ok := GetProfile()["server"]; ok {
 		t.Fatalf("expected no server on profile, got %q", got)
 	}
-}
-
-// `auth add-profile` is a deprecated alias for `auth profile add`, but it
-// shipped on origin/main with an `add` alias of its own (`auth add`). This
-// branch dropped that alias without listing the break; it must be restored.
-func TestAuthAddAliasStillResolves(t *testing.T) {
-	initTestCLI(t, "", stubAuthHandler{})
-
-	execute("auth add acme secret")
-
-	viper.Set("profile", "acme")
-	if got := GetProfile()["api_key"]; got != "secret" {
-		t.Fatalf("expected saved api key via `auth add` alias, got %q", got)
-	}
-}
-
-// The notice must land on stderr so stdout stays parseable. Cobra's own
-// Deprecated field prints through OutOrStderr, which corrupts `-o json`.
-func TestAddProfileDeprecatedAliasWarnsOnStderr(t *testing.T) {
-	initTestCLI(t, "", stubAuthHandler{})
-
-	stdout, stderr := executeStreams("auth add-profile acme secret")
-
-	assert.Contains(t, stderr, `"add-profile" is deprecated`)
-	assert.Contains(t, stderr, "auth profile add")
-	assert.NotContains(t, stdout, "deprecated")
-}
-
-// Cobra runs only the leaf's hooks, so a notice on `add-profile` never fired
-// for a typed subcommand nested under it. It must fire for that spelling too.
-func TestAddProfileDeprecatedAliasWarnsOnStderrForTypedSubcommand(t *testing.T) {
-	initTestCLI(t, "oauth", stubAuthHandler{})
-
-	stdout, stderr := executeStreams("auth add-profile oauth acme secret")
-
-	assert.Contains(t, stderr, `"oauth" is deprecated`)
-	assert.Contains(t, stderr, "auth profile add")
-	assert.NotContains(t, stdout, "deprecated")
 }
 
 // With no env prefix, viper's mergeWithEnvPrefix reads a bare SERVER.
@@ -344,10 +304,32 @@ func TestAuthSetupBindsServer(t *testing.T) {
 	}
 }
 
+// The deprecated `auth add-profile` / `auth list-profiles` spellings, and
+// `auth add-profile`'s own `auth add` alias, are gone. Exercise the generated
+// CLI entry point so this checks the real exit status and diagnostics rather
+// than only Cobra's command lookup.
+func TestDeprecatedProfileSpellingsAreGone(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	for _, name := range []string{"add-profile", "add", "list-profiles"} {
+		stdout, stderr, code := executeForExit("auth " + name)
+		if code != ExitUsage {
+			t.Errorf("`auth %s` returned exit code %d, want %d", name, code, ExitUsage)
+		}
+		if stdout != "" {
+			t.Errorf("`auth %s` wrote to stdout: %q", name, stdout)
+		}
+		if !strings.Contains(stderr, `unknown command "`+name+`"`) {
+			t.Errorf("`auth %s` did not report an unknown command: %q", name, stderr)
+		}
+	}
+
+}
+
 func TestListProfilesRendersServerColumn(t *testing.T) {
 	serverFixture(t, "https://orq.acme.internal")
 
-	out := execute("auth list-profiles")
+	out := execute("auth profile list")
 
 	if !strings.Contains(out, "https://orq.acme.internal") {
 		t.Fatalf("expected profile server in table, got %q", out)
@@ -360,7 +342,7 @@ func TestListProfilesRendersServerColumn(t *testing.T) {
 func TestListProfilesToleratesMissingServer(t *testing.T) {
 	serverFixture(t, "")
 
-	out := execute("auth list-profiles")
+	out := execute("auth profile list")
 
 	if !strings.Contains(out, "acme") {
 		t.Fatalf("expected profile row, got %q", out)
@@ -424,12 +406,12 @@ func TestListProfilesMasksSecretsAndHonorsJSON(t *testing.T) {
 	}
 	assert.Len(t, decoded.Profiles, 1)
 	assert.Equal(t, "acme", decoded.Profiles[0]["name"])
+	assert.Equal(t, "", decoded.Profiles[0]["type"])
 	assert.Equal(t, "sk-o****mnop", decoded.Profiles[0]["api_key"])
 	assert.Equal(t, "https://acme.example.com", decoded.Profiles[0]["server"])
 }
 
-// `auth profile list -o json` must emit the same object shape either way: the
-// "message" key used to appear only when no profiles existed.
+// `auth profile list -o json` must emit the same object shape either way.
 func TestListProfilesJSONShapeIsStableAcrossEmptyAndNonEmpty(t *testing.T) {
 	initTestCLI(t, "", stubAuthHandler{})
 
@@ -437,41 +419,20 @@ func TestListProfilesJSONShapeIsStableAcrossEmptyAndNonEmpty(t *testing.T) {
 	empty := executeJSON(t, "auth profile list -o json")
 
 	_, hasMessageWhenEmpty := empty["message"]
-	assert.True(t, hasMessageWhenEmpty, "expected a \"message\" key when no profiles are configured")
-	assert.Empty(t, empty["profiles"])
+	assert.True(t, hasMessageWhenEmpty)
+	emptyProfiles, ok := empty["profiles"].([]interface{})
+	assert.True(t, ok, "empty response must include a profiles array")
+	assert.Len(t, emptyProfiles, 0)
 
 	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, ""); err != nil {
 		t.Fatalf("saveAuthProfile: %v", err)
 	}
-	_, hasMessageWhenNonEmpty := executeJSON(t, "auth profile list -o json")["message"]
-	assert.Equal(t, hasMessageWhenEmpty, hasMessageWhenNonEmpty, "the \"message\" key must be present (or absent) consistently, regardless of profile count")
-}
-
-// Regression test for the Critical defect: cobra's `Deprecated` field prints
-// its notice through the command's *out* writer once one is set, so it used
-// to land on stdout ahead of the JSON payload and break
-// `auth list-profiles -o json | jq`. The notice must go to stderr instead,
-// leaving stdout as valid JSON.
-func TestListProfilesDeprecatedAliasKeepsJSONCleanOnStdout(t *testing.T) {
-	initTestCLI(t, "", stubAuthHandler{})
-
-	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, ""); err != nil {
-		t.Fatalf("saveAuthProfile: %v", err)
-	}
-
-	viper.Set("output-format", "json")
-	stdout, stderr := executeStreams("auth list-profiles -o json")
-
-	var decoded struct {
-		Profiles []map[string]interface{} `json:"profiles"`
-	}
-	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
-		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout)
-	}
-	assert.Len(t, decoded.Profiles, 1)
-
-	assert.Contains(t, stderr, `"list-profiles" is deprecated`)
-	assert.Contains(t, stderr, "auth profile list")
+	nonEmpty := executeJSON(t, "auth profile list -o json")
+	_, hasMessageWhenNonEmpty := nonEmpty["message"]
+	assert.Equal(t, hasMessageWhenEmpty, hasMessageWhenNonEmpty)
+	nonEmptyProfiles, ok := nonEmpty["profiles"].([]interface{})
+	assert.True(t, ok, "non-empty response must include a profiles array")
+	assert.Len(t, nonEmptyProfiles, 1)
 }
 
 // `auth profile use` persists off the flag's viper key. Writing it to

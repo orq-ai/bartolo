@@ -331,7 +331,7 @@ func TestResolveProfileValue(t *testing.T) {
 	})
 }
 
-// looksSensitiveKey decides whether add-profile echoes the typed value.
+// looksSensitiveKey decides whether `auth profile add` echoes the typed value.
 func TestLooksSensitiveKey(t *testing.T) {
 	// The wire names come through the same predicate as the configuration
 	// ones: a name redacted in a header must not print in full in a profile.
@@ -386,7 +386,7 @@ func TestVerboseConfigMaskesAllSensitiveKeys(t *testing.T) {
 
 	profiles := redacted["profiles"].(map[string]interface{})
 	def := profiles["default"].(map[string]interface{})
-	// The dump shows nothing of a secret, unlike `auth list-profiles`.
+	// The dump shows nothing of a secret, unlike `auth profile list`.
 	if got := def["api_key"]; got != "**HIDDEN**" {
 		t.Errorf("nested api_key = %v, want **HIDDEN**", got)
 	}
