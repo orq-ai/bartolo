@@ -397,12 +397,14 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 			if operation.Extensions[ExtListFields] != nil {
 				mustDecodeExt(operation.Extensions[ExtListFields], &listFields)
 			}
-			var listOverride *bool
-			if operation.Extensions[ExtList] != nil {
-				mustDecodeExt(operation.Extensions[ExtList], &listOverride)
+			listOverride := extBool(operation.Extensions[ExtList])
+			hasListOverride := operation.Extensions[ExtList] != nil
+			if hasListOverride && !listOverride && len(listFields) > 0 {
+				panic(fmt.Errorf("%s %s: %s is false but %s declares columns; remove one of them",
+					strings.ToUpper(method), path, ExtList, ExtListFields))
 			}
-			markedList := len(listFields) > 0 || (listOverride != nil && *listOverride)
-			inferenceDisabled := listOverride != nil && !*listOverride
+			markedList := len(listFields) > 0 || listOverride
+			inferenceDisabled := hasListOverride && !listOverride
 			isList := markedList || (!inferenceDisabled && strings.EqualFold(method, "get") &&
 				(isCollectionPath(path) || isCollectionResponse(operation)))
 
@@ -691,19 +693,21 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 }
 
 // extBool returns the boolean value of an OpenAPI extension. A missing
-// extension is false; so is any non-boolean value, so `x-cli-no-validate:
-// false` means what it says rather than being read as mere presence.
+// extension is false, so `x-cli-no-validate: false` means what it says rather
+// than being read as mere presence. A present but non-boolean value fails
+// generation like every other malformed extension: a typo that silently
+// disables a flag is the failure mode this generator exists to avoid.
 func extBool(i interface{}) bool {
+	if i == nil {
+		return false
+	}
 	if b, ok := i.(bool); ok {
 		return b
 	}
 
 	var decoded bool
-	if raw, ok := i.(json.RawMessage); ok && json.Unmarshal(raw, &decoded) == nil {
-		return decoded
-	}
-
-	return false
+	mustDecodeExt(i, &decoded)
+	return decoded
 }
 
 // extStr returns the string value of an OpenAPI extension stored as a JSON

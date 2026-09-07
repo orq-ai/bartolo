@@ -249,19 +249,19 @@ func TestProcessAPIListExtensionControlsClassification(t *testing.T) {
 			wantList:   false,
 		},
 		{
-			name:   "list fields override explicit false",
-			method: "post",
-			path:   "/files/search",
-			extensions: "      x-cli-list: false\n" +
-				"      x-cli-list-fields: [name, id]\n",
-			wantList: true,
-		},
-		{
 			name:       "empty list fields do not mark a POST operation",
 			method:     "post",
 			path:       "/files/search",
 			extensions: "      x-cli-list-fields: []\n",
 			wantList:   false,
+		},
+		{
+			name:   "explicit true marks an operation with empty list fields",
+			method: "post",
+			path:   "/files/search",
+			extensions: "      x-cli-list: true\n" +
+				"      x-cli-list-fields: []\n",
+			wantList: true,
 		},
 		{
 			name:     "unmarked POST array response is not inferred",
@@ -299,19 +299,86 @@ paths:
                         name: {type: string}
 `, tt.path, tt.method, tt.extensions))
 
-			api := ProcessAPI("example", doc)
-			operations := append([]*Operation(nil), api.Operations...)
-			for _, group := range api.Groups {
-				operations = append(operations, group.Operations...)
+			byRoute := operationsByRoute(ProcessAPI("example", doc))
+			if len(byRoute) != 1 {
+				t.Fatalf("expected one generated operation, got %d", len(byRoute))
 			}
-			if len(operations) != 1 {
-				t.Fatalf("expected one generated operation, got %d", len(operations))
+			op, ok := byRoute[strings.ToUpper(tt.method)+" "+tt.path]
+			if !ok {
+				t.Fatalf("%s %s is missing from the generated CLI", tt.method, tt.path)
 			}
-			if got := operations[0].IsList; got != tt.wantList {
+			if got := op.IsList; got != tt.wantList {
 				t.Fatalf("IsList = %t, want %t", got, tt.wantList)
 			}
 		})
 	}
+}
+
+func TestProcessAPIRejectsNonBooleanNoValidateExtension(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Malformed no-validate API
+  version: "1"
+paths:
+  /files:
+    get:
+      operationId: listFiles
+      parameters:
+        - name: kind
+          in: query
+          x-cli-no-validate: "yes"
+          schema:
+            type: string
+            enum: [a, b]
+      responses:
+        "200":
+          description: ok
+`)
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("a non-boolean x-cli-no-validate should fail generation instead of being ignored")
+		}
+		err, ok := recovered.(error)
+		if !ok || !strings.Contains(err.Error(), "cannot unmarshal") {
+			t.Fatalf("expected a decode failure, got %v", recovered)
+		}
+	}()
+
+	ProcessAPI("example", doc)
+}
+
+func TestProcessAPIRejectsContradictoryListMetadata(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Contradictory list API
+  version: "1"
+paths:
+  /files/search:
+    post:
+      operationId: searchFiles
+      x-cli-list: false
+      x-cli-list-fields: [name, id]
+      responses:
+        "200":
+          description: ok
+`)
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("x-cli-list: false alongside declared columns should fail generation")
+		}
+		err, ok := recovered.(error)
+		if !ok || !strings.Contains(err.Error(), "declares columns") {
+			t.Fatalf("expected a contradiction failure, got %v", recovered)
+		}
+	}()
+
+	ProcessAPI("example", doc)
 }
 
 func TestProcessAPIRejectsNonBooleanListExtension(t *testing.T) {
@@ -344,9 +411,10 @@ paths:
 	ProcessAPI("example", doc)
 }
 
-// The vendored orq.ai spec is the reason ENG-2942 exists: its POST collection
-// endpoints rendered as raw JSON. Drive the real document so a classifier or
-// extension change cannot quietly stop marking them.
+// The two routes below are annotated in the vendored fixture so the classifier
+// runs against a real Speakeasy document rather than only synthetic specs. The
+// shipped orq CLI is generated elsewhere, so this pins generator behaviour and
+// guards the annotations against a re-vendor, not the customer-facing bug.
 func TestProcessAPIMarksOrqPostCollections(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("testdata", "orq", "openapi.json"))
 	if err != nil {

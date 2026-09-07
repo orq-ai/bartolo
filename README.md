@@ -99,7 +99,7 @@ Bartolo will synthesize a decent CLI from a plain schema, but it gets significan
 | `x-cli-group` | Force an operation into a higher-level noun. |
 | `x-cli-hidden` | Hide a path or operation from normal help. |
 | `x-cli-ignore` | Exclude a path, operation, or parameter entirely. |
-| `x-cli-list` | Set to `true` to mark an operation as a collection, or `false` to suppress automatic collection detection. |
+| `x-cli-list` | Set to `true` to mark an operation as a collection, or `false` to suppress automatic GET collection detection. |
 | `x-cli-list-fields` | Set and order the default columns for an interactive collection response; a non-empty list also marks the operation as a collection. |
 | `x-cli-name` | Override a generated CLI name for an API, operation, or parameter. |
 | `x-cli-no-validate` | Set to `true` to skip the client-side `enum`/`format` check for a parameter, for a schema that is stricter than the API it describes. |
@@ -109,7 +109,10 @@ Bartolo will synthesize a decent CLI from a plain schema, but it gets significan
 Collection paths and responses are inferred automatically for GET operations.
 For other HTTP methods, use `x-cli-list: true` to opt into inferred columns or
 provide `x-cli-list-fields`. A non-empty field list also marks the operation as
-a collection, while `x-cli-list: false` disables automatic GET inference.
+a collection, while `x-cli-list: false` disables automatic GET inference. An
+empty `x-cli-list-fields: []` marks nothing on its own, and combining
+`x-cli-list: false` with declared columns is a contradiction that fails
+generation.
 
 For example, a POST search can define the default interactive columns while
 leaving the complete response available through `-o json` or a pipe:
