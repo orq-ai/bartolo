@@ -577,41 +577,67 @@ func tableRows(data interface{}, requestedColumns []string) ([]map[string]interf
 		return nil, "", nil, false
 	}
 
-	// Conventional keys first, so a stray nested array is not mistaken for one.
-	keys := []string{"items", "data", "results", "records", "entries", "servers"}
-	for _, key := range keys {
-		if result, valid := objectRowsValue(object[key], true); valid {
-			return result, key, object, true
-		}
+	// A populated array always wins, so an empty `data` beside a populated
+	// `matches` does not report no results. Empty arrays only enter the running
+	// once nothing populated has, so a `warnings: []` sibling does not make a
+	// populated `matches` ambiguous.
+	if rows, key, ok := collectionCandidate(object, false); ok {
+		return rows, key, object, true
+	}
+	if rows, key, ok := collectionCandidate(object, true); ok {
+		return rows, key, object, true
+	}
+	return nil, "", nil, false
+}
+
+// conventionalKeys are envelope names that outrank a wrapper named after the
+// resource, so a stray nested array is not mistaken for the collection.
+var conventionalKeys = []string{"items", "data", "results", "records", "entries", "servers"}
+
+func collectionCandidate(object map[string]interface{}, allowEmpty bool) ([]map[string]interface{}, string, bool) {
+	// An empty array only speaks for the envelope when nothing else can be the
+	// payload. A populated array of non-objects is data no table can render, so
+	// `{"ids": ["a"], "warnings": []}` serializes rather than reporting no
+	// results over the ids.
+	if allowEmpty && hasUnrenderableArray(object) {
+		return nil, "", false
 	}
 
-	// Otherwise accept a wrapper named after the resource, such as `schedules`.
-	// A sole populated array wins even beside empty siblings such as
-	// `warnings: []`; a sole empty array only stands in when nothing is
-	// populated. Anything else is ambiguous and left to the serialized output.
-	populatedKey, emptyKey := "", ""
-	var populatedRows, emptyRows []map[string]interface{}
-	populated, empty := 0, 0
+	for _, key := range conventionalKeys {
+		if rows, valid := objectRowsValue(object[key], allowEmpty); valid {
+			return rows, key, true
+		}
+	}
+	return soleObjectArray(object, allowEmpty)
+}
+
+func hasUnrenderableArray(object map[string]interface{}) bool {
+	for _, value := range object {
+		if _, valid := objectRowsValue(value, true); valid {
+			continue
+		}
+		switch value.(type) {
+		case []interface{}, []map[string]interface{}:
+			return true
+		}
+	}
+	return false
+}
+
+func soleObjectArray(object map[string]interface{}, allowEmpty bool) ([]map[string]interface{}, string, bool) {
+	found := ""
+	var rows []map[string]interface{}
 	for key, value := range object {
-		result, valid := objectRowsValue(value, true)
+		result, valid := objectRowsValue(value, allowEmpty)
 		if !valid {
 			continue
 		}
-		if len(result) > 0 {
-			populated++
-			populatedKey, populatedRows = key, result
-			continue
+		if found != "" {
+			return nil, "", false
 		}
-		empty++
-		emptyKey, emptyRows = key, result
+		found, rows = key, result
 	}
-	if populated == 1 {
-		return populatedRows, populatedKey, object, true
-	}
-	if populated == 0 && empty == 1 {
-		return emptyRows, emptyKey, object, true
-	}
-	return nil, "", nil, false
+	return rows, found, found != ""
 }
 
 func objectRowsValue(value interface{}, allowEmpty bool) ([]map[string]interface{}, bool) {
