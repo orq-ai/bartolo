@@ -174,7 +174,7 @@ paths:
     get:
       operationId: listFiles
       x-cli-list-fields:
-        - name
+        - model.id
         - id
       responses:
         "200":
@@ -190,6 +190,11 @@ paths:
                       type: string
                     name:
                       type: string
+                    model:
+                      type: object
+                      properties:
+                        id:
+                          type: string
 `)
 
 	api := ProcessAPI("example", doc)
@@ -202,11 +207,33 @@ paths:
 	if op == nil {
 		t.Fatal("expected generated list operation")
 	}
-	if got := strings.Join(op.ListFields, ","); got != "name,id" {
+	if got := strings.Join(op.ListFields, ","); got != "model.id,id" {
 		t.Fatalf("unexpected list fields %q", got)
 	}
 	if !op.IsList {
 		t.Fatal("collection GET operation with list fields should use list formatting")
+	}
+
+	var rendered string
+	if len(api.Operations) > 0 {
+		rendered = renderCommandTemplate("templates/generated_root_commands.tmpl", &CommandsTemplateData{
+			API:        api,
+			Operations: api.Operations,
+			Waiters:    api.Waiters,
+			NeedsFmt:   commandFileNeedsFmt(api.Operations),
+		})
+	} else {
+		for _, group := range api.Groups {
+			rendered += renderCommandTemplate("templates/generated_group_commands.tmpl", &CommandsTemplateData{
+				API:        api,
+				Group:      group,
+				Operations: group.Operations,
+				NeedsFmt:   commandFileNeedsFmt(group.Operations),
+			})
+		}
+	}
+	if !strings.Contains(rendered, `FormatList(decoded, "model.id", "id")`) {
+		t.Fatalf("generated list command dropped nested list field: %s", rendered)
 	}
 }
 
