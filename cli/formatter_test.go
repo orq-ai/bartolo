@@ -172,6 +172,68 @@ func TestDefaultFormatterRendersExplicitNestedColumns(t *testing.T) {
 	assert.Contains(t, out.String(), "│ model_1    │")
 }
 
+func TestDefaultFormatterPrefersLiteralDottedColumn(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"model.id": "literal",
+			"model":    map[string]interface{}{"id": "nested"},
+		},
+	}, "model.id")
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "│ literal    │")
+	assert.NotContains(t, out.String(), "nested")
+}
+
+func TestDefaultFormatterRendersMixedNestedRows(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"model": map[string]interface{}{"id": "model_1"},
+		},
+		map[string]interface{}{
+			"model": "not-an-object",
+		},
+	}, "model.id")
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "model_1")
+}
+
+func TestDefaultFormatterRendersYAMLNestedMaps(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[interface{}]interface{}{
+			"model": map[interface{}]interface{}{"id": "model_1"},
+		},
+	}, "model.id")
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "│ model_1    │")
+}
+
 func TestTableFieldPrefersLiteralDottedKey(t *testing.T) {
 	row := map[string]interface{}{
 		"model.id": "literal",
@@ -198,8 +260,27 @@ func TestDefaultFormatterRejectsUnknownNestedColumn(t *testing.T) {
 		map[string]interface{}{
 			"model": map[string]interface{}{"id": "model_1"},
 		},
-	}, "model.name")
+	})
 	assert.ErrorContains(t, err, `--columns: "model.name" is not a field of the returned items`)
+	assert.Empty(t, out.String())
+}
+
+func TestDefaultFormatterRejectsUnknownDeclaredNestedColumn(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"model": map[string]interface{}{"id": "model_1"},
+		},
+	}, "model.name")
+	assert.ErrorContains(t, err, `declared column: "model.name" is not a field of the returned items`)
 	assert.Empty(t, out.String())
 }
 

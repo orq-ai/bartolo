@@ -298,7 +298,7 @@ func (f *DefaultFormatter) shouldRenderTable() bool {
 
 // checkColumns rejects a column no row has. A misspelled name would otherwise
 // render as a blank column, which reads as missing data rather than a typo.
-func checkColumns(requestedColumns []string, rows []map[string]interface{}) error {
+func checkColumns(requestedColumns []string, rows []map[string]interface{}, userColumns bool) error {
 	if len(requestedColumns) == 0 || len(rows) == 0 {
 		return nil
 	}
@@ -313,7 +313,11 @@ func checkColumns(requestedColumns []string, rows []map[string]interface{}) erro
 		}
 
 		if !found {
-			return NewValueError(fmt.Errorf("--columns: %q is not a field of the returned items", column))
+			prefix := "declared column"
+			if userColumns {
+				prefix = "--columns"
+			}
+			return NewValueError(fmt.Errorf("%s: %q is not a field of the returned items", prefix, column))
 		}
 	}
 
@@ -358,11 +362,8 @@ func renderTable(data interface{}, requestedColumns []string, userColumns bool) 
 		return false, nil
 	}
 
-	// Only a name someone typed can be a typo; the spec's own field list cannot.
-	if userColumns {
-		if err := checkColumns(requestedColumns, rows); err != nil {
-			return false, err
-		}
+	if err := checkColumns(requestedColumns, rows, userColumns); err != nil {
+		return false, err
 	}
 
 	headers := append([]string(nil), requestedColumns...)
@@ -559,6 +560,12 @@ func truncateCell(value string) string {
 }
 
 func tableRows(data interface{}, requestedColumns []string) ([]map[string]interface{}, string, map[string]interface{}, bool) {
+	normalized, ok := normalizeTableValue(data)
+	if !ok {
+		return nil, "", nil, false
+	}
+	data = normalized
+
 	if rows, ok := objectRowsValue(data, len(requestedColumns) > 0); ok {
 		return rows, "", nil, true
 	}
@@ -620,6 +627,58 @@ func objectRows(values []interface{}, allowEmpty bool) ([]map[string]interface{}
 		return nil, false
 	}
 	return rows, true
+}
+
+// normalizeTableValue unifies JSON and YAML object shapes for table rendering.
+func normalizeTableValue(value interface{}) (interface{}, bool) {
+	switch value := value.(type) {
+	case map[string]interface{}:
+		result := make(map[string]interface{}, len(value))
+		for key, child := range value {
+			normalized, ok := normalizeTableValue(child)
+			if !ok {
+				return nil, false
+			}
+			result[key] = normalized
+		}
+		return result, true
+	case map[interface{}]interface{}:
+		result := make(map[string]interface{}, len(value))
+		for key, child := range value {
+			name, ok := key.(string)
+			if !ok {
+				return nil, false
+			}
+			normalized, ok := normalizeTableValue(child)
+			if !ok {
+				return nil, false
+			}
+			result[name] = normalized
+		}
+		return result, true
+	case []interface{}:
+		result := make([]interface{}, len(value))
+		for i, child := range value {
+			normalized, ok := normalizeTableValue(child)
+			if !ok {
+				return nil, false
+			}
+			result[i] = normalized
+		}
+		return result, true
+	case []map[string]interface{}:
+		result := make([]interface{}, len(value))
+		for i, child := range value {
+			normalized, ok := normalizeTableValue(child)
+			if !ok {
+				return nil, false
+			}
+			result[i] = normalized
+		}
+		return result, true
+	default:
+		return value, true
+	}
 }
 
 func objectRowsFromMaps(values []map[string]interface{}, allowEmpty bool) ([]map[string]interface{}, bool) {
