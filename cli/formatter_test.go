@@ -300,118 +300,68 @@ func TestDefaultFormatterRejectsUnknownDeclaredNestedColumn(t *testing.T) {
 	assert.Empty(t, out.String())
 }
 
-func TestDefaultFormatterRendersResourceNamedWrapper(t *testing.T) {
-	viper.Reset()
-	viper.Set("output-format", tableFormat)
-	viper.Set("jmespath", "")
-	viper.Set("raw", false)
-	out := new(bytes.Buffer)
-	original := Stdout
-	Stdout = out
-	t.Cleanup(func() { Stdout = original })
+// Every envelope shape the table extractor classifies, in one place. A
+// reviewer's A/B run against main caught a regression here that reading the
+// diff did not, so the shapes are pinned as a table rather than as a test each
+// time one is found.
+func TestDefaultFormatterClassifiesEnvelopeShapes(t *testing.T) {
+	const (
+		table      = "table"
+		noResults  = "no results"
+		serialized = "serialized"
+	)
 
-	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
-		"schedules": []interface{}{map[string]interface{}{"id": "one"}},
-	})
-	assert.NoError(t, err)
-	assert.Contains(t, out.String(), "│ ID  │")
-	assert.Contains(t, out.String(), "│ one │")
-}
+	rowOne := map[string]interface{}{"id": "one"}
+	rowTwo := map[string]interface{}{"id": "two"}
 
-func TestDefaultFormatterPrefersPopulatedWrapperOverEmptySibling(t *testing.T) {
-	viper.Reset()
-	viper.Set("output-format", tableFormat)
-	viper.Set("jmespath", "")
-	viper.Set("raw", false)
-	out := new(bytes.Buffer)
-	original := Stdout
-	Stdout = out
-	t.Cleanup(func() { Stdout = original })
+	tests := []struct {
+		name     string
+		data     interface{}
+		want     string
+		wantCell string
+	}{
+		{"resource-named wrapper", map[string]interface{}{"schedules": []interface{}{rowOne}}, table, "one"},
+		{"conventional key", map[string]interface{}{"data": []interface{}{rowOne}}, table, "one"},
+		{"populated beside an empty sibling", map[string]interface{}{"matches": []interface{}{rowOne}, "warnings": []interface{}{}}, table, "one"},
+		{"populated beside an empty conventional key", map[string]interface{}{"data": []interface{}{}, "matches": []interface{}{rowOne}}, table, "one"},
+		{"conventional key wins among populated arrays", map[string]interface{}{"data": []interface{}{rowOne}, "matches": []interface{}{rowTwo}}, table, "one"},
+		{"sole empty envelope", map[string]interface{}{"matches": []interface{}{}}, noResults, ""},
+		{"sole empty envelope beside a scalar", map[string]interface{}{"matches": []interface{}{}, "total": 0}, noResults, ""},
+		{"empty peer arrays", map[string]interface{}{"before": []interface{}{}, "after": []interface{}{}}, serialized, ""},
+		{"two populated arrays", map[string]interface{}{"input": []interface{}{rowOne}, "output": []interface{}{rowTwo}}, serialized, ""},
+		{"scalar array beside an empty sibling", map[string]interface{}{"ids": []interface{}{"a", "b"}, "warnings": []interface{}{}}, serialized, ""},
+		{"scalar array beside an empty conventional key", map[string]interface{}{"data": []interface{}{}, "ids": []interface{}{"a", "b"}}, serialized, ""},
+		{"no array at all", map[string]interface{}{"id": "one"}, serialized, ""},
+	}
 
-	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
-		"matches":  []interface{}{map[string]interface{}{"id": "one"}},
-		"warnings": []interface{}{},
-	})
-	assert.NoError(t, err)
-	assert.Contains(t, out.String(), "│ ID  │")
-	assert.Contains(t, out.String(), "│ one │")
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			viper.Reset()
+			viper.Set("output-format", tableFormat)
+			viper.Set("jmespath", "")
+			viper.Set("raw", false)
+			out, errOut := new(bytes.Buffer), new(bytes.Buffer)
+			originalOut, originalErr := Stdout, Stderr
+			Stdout, Stderr = out, errOut
+			t.Cleanup(func() { Stdout, Stderr = originalOut, originalErr })
 
-func TestDefaultFormatterPrefersPopulatedWrapperOverEmptyConventionalKey(t *testing.T) {
-	viper.Reset()
-	viper.Set("output-format", tableFormat)
-	viper.Set("jmespath", "")
-	viper.Set("raw", false)
-	out := new(bytes.Buffer)
-	original := Stdout
-	Stdout = out
-	t.Cleanup(func() { Stdout = original })
+			assert.NoError(t, NewDefaultFormatter(true, true).FormatList(tt.data))
 
-	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
-		"data":    []interface{}{},
-		"matches": []interface{}{map[string]interface{}{"id": "one"}},
-	})
-	assert.NoError(t, err)
-	assert.NotContains(t, out.String(), "No results.")
-	assert.Contains(t, out.String(), "│ one │")
-}
-
-func TestDefaultFormatterPrefersConventionalKeyAmongPopulatedArrays(t *testing.T) {
-	viper.Reset()
-	viper.Set("output-format", tableFormat)
-	viper.Set("jmespath", "")
-	viper.Set("raw", false)
-	out := new(bytes.Buffer)
-	original := Stdout
-	Stdout = out
-	t.Cleanup(func() { Stdout = original })
-
-	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
-		"data":    []interface{}{map[string]interface{}{"id": "wanted"}},
-		"matches": []interface{}{map[string]interface{}{"id": "other"}},
-	})
-	assert.NoError(t, err)
-	assert.Contains(t, out.String(), "wanted")
-	assert.NotContains(t, out.String(), "other")
-}
-
-func TestDefaultFormatterKeepsScalarArrayBesideEmptySiblingSerialized(t *testing.T) {
-	viper.Reset()
-	viper.Set("output-format", tableFormat)
-	viper.Set("jmespath", "")
-	viper.Set("raw", false)
-	out, errOut := new(bytes.Buffer), new(bytes.Buffer)
-	originalOut, originalErr := Stdout, Stderr
-	Stdout, Stderr = out, errOut
-	t.Cleanup(func() { Stdout, Stderr = originalOut, originalErr })
-
-	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
-		"ids":      []interface{}{"a", "b"},
-		"warnings": []interface{}{},
-	})
-	assert.NoError(t, err)
-	assert.NotContains(t, out.String(), "No results.")
-	assert.Contains(t, out.String(), "ids")
-	assert.Contains(t, errOut.String(), "Not shown as a table")
-}
-
-func TestDefaultFormatterKeepsScalarArrayBesideEmptyConventionalKeySerialized(t *testing.T) {
-	viper.Reset()
-	viper.Set("output-format", tableFormat)
-	viper.Set("jmespath", "")
-	viper.Set("raw", false)
-	out, errOut := new(bytes.Buffer), new(bytes.Buffer)
-	originalOut, originalErr := Stdout, Stderr
-	Stdout, Stderr = out, errOut
-	t.Cleanup(func() { Stdout, Stderr = originalOut, originalErr })
-
-	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
-		"data": []interface{}{},
-		"ids":  []interface{}{"a", "b"},
-	})
-	assert.NoError(t, err)
-	assert.NotContains(t, out.String(), "No results.")
-	assert.Contains(t, out.String(), "ids")
+			switch tt.want {
+			case table:
+				assert.Contains(t, out.String(), "│")
+				assert.Contains(t, out.String(), tt.wantCell)
+				assert.Empty(t, errOut.String())
+			case noResults:
+				assert.Equal(t, "No results.\n", out.String())
+				assert.Empty(t, errOut.String())
+			case serialized:
+				assert.NotContains(t, out.String(), "No results.")
+				assert.NotContains(t, out.String(), "│")
+				assert.Contains(t, errOut.String(), "Not shown as a table")
+			}
+		})
+	}
 }
 
 func TestDefaultFormatterInfersColumnsFromJMESPathProjection(t *testing.T) {
@@ -472,45 +422,6 @@ func TestDefaultFormatterReportsEmptyCollection(t *testing.T) {
 	})
 	assert.NoError(t, err)
 	assert.Equal(t, "No results.\n", out.String())
-}
-
-func TestDefaultFormatterReportsEmptyCustomNamedEnvelope(t *testing.T) {
-	viper.Reset()
-	viper.Set("output-format", tableFormat)
-	viper.Set("jmespath", "")
-	viper.Set("raw", false)
-
-	out, errOut := new(bytes.Buffer), new(bytes.Buffer)
-	originalOut, originalErr := Stdout, Stderr
-	Stdout, Stderr = out, errOut
-	t.Cleanup(func() { Stdout, Stderr = originalOut, originalErr })
-
-	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
-		"matches": []interface{}{},
-	})
-	assert.NoError(t, err)
-	assert.Equal(t, "No results.\n", out.String())
-	assert.Empty(t, errOut.String())
-}
-
-func TestDefaultFormatterKeepsAmbiguousEmptyEnvelopeSerialized(t *testing.T) {
-	viper.Reset()
-	viper.Set("output-format", tableFormat)
-	viper.Set("jmespath", "")
-	viper.Set("raw", false)
-
-	out, errOut := new(bytes.Buffer), new(bytes.Buffer)
-	originalOut, originalErr := Stdout, Stderr
-	Stdout, Stderr = out, errOut
-	t.Cleanup(func() { Stdout, Stderr = originalOut, originalErr })
-
-	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
-		"before": []interface{}{},
-		"after":  []interface{}{},
-	})
-	assert.NoError(t, err)
-	assert.Contains(t, errOut.String(), "Not shown as a table")
-	assert.Contains(t, out.String(), "before")
 }
 
 func TestDefaultFormatterSummarizesEnvelopeInFooter(t *testing.T) {
