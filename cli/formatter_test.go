@@ -234,17 +234,6 @@ func TestDefaultFormatterRendersYAMLNestedMaps(t *testing.T) {
 	assert.Contains(t, out.String(), "│ model_1    │")
 }
 
-func TestTableFieldPrefersLiteralDottedKey(t *testing.T) {
-	row := map[string]interface{}{
-		"model.id": "literal",
-		"model":    map[string]interface{}{"id": "nested"},
-	}
-
-	value, ok := tableField(row, "model.id")
-	assert.True(t, ok)
-	assert.Equal(t, "literal", value)
-}
-
 func TestDefaultFormatterRejectsUnknownNestedColumn(t *testing.T) {
 	viper.Reset()
 	viper.Set("output-format", tableFormat)

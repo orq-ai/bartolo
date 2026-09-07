@@ -324,9 +324,7 @@ func checkColumns(requestedColumns []string, rows []map[string]interface{}, user
 	return nil
 }
 
-// tableField resolves a column name against a row. A direct key wins so
-// existing responses with a literal dot in a key keep working; otherwise a
-// dotted name walks nested JSON objects.
+// tableField resolves dotted paths while preserving literal dotted keys.
 func tableField(row map[string]interface{}, column string) (interface{}, bool) {
 	if value, ok := row[column]; ok {
 		return value, true
