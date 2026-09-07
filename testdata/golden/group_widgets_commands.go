@@ -154,4 +154,44 @@ func registerwidgetsCommands(root *cobra.Command) {
 
 	}()
 
+	func() {
+		parent := widgetsCmd
+
+		params := viper.New()
+
+		var examples string
+
+		cmd := &cobra.Command{
+			Use:     "search",
+			Short:   "Search widgets",
+			Long:    bartolocli.Markdown(""),
+			Example: examples,
+			Args:    cobra.MinimumNArgs(0),
+			RunE: func(cmd *cobra.Command, args []string) error {
+
+				bartolocli.MarkPassedFlags(cmd, params)
+
+				_, decoded, err := ExampleSearchWidgets(params)
+				if err != nil {
+					return bartolocli.OperationError(err)
+				}
+
+				if err := bartolocli.FormatList(decoded, "name", "id"); err != nil {
+					return errors.Wrap(err, "formatting failed")
+				}
+
+				return nil
+
+			},
+		}
+		parent.AddCommand(cmd)
+
+		bartolocli.SetCustomFlags(cmd)
+
+		if cmd.Flags().HasFlags() {
+			params.BindPFlags(cmd.Flags())
+		}
+
+	}()
+
 }

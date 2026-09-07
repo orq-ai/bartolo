@@ -76,3 +76,30 @@ paths:
       responses:
         204:
           description: Deleted
+  /widgets/search:
+    post:
+      operationId: searchWidgets
+      # Exercises x-cli-list-fields on a non-GET operation: the generated command
+      # must call FormatList with the declared columns, which only a compiled CLI
+      # proves.
+      description: Search widgets.
+      x-cli-list-fields:
+      - id
+      - name
+      responses:
+        200:
+          description: Matches
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  matches:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        name:
+                          type: string

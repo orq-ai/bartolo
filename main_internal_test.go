@@ -18,6 +18,20 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func operationsByRoute(api *OpenAPI) map[string]*Operation {
+	byRoute := map[string]*Operation{}
+	collect := func(operations []*Operation) {
+		for _, op := range operations {
+			byRoute[strings.ToUpper(op.Method)+" "+op.Path] = op
+		}
+	}
+	collect(api.Operations)
+	for _, group := range api.Groups {
+		collect(group.Operations)
+	}
+	return byRoute
+}
+
 func loadTestSpec(t *testing.T, spec string) *openapi3.T {
 	t.Helper()
 
@@ -162,6 +176,271 @@ paths:
 	}
 	if !op.IsList {
 		t.Fatal("collection GET operation should use list formatting")
+	}
+}
+
+func TestProcessAPIReadsListFieldsExtension(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: List fields API
+  version: "1"
+paths:
+  /files/search:
+    post:
+      operationId: searchFiles
+      x-cli-list-fields:
+        - name
+        - id
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    name:
+                      type: string
+`)
+
+	api := ProcessAPI("example", doc)
+	var op *Operation
+	if len(api.Operations) > 0 {
+		op = api.Operations[0]
+	} else if len(api.Groups) > 0 && len(api.Groups[0].Operations) > 0 {
+		op = api.Groups[0].Operations[0]
+	}
+	if op == nil {
+		t.Fatal("expected generated list operation")
+	}
+	if got := strings.Join(op.ListFields, ","); got != "name,id" {
+		t.Fatalf("unexpected list fields %q", got)
+	}
+	if !op.IsList {
+		t.Fatal("POST operation with list fields should use list formatting")
+	}
+}
+
+func TestProcessAPIListExtensionControlsClassification(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		extensions string
+		wantList   bool
+	}{
+		{
+			name:       "explicit true marks a non-GET operation",
+			method:     "patch",
+			path:       "/files/{file_id}",
+			extensions: "      x-cli-list: true\n",
+			wantList:   true,
+		},
+		{
+			name:       "explicit false suppresses GET inference",
+			method:     "get",
+			path:       "/files",
+			extensions: "      x-cli-list: false\n",
+			wantList:   false,
+		},
+		{
+			name:       "empty list fields do not mark a POST operation",
+			method:     "post",
+			path:       "/files/search",
+			extensions: "      x-cli-list-fields: []\n",
+			wantList:   false,
+		},
+		{
+			name:   "explicit true marks an operation with empty list fields",
+			method: "post",
+			path:   "/files/search",
+			extensions: "      x-cli-list: true\n" +
+				"      x-cli-list-fields: []\n",
+			wantList: true,
+		},
+		{
+			name:     "unmarked POST array response is not inferred",
+			method:   "post",
+			path:     "/files/search",
+			wantList: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := loadTestSpec(t, fmt.Sprintf(`
+openapi: 3.0.3
+info:
+  title: Explicit list API
+  version: "1"
+paths:
+  %s:
+    %s:
+      operationId: testListClassification
+%s      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  matches:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string}
+                        name: {type: string}
+`, tt.path, tt.method, tt.extensions))
+
+			byRoute := operationsByRoute(ProcessAPI("example", doc))
+			if len(byRoute) != 1 {
+				t.Fatalf("expected one generated operation, got %d", len(byRoute))
+			}
+			op, ok := byRoute[strings.ToUpper(tt.method)+" "+tt.path]
+			if !ok {
+				t.Fatalf("%s %s is missing from the generated CLI", tt.method, tt.path)
+			}
+			if got := op.IsList; got != tt.wantList {
+				t.Fatalf("IsList = %t, want %t", got, tt.wantList)
+			}
+		})
+	}
+}
+
+func TestProcessAPIRejectsNonBooleanNoValidateExtension(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Malformed no-validate API
+  version: "1"
+paths:
+  /files:
+    get:
+      operationId: listFiles
+      parameters:
+        - name: kind
+          in: query
+          x-cli-no-validate: "yes"
+          schema:
+            type: string
+            enum: [a, b]
+      responses:
+        "200":
+          description: ok
+`)
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("a non-boolean x-cli-no-validate should fail generation instead of being ignored")
+		}
+		err, ok := recovered.(error)
+		if !ok || !strings.Contains(err.Error(), "cannot unmarshal") {
+			t.Fatalf("expected a decode failure, got %v", recovered)
+		}
+	}()
+
+	ProcessAPI("example", doc)
+}
+
+func TestProcessAPIRejectsContradictoryListMetadata(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Contradictory list API
+  version: "1"
+paths:
+  /files/search:
+    post:
+      operationId: searchFiles
+      x-cli-list: false
+      x-cli-list-fields: [name, id]
+      responses:
+        "200":
+          description: ok
+`)
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("x-cli-list: false alongside declared columns should fail generation")
+		}
+		err, ok := recovered.(error)
+		if !ok || !strings.Contains(err.Error(), "declares columns") {
+			t.Fatalf("expected a contradiction failure, got %v", recovered)
+		}
+	}()
+
+	ProcessAPI("example", doc)
+}
+
+func TestProcessAPIRejectsNonBooleanListExtension(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Malformed list API
+  version: "1"
+paths:
+  /files:
+    get:
+      operationId: listFiles
+      x-cli-list: "yes"
+      responses:
+        "200":
+          description: ok
+`)
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("a non-boolean x-cli-list should fail generation instead of being ignored")
+		}
+		err, ok := recovered.(error)
+		if !ok || !strings.Contains(err.Error(), "cannot unmarshal") {
+			t.Fatalf("expected a decode failure, got %v", recovered)
+		}
+	}()
+
+	ProcessAPI("example", doc)
+}
+
+// The two routes below are annotated in the vendored fixture so the classifier
+// runs against a real Speakeasy document rather than only synthetic specs. The
+// shipped orq CLI is generated elsewhere, so this pins generator behaviour and
+// guards the annotations against a re-vendor, not the customer-facing bug.
+func TestProcessAPIMarksOrqPostCollections(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("testdata", "orq", "openapi.json"))
+	if err != nil {
+		t.Fatalf("read orq spec: %v", err)
+	}
+	doc, err := loadOpenAPIDocument(data)
+	if err != nil {
+		t.Fatalf("load orq spec: %v", err)
+	}
+
+	byRoute := operationsByRoute(ProcessAPI("orq", doc))
+	marked := map[string][]string{
+		"POST /v2/knowledge/{knowledge_id}/search":                                  {"id", "text"},
+		"POST /v2/knowledge/{knowledge_id}/datasources/{datasource_id}/chunks/list": {"_id", "text", "status"},
+	}
+	for route, wantFields := range marked {
+		op, ok := byRoute[route]
+		if !ok {
+			t.Fatalf("%s is missing from the generated CLI", route)
+		}
+		if !op.IsList {
+			t.Errorf("%s should render as a list", route)
+		}
+		if got := strings.Join(op.ListFields, ","); got != strings.Join(wantFields, ",") {
+			t.Errorf("%s columns = %q, want %q", route, got, strings.Join(wantFields, ","))
+		}
 	}
 }
 

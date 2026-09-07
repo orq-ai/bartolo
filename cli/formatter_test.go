@@ -103,7 +103,7 @@ func TestDefaultFormatterRendersEmptyListWithConfiguredColumns(t *testing.T) {
 	assert.Contains(t, out.String(), "│ ID │ NAME │")
 }
 
-func TestDefaultFormatterSkipsNestedColumnsAndTruncatesCells(t *testing.T) {
+func TestDefaultFormatterSkipsNestedObjectColumnsAndTruncatesCells(t *testing.T) {
 	viper.Reset()
 	viper.Set("output-format", tableFormat)
 	viper.Set("jmespath", "")
@@ -124,9 +124,36 @@ func TestDefaultFormatterSkipsNestedColumnsAndTruncatesCells(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Contains(t, out.String(), "│ ID  │")
 	assert.NotContains(t, out.String(), "PROMPT")
-	assert.NotContains(t, out.String(), "METADATA")
+	assert.Contains(t, out.String(), "METADATA")
+	assert.Contains(t, out.String(), "│ a, b ")
 	assert.Contains(t, out.String(), strings.Repeat("x", maxCellWidth-1)+"…")
 	assert.NotContains(t, out.String(), strings.Repeat("x", maxCellWidth+1))
+}
+
+func TestDefaultFormatterAbbreviatesLongListCells(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"id":     "one",
+			"tags":   []interface{}{"a", "b", "c", "d", "e"},
+			"scores": []interface{}{0.5, 1},
+			"items":  []interface{}{map[string]interface{}{"k": "v"}},
+			"none":   []interface{}{},
+		},
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "a, b, c, …")
+	assert.Contains(t, out.String(), "0.5, 1")
+	assert.Contains(t, out.String(), `{"k":"v"}`)
+	assert.Contains(t, out.String(), "NONE")
 }
 
 func TestDefaultFormatterRendersDeclaredNestedColumns(t *testing.T) {
@@ -273,10 +300,74 @@ func TestDefaultFormatterRejectsUnknownDeclaredNestedColumn(t *testing.T) {
 	assert.Empty(t, out.String())
 }
 
-func TestDefaultFormatterRendersResourceNamedWrapper(t *testing.T) {
+// Every envelope shape the table extractor classifies, in one place. A
+// reviewer's A/B run against main caught a regression here that reading the
+// diff did not, so the shapes are pinned as a table rather than as a test each
+// time one is found.
+func TestDefaultFormatterClassifiesEnvelopeShapes(t *testing.T) {
+	const (
+		table      = "table"
+		noResults  = "no results"
+		serialized = "serialized"
+	)
+
+	rowOne := map[string]interface{}{"id": "one"}
+	rowTwo := map[string]interface{}{"id": "two"}
+
+	tests := []struct {
+		name     string
+		data     interface{}
+		want     string
+		wantCell string
+	}{
+		{"resource-named wrapper", map[string]interface{}{"schedules": []interface{}{rowOne}}, table, "one"},
+		{"conventional key", map[string]interface{}{"data": []interface{}{rowOne}}, table, "one"},
+		{"populated beside an empty sibling", map[string]interface{}{"matches": []interface{}{rowOne}, "warnings": []interface{}{}}, table, "one"},
+		{"populated beside an empty conventional key", map[string]interface{}{"data": []interface{}{}, "matches": []interface{}{rowOne}}, table, "one"},
+		{"conventional key wins among populated arrays", map[string]interface{}{"data": []interface{}{rowOne}, "matches": []interface{}{rowTwo}}, table, "one"},
+		{"sole empty envelope", map[string]interface{}{"matches": []interface{}{}}, noResults, ""},
+		{"sole empty envelope beside a scalar", map[string]interface{}{"matches": []interface{}{}, "total": 0}, noResults, ""},
+		{"empty peer arrays", map[string]interface{}{"before": []interface{}{}, "after": []interface{}{}}, serialized, ""},
+		{"two populated arrays", map[string]interface{}{"input": []interface{}{rowOne}, "output": []interface{}{rowTwo}}, serialized, ""},
+		{"scalar array beside an empty sibling", map[string]interface{}{"ids": []interface{}{"a", "b"}, "warnings": []interface{}{}}, serialized, ""},
+		{"scalar array beside an empty conventional key", map[string]interface{}{"data": []interface{}{}, "ids": []interface{}{"a", "b"}}, serialized, ""},
+		{"no array at all", map[string]interface{}{"id": "one"}, serialized, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			viper.Reset()
+			viper.Set("output-format", tableFormat)
+			viper.Set("jmespath", "")
+			viper.Set("raw", false)
+			out, errOut := new(bytes.Buffer), new(bytes.Buffer)
+			originalOut, originalErr := Stdout, Stderr
+			Stdout, Stderr = out, errOut
+			t.Cleanup(func() { Stdout, Stderr = originalOut, originalErr })
+
+			assert.NoError(t, NewDefaultFormatter(true, true).FormatList(tt.data))
+
+			switch tt.want {
+			case table:
+				assert.Contains(t, out.String(), "│")
+				assert.Contains(t, out.String(), tt.wantCell)
+				assert.Empty(t, errOut.String())
+			case noResults:
+				assert.Equal(t, "No results.\n", out.String())
+				assert.Empty(t, errOut.String())
+			case serialized:
+				assert.NotContains(t, out.String(), "No results.")
+				assert.NotContains(t, out.String(), "│")
+				assert.Contains(t, errOut.String(), "Not shown as a table")
+			}
+		})
+	}
+}
+
+func TestDefaultFormatterInfersColumnsFromJMESPathProjection(t *testing.T) {
 	viper.Reset()
 	viper.Set("output-format", tableFormat)
-	viper.Set("jmespath", "")
+	viper.Set("jmespath", "data[].{id: id, model: model.id}")
 	viper.Set("raw", false)
 	out := new(bytes.Buffer)
 	original := Stdout
@@ -284,11 +375,16 @@ func TestDefaultFormatterRendersResourceNamedWrapper(t *testing.T) {
 	t.Cleanup(func() { Stdout = original })
 
 	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
-		"schedules": []interface{}{map[string]interface{}{"id": "one"}},
-	})
+		"data": []interface{}{map[string]interface{}{
+			"id":    "ag_1",
+			"name":  "support",
+			"model": map[string]interface{}{"id": "gpt-5"},
+		}},
+	}, "id", "name")
 	assert.NoError(t, err)
-	assert.Contains(t, out.String(), "│ ID  │")
-	assert.Contains(t, out.String(), "│ one │")
+	assert.Contains(t, out.String(), "MODEL")
+	assert.Contains(t, out.String(), "gpt-5")
+	assert.NotContains(t, out.String(), "NAME")
 }
 
 func TestDefaultFormatterKeepsAmbiguousObjectAsJSON(t *testing.T) {

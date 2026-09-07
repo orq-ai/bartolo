@@ -50,6 +50,9 @@ const (
 	// maxCellWidth keeps one long value from pushing other columns off screen.
 	maxCellWidth = 40
 
+	// maxCellItems is how many entries of a list value a cell shows before "…".
+	maxCellItems = 3
+
 	// defaultTableWidth is used when the terminal size is unavailable.
 	defaultTableWidth = 120
 )
@@ -115,7 +118,8 @@ func (f *DefaultFormatter) format(data interface{}, list bool, columns []string)
 			return err
 		}
 
-		data = result
+		// The schema's columns describe the original rows, not the projection.
+		data, columns = result, nil
 	}
 
 	override := ""
@@ -488,7 +492,7 @@ func autoColumns(rows []map[string]interface{}) []string {
 	for _, row := range rows {
 		for key, value := range row {
 			switch value.(type) {
-			case nil, map[string]interface{}, []interface{}, []map[string]interface{}:
+			case nil, map[string]interface{}:
 			default:
 				scalar[key] = true
 			}
@@ -573,33 +577,67 @@ func tableRows(data interface{}, requestedColumns []string) ([]map[string]interf
 		return nil, "", nil, false
 	}
 
-	// Conventional keys first, so a stray nested array is not mistaken for one.
-	keys := []string{"items", "data", "results", "records", "entries", "servers"}
-	for _, key := range keys {
-		if result, valid := objectRowsValue(object[key], true); valid {
-			return result, key, object, true
-		}
+	// A populated array always wins, so an empty `data` beside a populated
+	// `matches` does not report no results. Empty arrays only enter the running
+	// once nothing populated has, so a `warnings: []` sibling does not make a
+	// populated `matches` ambiguous.
+	if rows, key, ok := collectionCandidate(object, false); ok {
+		return rows, key, object, true
+	}
+	if rows, key, ok := collectionCandidate(object, true); ok {
+		return rows, key, object, true
+	}
+	return nil, "", nil, false
+}
+
+// conventionalKeys are envelope names that outrank a wrapper named after the
+// resource, so a stray nested array is not mistaken for the collection.
+var conventionalKeys = []string{"items", "data", "results", "records", "entries", "servers"}
+
+func collectionCandidate(object map[string]interface{}, allowEmpty bool) ([]map[string]interface{}, string, bool) {
+	// An empty array only speaks for the envelope when nothing else can be the
+	// payload. A populated array of non-objects is data no table can render, so
+	// `{"ids": ["a"], "warnings": []}` serializes rather than reporting no
+	// results over the ids.
+	if allowEmpty && hasUnrenderableArray(object) {
+		return nil, "", false
 	}
 
-	// Otherwise accept a wrapper named after the resource, such as `schedules`,
-	// as long as there is exactly one array of objects to choose from.
+	for _, key := range conventionalKeys {
+		if rows, valid := objectRowsValue(object[key], allowEmpty); valid {
+			return rows, key, true
+		}
+	}
+	return soleObjectArray(object, allowEmpty)
+}
+
+func hasUnrenderableArray(object map[string]interface{}) bool {
+	for _, value := range object {
+		if _, valid := objectRowsValue(value, true); valid {
+			continue
+		}
+		switch value.(type) {
+		case []interface{}, []map[string]interface{}:
+			return true
+		}
+	}
+	return false
+}
+
+func soleObjectArray(object map[string]interface{}, allowEmpty bool) ([]map[string]interface{}, string, bool) {
 	found := ""
 	var rows []map[string]interface{}
 	for key, value := range object {
-		result, valid := objectRowsValue(value, false)
+		result, valid := objectRowsValue(value, allowEmpty)
 		if !valid {
 			continue
 		}
 		if found != "" {
-			// Ambiguous: leave it to the serialized output.
-			return nil, "", nil, false
+			return nil, "", false
 		}
 		found, rows = key, result
 	}
-	if found != "" {
-		return rows, found, object, true
-	}
-	return nil, "", nil, false
+	return rows, found, found != ""
 }
 
 func objectRowsValue(value interface{}, allowEmpty bool) ([]map[string]interface{}, bool) {
@@ -687,11 +725,19 @@ func objectRowsFromMaps(values []map[string]interface{}, allowEmpty bool) ([]map
 }
 
 func tableValue(value interface{}) (string, error) {
-	if value == nil {
+	switch typed := value.(type) {
+	case nil:
 		return "", nil
-	}
-	if stringValue, ok := value.(string); ok {
-		return stringValue, nil
+	case string:
+		return typed, nil
+	case []interface{}:
+		return listValue(typed)
+	case []map[string]interface{}:
+		items := make([]interface{}, len(typed))
+		for i, item := range typed {
+			items[i] = item
+		}
+		return listValue(items)
 	}
 
 	encoded, err := json.Marshal(value)
@@ -699,4 +745,20 @@ func tableValue(value interface{}) (string, error) {
 		return "", err
 	}
 	return string(encoded), nil
+}
+
+func listValue(items []interface{}) (string, error) {
+	parts := make([]string, 0, maxCellItems+1)
+	for i, item := range items {
+		if i == maxCellItems {
+			parts = append(parts, "…")
+			break
+		}
+		text, err := tableValue(item)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, text)
+	}
+	return strings.Join(parts, ", "), nil
 }
