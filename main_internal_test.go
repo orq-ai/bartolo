@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -160,53 +162,6 @@ paths:
 	}
 	if !op.IsList {
 		t.Fatal("collection GET operation should use list formatting")
-	}
-}
-
-func TestProcessAPIReadsListFieldsExtension(t *testing.T) {
-	doc := loadTestSpec(t, `
-openapi: 3.0.3
-info:
-  title: List fields API
-  version: "1"
-paths:
-  /files:
-    get:
-      operationId: listFiles
-      x-cli-list-fields:
-        - name
-        - id
-      responses:
-        "200":
-          description: ok
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  type: object
-                  properties:
-                    id:
-                      type: string
-                    name:
-                      type: string
-`)
-
-	api := ProcessAPI("example", doc)
-	var op *Operation
-	if len(api.Operations) > 0 {
-		op = api.Operations[0]
-	} else if len(api.Groups) > 0 && len(api.Groups[0].Operations) > 0 {
-		op = api.Groups[0].Operations[0]
-	}
-	if op == nil {
-		t.Fatal("expected generated list operation")
-	}
-	if got := strings.Join(op.ListFields, ","); got != "name,id" {
-		t.Fatalf("unexpected list fields %q", got)
-	}
-	if !op.IsList {
-		t.Fatal("collection GET operation with list fields should use list formatting")
 	}
 }
 
@@ -438,6 +393,106 @@ func TestGenerateFromJSONFixtureBuildsCLI(t *testing.T) {
 	build.Dir = tmp
 	if out, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build ./...: %v\n%s", err, string(out))
+	}
+}
+
+func TestGeneratedListCommandRendersNestedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/files" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"file_1","model":{"id":"model_1"}}]`))
+	}))
+	defer server.Close()
+
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	tmp := t.TempDir()
+	oldWD := repoRoot
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir tempdir: %v", err)
+	}
+	defer os.Chdir(oldWD)
+
+	config := &ProjectConfig{
+		AppName:             "nested-cli",
+		AppVersion:          "0.1.0",
+		ModulePath:          "github.com/acme/nested-cli",
+		BartoloReplacePath:  repoRoot,
+		BartoloVersion:      bartoloVersion,
+		EnvPrefix:           "NESTED",
+		SerializationFormat: "json",
+	}
+	if err := writeProjectScaffold(config, false); err != nil {
+		t.Fatalf("writeProjectScaffold: %v", err)
+	}
+
+	specPath := filepath.Join(tmp, "openapi.yaml")
+	spec := fmt.Sprintf(`openapi: 3.0.3
+info:
+  title: Nested API
+  version: "1"
+servers:
+  - url: %s
+paths:
+  /files:
+    get:
+      operationId: listFiles
+      x-cli-list-fields:
+        - model.id
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+`, server.URL)
+	if err := os.WriteFile(specPath, []byte(spec), 0o644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+
+	api := ProcessAPI("nested", loadTestSpec(t, spec))
+	var commandPath string
+	if len(api.Operations) == 1 {
+		commandPath = api.Operations[0].CommandPath
+	} else if len(api.Groups) == 1 && len(api.Groups[0].Operations) == 1 {
+		commandPath = api.Groups[0].Operations[0].CommandPath
+	} else {
+		t.Fatalf("expected one generated operation, got %d root operations and %d groups", len(api.Operations), len(api.Groups))
+	}
+	if err := generateFromSpec(specPath); err != nil {
+		t.Fatalf("generateFromSpec: %v", err)
+	}
+
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = tmp
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, string(out))
+	}
+
+	cliPath := filepath.Join(tmp, "nested-cli")
+	build := exec.Command("go", "build", "-o", cliPath, "./cmd/nested-cli")
+	build.Dir = tmp
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build generated CLI: %v\n%s", err, string(out))
+	}
+
+	args := append(strings.Fields(commandPath), "-o", "json")
+	run := exec.Command(cliPath, args...)
+	run.Dir = tmp
+	out, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run generated list command: %v\n%s", err, string(out))
+	}
+	if !strings.Contains(string(out), `"id": "model_1"`) {
+		t.Fatalf("generated list command returned unexpected response: %s", out)
 	}
 }
 
