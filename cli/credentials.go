@@ -61,14 +61,9 @@ var authInitialized bool
 var authCommand *cobra.Command
 var profileCommand *cobra.Command
 
-// authAddCommands holds every registered spelling of the add-profile command,
-// which `UseAuth` fills in (or hangs a typed subcommand off, for a named auth
-// type).
-var authAddCommands []*cobra.Command
-
-// authAddDeprecationNotices marks which of authAddCommands is deprecated, so
-// UseAuth can copy the notice onto each typed child it hangs off them.
-var authAddDeprecationNotices = map[*cobra.Command]string{}
+// authAddCommand is `auth profile add`, which `UseAuth` fills in (or hangs a
+// typed subcommand off, for a named auth type).
+var authAddCommand *cobra.Command
 
 // initAuth sets up basic commands and the credentials file so that new auth
 // handlers can be registered. This is safe to call many times.
@@ -95,21 +90,12 @@ func initAuth() {
 	}
 	authCommand.AddCommand(profileCommand)
 
-	authAddCommands = []*cobra.Command{
-		newAuthAddCommand(profileCommand, "add", ""),
-		newAuthAddCommand(authCommand, "add-profile", "use `auth profile add` instead"),
-	}
-	// `add-profile` shipped on origin/main with an `add` alias
-	// (`auth add-profile`/`auth add`); keep it working for the deprecated
-	// spelling.
-	authAddCommands[1].Aliases = []string{"add"}
+	authAddCommand = newAuthAddCommand(profileCommand, "add")
 
-	profileCommand.AddCommand(newProfileListCommand("list", ""))
+	profileCommand.AddCommand(newProfileListCommand("list"))
 	profileCommand.AddCommand(newProfileCurrentCommand())
 	profileCommand.AddCommand(newProfileUseCommand("use"))
 	profileCommand.AddCommand(newProfileClearCommand())
-
-	authCommand.AddCommand(newProfileListCommand("list-profiles", "use `auth profile list` instead"))
 
 	authCommand.AddCommand(newAuthSetupCommand())
 
@@ -131,57 +117,31 @@ func initAuth() {
 	})
 }
 
-// newAuthAddCommand registers one spelling of add-profile. A deprecated one
-// prints its own notice to Stderr; cobra's Deprecated field goes through
-// OutOrStderr, which lands on stdout and corrupts `-o json`.
-func newAuthAddCommand(parent *cobra.Command, use string, deprecationNotice string) *cobra.Command {
+// newAuthAddCommand registers `auth profile add` under parent.
+func newAuthAddCommand(parent *cobra.Command, use string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   use,
 		Short: "Add user profile for authentication",
-	}
-	if deprecationNotice != "" {
-		cmd.Hidden = true
-		cmd.PreRunE = deprecationPreRunE(deprecationNotice)
-		authAddDeprecationNotices[cmd] = deprecationNotice
 	}
 	parent.AddCommand(cmd)
 	return cmd
 }
 
-// deprecationPreRunE prints notice, naming whichever command cobra ran. Cobra
-// runs only the leaf's hooks, so every typed child needs its own copy.
-// deprecationPreRunEIf is deprecationPreRunE for a notice that may be empty,
-// since cobra treats a nil PreRunE as "no hook" but calls a non-nil one.
-func deprecationPreRunEIf(notice string) func(cmd *cobra.Command, args []string) error {
-	if notice == "" {
-		return nil
-	}
-
-	return deprecationPreRunE(notice)
-}
-
-func deprecationPreRunE(notice string) func(cmd *cobra.Command, args []string) error {
-	return func(cmd *cobra.Command, args []string) error {
-		fmt.Fprintf(Stderr, "Command %q is deprecated, %s\n", cmd.Name(), notice)
-		return nil
-	}
-}
-
-func newProfileListCommand(use string, deprecationNotice string) *cobra.Command {
+func newProfileListCommand(use string) *cobra.Command {
 	return &cobra.Command{
 		Use:     use,
 		Aliases: []string{"ls"},
 		Short:   "List available configured authentication profiles",
 		Args:    cobra.NoArgs,
-		Hidden:  deprecationNotice != "",
-		PreRunE: deprecationPreRunEIf(deprecationNotice),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			profiles := Creds.GetStringMap("profiles")
 			if len(profiles) == 0 {
-				return Formatter.Format(map[string]interface{}{
-					"profiles": []map[string]interface{}{},
-					"message":  fmt.Sprintf("No profiles configured. Use `%s auth setup` to add one.", Root.CommandPath()),
-				})
+				// The hint goes to stderr, not into the payload: as a
+				// "message" field it was the only key whose presence varied
+				// with the profile count, so `-o json` callers had to handle
+				// two object shapes to be told something no script reads.
+				fmt.Fprintf(Stderr, "No profiles configured. Use `%s auth setup` to add one.\n", Root.CommandPath())
+				return Formatter.Format(map[string]interface{}{"profiles": []map[string]interface{}{}})
 			}
 
 			active := ActiveProfileName()
@@ -194,9 +154,7 @@ func newProfileListCommand(use string, deprecationNotice string) *cobra.Command 
 				listed = append(listed, profileListEntry(name, profile, active))
 			}
 
-			// "message" is always present, even when empty, so the object shape
-			// does not change between the empty and non-empty cases above.
-			return Formatter.Format(map[string]interface{}{"profiles": listed, "message": ""})
+			return Formatter.Format(map[string]interface{}{"profiles": listed})
 		},
 	}
 }
@@ -207,7 +165,12 @@ func newProfileListCommand(use string, deprecationNotice string) *cobra.Command 
 // registered still shows what it holds.
 func profileListEntry(name string, profile map[string]interface{}, active string) map[string]interface{} {
 	typeName, _ := profile["type"].(string)
-	entry := map[string]interface{}{"name": name, "type": typeName, "active": name == active}
+	entry := map[string]interface{}{"name": name, "active": name == active}
+	// A single-auth CLI registers the anonymous "" type, so every row would
+	// carry an empty column that says nothing about the profile.
+	if typeName != "" {
+		entry["type"] = typeName
+	}
 
 	keys := []string{"server"}
 	if handler := AuthHandlers[typeName]; handler != nil {
@@ -308,7 +271,7 @@ func sortedKeys(m map[string]interface{}) []string {
 }
 
 // maskIfSecret keeps a credential out of rendered configuration: `auth
-// list-profiles` rows and the `--verbose` configuration dump both render
+// profile list` rows and the `--verbose` configuration dump both render
 // secrets through it. Wire redaction lives in http.go and shares only
 // looksSensitiveKey, the same predicate that decides whether `auth setup`
 // prompts for a field without echo.
@@ -365,7 +328,7 @@ func redactSettings(settings map[string]interface{}) map[string]interface{} {
 
 // maskHidden shows nothing of a value. The `--verbose` dump is what users
 // paste into bug reports, so first-and-last-four of a live key is four
-// characters too many; `auth list-profiles` keeps maskIfSecret's partial
+// characters too many; `auth profile list` keeps maskIfSecret's partial
 // reveal, since two profiles' rows have to be tellable apart.
 func maskHidden(_ string, value interface{}) interface{} {
 	// Masking an unset value would report a credential that is not there.
@@ -527,7 +490,7 @@ func UseAuth(typeName string, handler AuthHandler) {
 	// Register the handler by its type.
 	AuthHandlers[typeName] = handler
 
-	// Set up the add-profile command.
+	// Set up the `auth profile add` command.
 	keys := handler.ProfileKeys()
 
 	// Key values are OPTIONAL: a secret passed on the command line leaks into shell
@@ -546,41 +509,34 @@ func UseAuth(typeName string, handler AuthHandler) {
 		}
 	}
 
-	for _, cmd := range authAddCommands {
-		if typeName == "" {
-			// Backward-compatibility use-case without an explicit type. Set up the
-			// add command as the only way to authenticate.
-			if cmd.RunE != nil {
-				// This fallback code path was already used, so we must be registering
-				// a *second* anonymous auth type, which is not allowed.
-				panic("register auth type names to use multi-auth")
-			}
-
-			cmd.Use += use
-			cmd.Short = "Add a new named authentication profile"
-			cmd.Args = cobra.RangeArgs(1, 1+len(keys))
-			cmd.RunE = run
-			addKeyFileFlags(cmd)
-			continue
+	if typeName == "" {
+		// Backward-compatibility use-case without an explicit type. Set up the
+		// add command as the only way to authenticate.
+		if authAddCommand.RunE != nil {
+			// This fallback code path was already used, so we must be registering
+			// a *second* anonymous auth type, which is not allowed.
+			panic("register auth type names to use multi-auth")
 		}
 
-		typed := &cobra.Command{
-			Use:   typeName + use,
-			Short: "Add a new named " + typeName + " authentication profile",
-			Args:  cobra.RangeArgs(1, 1+len(keys)),
-			RunE:  run,
-		}
-		// Cobra runs only the leaf's hooks, so a typed child of a deprecated
-		// spelling has to carry the notice itself.
-		if notice, deprecated := authAddDeprecationNotices[cmd]; deprecated {
-			typed.PreRunE = deprecationPreRunE(notice)
-		}
-		addKeyFileFlags(typed)
-		cmd.AddCommand(typed)
+		authAddCommand.Use += use
+		authAddCommand.Short = "Add a new named authentication profile"
+		authAddCommand.Args = cobra.RangeArgs(1, 1+len(keys))
+		authAddCommand.RunE = run
+		addKeyFileFlags(authAddCommand)
+		return
 	}
+
+	typed := &cobra.Command{
+		Use:   typeName + use,
+		Short: "Add a new named " + typeName + " authentication profile",
+		Args:  cobra.RangeArgs(1, 1+len(keys)),
+		RunE:  run,
+	}
+	addKeyFileFlags(typed)
+	authAddCommand.AddCommand(typed)
 }
 
-// addProfileRunE builds the RunE shared by every spelling of add-profile:
+// addProfileRunE builds the RunE for `auth profile add`:
 // resolve each declared key, then save the profile under the sanitized name.
 func addProfileRunE(typeName string, handler AuthHandler, keys []string) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, args []string) error {
