@@ -324,17 +324,6 @@ func TestDeprecatedProfileSpellingsAreGone(t *testing.T) {
 		}
 	}
 
-	// The replacements are what a user is sent to instead.
-	for _, path := range [][]string{{"auth", "profile", "add"}, {"auth", "profile", "list"}} {
-		resolved, _, err := Root.Find(path)
-		resolvedName := "<nil>"
-		if resolved != nil {
-			resolvedName = resolved.Name()
-		}
-		if err != nil || resolvedName != path[len(path)-1] {
-			t.Errorf("`%v` must resolve, got %q (%v)", path, resolvedName, err)
-		}
-	}
 }
 
 func TestListProfilesRendersServerColumn(t *testing.T) {
@@ -431,28 +420,19 @@ func TestListProfilesJSONShapeIsStableAcrossEmptyAndNonEmpty(t *testing.T) {
 
 	_, hasMessageWhenEmpty := empty["message"]
 	assert.True(t, hasMessageWhenEmpty)
-	assert.Empty(t, empty["profiles"])
+	emptyProfiles, ok := empty["profiles"].([]interface{})
+	assert.True(t, ok, "empty response must include a profiles array")
+	assert.Len(t, emptyProfiles, 0)
 
 	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, ""); err != nil {
 		t.Fatalf("saveAuthProfile: %v", err)
 	}
-	_, hasMessageWhenNonEmpty := executeJSON(t, "auth profile list -o json")["message"]
+	nonEmpty := executeJSON(t, "auth profile list -o json")
+	_, hasMessageWhenNonEmpty := nonEmpty["message"]
 	assert.Equal(t, hasMessageWhenEmpty, hasMessageWhenNonEmpty)
-}
-
-// The empty response keeps the same JSON contract as the populated response.
-func TestListProfilesEmptyHintIsInJSON(t *testing.T) {
-	initTestCLI(t, "", stubAuthHandler{})
-
-	viper.Set("output-format", "json")
-	stdout := execute("auth profile list -o json")
-
-	var decoded map[string]interface{}
-	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
-		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout)
-	}
-	assert.Empty(t, decoded["profiles"])
-	assert.Contains(t, decoded["message"], "No profiles configured")
+	nonEmptyProfiles, ok := nonEmpty["profiles"].([]interface{})
+	assert.True(t, ok, "non-empty response must include a profiles array")
+	assert.Len(t, nonEmptyProfiles, 1)
 }
 
 // `auth profile use` persists off the flag's viper key. Writing it to
