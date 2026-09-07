@@ -90,9 +90,10 @@ func initAuth() {
 	}
 	authCommand.AddCommand(profileCommand)
 
-	authAddCommand = newAuthAddCommand(profileCommand, "add")
+	authAddCommand = newAuthAddCommand()
+	profileCommand.AddCommand(authAddCommand)
 
-	profileCommand.AddCommand(newProfileListCommand("list"))
+	profileCommand.AddCommand(newProfileListCommand())
 	profileCommand.AddCommand(newProfileCurrentCommand())
 	profileCommand.AddCommand(newProfileUseCommand("use"))
 	profileCommand.AddCommand(newProfileClearCommand())
@@ -117,31 +118,27 @@ func initAuth() {
 	})
 }
 
-// newAuthAddCommand registers `auth profile add` under parent.
-func newAuthAddCommand(parent *cobra.Command, use string) *cobra.Command {
+func newAuthAddCommand() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   use,
+		Use:   "add",
 		Short: "Add user profile for authentication",
 	}
-	parent.AddCommand(cmd)
 	return cmd
 }
 
-func newProfileListCommand(use string) *cobra.Command {
+func newProfileListCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:     use,
+		Use:     "list",
 		Aliases: []string{"ls"},
 		Short:   "List available configured authentication profiles",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			profiles := Creds.GetStringMap("profiles")
 			if len(profiles) == 0 {
-				// The hint goes to stderr, not into the payload: as a
-				// "message" field it was the only key whose presence varied
-				// with the profile count, so `-o json` callers had to handle
-				// two object shapes to be told something no script reads.
-				fmt.Fprintf(Stderr, "No profiles configured. Use `%s auth setup` to add one.\n", Root.CommandPath())
-				return Formatter.Format(map[string]interface{}{"profiles": []map[string]interface{}{}})
+				return Formatter.Format(map[string]interface{}{
+					"profiles": []map[string]interface{}{},
+					"message":  fmt.Sprintf("No profiles configured. Use `%s auth setup` to add one.", Root.CommandPath()),
+				})
 			}
 
 			active := ActiveProfileName()
@@ -154,7 +151,8 @@ func newProfileListCommand(use string) *cobra.Command {
 				listed = append(listed, profileListEntry(name, profile, active))
 			}
 
-			return Formatter.Format(map[string]interface{}{"profiles": listed})
+			// Keep the response shape stable for existing JSON consumers.
+			return Formatter.Format(map[string]interface{}{"profiles": listed, "message": ""})
 		},
 	}
 }
@@ -165,12 +163,7 @@ func newProfileListCommand(use string) *cobra.Command {
 // registered still shows what it holds.
 func profileListEntry(name string, profile map[string]interface{}, active string) map[string]interface{} {
 	typeName, _ := profile["type"].(string)
-	entry := map[string]interface{}{"name": name, "active": name == active}
-	// A single-auth CLI registers the anonymous "" type, so every row would
-	// carry an empty column that says nothing about the profile.
-	if typeName != "" {
-		entry["type"] = typeName
-	}
+	entry := map[string]interface{}{"name": name, "type": typeName, "active": name == active}
 
 	keys := []string{"server"}
 	if handler := AuthHandlers[typeName]; handler != nil {

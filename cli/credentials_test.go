@@ -305,25 +305,34 @@ func TestAuthSetupBindsServer(t *testing.T) {
 }
 
 // The deprecated `auth add-profile` / `auth list-profiles` spellings, and
-// `auth add-profile`'s own `auth add` alias, are gone. Cobra answers an
-// unknown subcommand with the parent's help rather than an error, so assert
-// on what the path resolves to: anything that still lands on a command of its
-// own (rather than falling back to `auth` itself) is a spelling that survived.
+// `auth add-profile`'s own `auth add` alias, are gone. Exercise the generated
+// CLI entry point so this checks the real exit status and diagnostics rather
+// than only Cobra's command lookup.
 func TestDeprecatedProfileSpellingsAreGone(t *testing.T) {
 	initTestCLI(t, "", stubAuthHandler{})
 
 	for _, name := range []string{"add-profile", "add", "list-profiles"} {
-		resolved, _, err := Root.Find([]string{"auth", name})
-		if err == nil && resolved != authCommand {
-			t.Errorf("`auth %s` still resolves, to %q; it was removed", name, resolved.Name())
+		stdout, stderr, code := executeForExit("auth " + name)
+		if code != ExitUsage {
+			t.Errorf("`auth %s` returned exit code %d, want %d", name, code, ExitUsage)
+		}
+		if stdout != "" {
+			t.Errorf("`auth %s` wrote to stdout: %q", name, stdout)
+		}
+		if !strings.Contains(stderr, `unknown command "`+name+`"`) {
+			t.Errorf("`auth %s` did not report an unknown command: %q", name, stderr)
 		}
 	}
 
 	// The replacements are what a user is sent to instead.
 	for _, path := range [][]string{{"auth", "profile", "add"}, {"auth", "profile", "list"}} {
 		resolved, _, err := Root.Find(path)
-		if err != nil || resolved.Name() != path[len(path)-1] {
-			t.Errorf("`%v` must resolve, got %q (%v)", path, resolved.Name(), err)
+		resolvedName := "<nil>"
+		if resolved != nil {
+			resolvedName = resolved.Name()
+		}
+		if err != nil || resolvedName != path[len(path)-1] {
+			t.Errorf("`%v` must resolve, got %q (%v)", path, resolvedName, err)
 		}
 	}
 }
@@ -408,44 +417,42 @@ func TestListProfilesMasksSecretsAndHonorsJSON(t *testing.T) {
 	}
 	assert.Len(t, decoded.Profiles, 1)
 	assert.Equal(t, "acme", decoded.Profiles[0]["name"])
+	assert.Equal(t, "", decoded.Profiles[0]["type"])
 	assert.Equal(t, "sk-o****mnop", decoded.Profiles[0]["api_key"])
 	assert.Equal(t, "https://acme.example.com", decoded.Profiles[0]["server"])
 }
 
-// `auth profile list -o json` must emit the same object shape either way. The
-// "message" key used to appear only when no profiles existed; the hint it
-// carried now goes to stderr, so `profiles` is the whole payload both times.
+// `auth profile list -o json` must emit the same object shape either way.
 func TestListProfilesJSONShapeIsStableAcrossEmptyAndNonEmpty(t *testing.T) {
 	initTestCLI(t, "", stubAuthHandler{})
 
 	viper.Set("output-format", "json")
 	empty := executeJSON(t, "auth profile list -o json")
 
-	assert.NotContains(t, empty, "message")
+	_, hasMessageWhenEmpty := empty["message"]
+	assert.True(t, hasMessageWhenEmpty)
 	assert.Empty(t, empty["profiles"])
 
 	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, ""); err != nil {
 		t.Fatalf("saveAuthProfile: %v", err)
 	}
-	assert.NotContains(t, executeJSON(t, "auth profile list -o json"), "message")
+	_, hasMessageWhenNonEmpty := executeJSON(t, "auth profile list -o json")["message"]
+	assert.Equal(t, hasMessageWhenEmpty, hasMessageWhenNonEmpty)
 }
 
-// The hint for an unconfigured CLI must not land on stdout, where it would
-// break `auth profile list -o json | jq`.
-func TestListProfilesEmptyHintGoesToStderr(t *testing.T) {
+// The empty response keeps the same JSON contract as the populated response.
+func TestListProfilesEmptyHintIsInJSON(t *testing.T) {
 	initTestCLI(t, "", stubAuthHandler{})
 
 	viper.Set("output-format", "json")
-	stdout, stderr := executeStreams("auth profile list -o json")
+	stdout := execute("auth profile list -o json")
 
-	var decoded struct {
-		Profiles []map[string]interface{} `json:"profiles"`
-	}
+	var decoded map[string]interface{}
 	if err := json.Unmarshal([]byte(stdout), &decoded); err != nil {
 		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout)
 	}
-	assert.Empty(t, decoded.Profiles)
-	assert.Contains(t, stderr, "No profiles configured")
+	assert.Empty(t, decoded["profiles"])
+	assert.Contains(t, decoded["message"], "No profiles configured")
 }
 
 // `auth profile use` persists off the flag's viper key. Writing it to
