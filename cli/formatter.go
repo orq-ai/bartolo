@@ -459,9 +459,7 @@ func tableFooter(shown int, label string, metadata map[string]interface{}) (stri
 	return strings.Join(parts, " · "), nil
 }
 
-// moreAvailable reports whether the envelope says another page exists. The
-// footer hides every one of these keys, so without reading them all the summary
-// goes silent on any API that does not spell it `has_more`.
+// moreAvailable reports whether the envelope says another page exists, in any of the spellings the footer hides.
 func moreAvailable(metadata map[string]interface{}) bool {
 	for _, key := range []string{"has_more", "has_next_page"} {
 		if more, ok := metadata[key].(bool); ok && more {
@@ -489,11 +487,9 @@ func metadataInt(metadata map[string]interface{}, keys ...string) (int, bool) {
 	return 0, false
 }
 
-// PaginationEvidenceKeys are the envelope fields that say a collection was
-// retrieved rather than computed: a cursor, a more-pages flag, or a tally of the
-// rows. The generator classifies a response as a collection from these, so a key
-// belongs here only when it describes the collection itself. `limit` and its
-// friends describe the request that asked for it and prove nothing.
+// PaginationEvidenceKeys are the envelope fields that describe the collection
+// itself. The generator classifies from these, so `limit` and its friends, which
+// describe the request that asked for it, are not here.
 var PaginationEvidenceKeys = []string{
 	"has_more", "has_next_page", "next_page_token", "next_page",
 	"next_cursor", "prev_cursor", "cursor", "next", "previous",
@@ -502,10 +498,8 @@ var PaginationEvidenceKeys = []string{
 }
 
 // FooterSuppressedKeys are the envelope fields the table hides below itself: the
-// paging evidence, plus the request echoes that prove nothing but are still
-// noise under a table. Hiding a key is cheap to get wrong and classifying an
-// operation from it is not, which is why this is the wider of the two lists and
-// why widening it does not change what renders as a table.
+// paging evidence plus the request echoes. Kept separate so that widening what
+// the footer hides cannot change what renders as a table.
 var FooterSuppressedKeys = append(append([]string{}, PaginationEvidenceKeys...),
 	"limit", "offset", "page", "per_page")
 

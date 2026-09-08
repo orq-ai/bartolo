@@ -1239,14 +1239,10 @@ func isCollectionResponse(operation *openapi3.Operation) bool {
 }
 
 // isPaginatedCollectionResponse reports whether a 2xx JSON response is a page of
-// rows: a JSON media type, an array of objects under a conventional collection
-// key, and a pagination sibling. Every gate is load-bearing. The pagination key
-// separates retrieval from computation, keeping /v2/router/embeddings out;
-// requiring rows to be objects keeps out envelopes the table renderer would
-// reject anyway; the conventional key keeps a stray nested array from speaking
-// for the envelope, which is what `x-cli-list` is for.
-// Only immediate properties are read, so an envelope composed with allOf/oneOf
-// needs the annotation too.
+// rows: an array of objects under a conventional collection key, next to a field
+// describing the collection. That last gate separates retrieval from computation,
+// keeping /v2/router/embeddings out. Only immediate properties are read, so an
+// allOf/oneOf envelope needs `x-cli-list` instead.
 func isPaginatedCollectionResponse(operation *openapi3.Operation) bool {
 	return forEachSuccessResponseContent(operation, func(mediaType string, content *openapi3.MediaType) bool {
 		if !isJSONMediaType(mediaType) || content.Schema == nil || content.Schema.Value == nil {
@@ -1268,8 +1264,7 @@ func isPaginatedCollectionResponse(operation *openapi3.Operation) bool {
 
 func isJSONMediaType(mediaType string) bool {
 	base, _, _ := strings.Cut(mediaType, ";")
-	// RFC 9110 media type tokens are case-insensitive, and specs do write
-	// `Application/JSON`.
+	// RFC 9110 media type tokens are case-insensitive; specs do write `Application/JSON`.
 	base = strings.ToLower(strings.TrimSpace(base))
 	return base == "application/json" || strings.HasSuffix(base, "+json")
 }
@@ -1280,8 +1275,7 @@ func hasObjectArrayProperty(properties openapi3.Schemas, keys []string) bool {
 		if property == nil || property.Value == nil || property.Value.Items == nil {
 			continue
 		}
-		// items: {type: object} with no nested properties: parses with a nil
-		// Properties map, so the declared type has to be consulted too.
+		// `items: {type: object}` parses with a nil Properties map, so the declared type has to be consulted too.
 		if items := property.Value.Items.Value; items != nil && (items.Type.Is("object") || items.Properties != nil) {
 			return true
 		}

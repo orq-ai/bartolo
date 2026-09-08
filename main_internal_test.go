@@ -452,9 +452,7 @@ func TestProcessAPIMarksOrqPostCollections(t *testing.T) {
 	}
 }
 
-// The rule keys off property names, so the regression that matters is a route
-// nobody looked at starting to render as a table. Assert the whole non-GET set,
-// not just the routes this change was aimed at.
+// The regression that matters is a route nobody looked at starting to render as a table, so assert the whole set.
 func TestProcessAPIClassifiesOrqNonGetListsExactly(t *testing.T) {
 	const chunksRoute = "POST /v2/knowledge/{knowledge_id}/datasources/{datasource_id}/chunks/list"
 
@@ -483,8 +481,7 @@ func TestProcessAPIClassifiesOrqNonGetListsExactly(t *testing.T) {
 		want := map[string]bool{
 			// Inferred: data + has_more.
 			chunksRoute: true,
-			// Annotated by ENG-2942, not inferred: `matches` is not a
-			// conventional collection key.
+			// Annotated by ENG-2942, not inferred: `matches` is not a conventional collection key.
 			"POST /v2/knowledge/{knowledge_id}/search": true,
 		}
 
