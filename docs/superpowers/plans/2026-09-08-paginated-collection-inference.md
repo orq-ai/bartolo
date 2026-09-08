@@ -1,5 +1,9 @@
 # Paginated Collection Inference Implementation Plan
 
+> **Status: implemented** in `ec7166d..0ec66cf` (PR #42). This is a historical record; the shipped
+> behaviour is `main.go` and its tests, and the code excerpts and line numbers below are already
+> stale. Do not execute the checkboxes.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Infer list classification for any HTTP method when a 2xx JSON response is a conventional paginated collection envelope, so standard POST retrieval endpoints render as tables without per-operation annotation, while `x-cli-list` / `x-cli-list-fields` remain the authority for everything else.

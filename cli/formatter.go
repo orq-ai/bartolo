@@ -437,7 +437,7 @@ func tableFooter(shown int, label string, metadata map[string]interface{}) (stri
 	parts := make([]string, 0, len(metadata))
 	if total, ok := metadataInt(metadata, "total", "total_count"); ok {
 		parts = append(parts, fmt.Sprintf("%d of %d", shown, total))
-	} else if more, ok := metadata["has_more"].(bool); ok && more {
+	} else if moreAvailable(metadata) {
 		parts = append(parts, fmt.Sprintf("%d shown, more available", shown))
 	}
 
@@ -459,6 +459,24 @@ func tableFooter(shown int, label string, metadata map[string]interface{}) (stri
 	return strings.Join(parts, " · "), nil
 }
 
+// moreAvailable reports whether the envelope says another page exists. The
+// footer hides every one of these keys, so without reading them all the summary
+// goes silent on any API that does not spell it `has_more`.
+func moreAvailable(metadata map[string]interface{}) bool {
+	for _, key := range []string{"has_more", "has_next_page"} {
+		if more, ok := metadata[key].(bool); ok && more {
+			return true
+		}
+	}
+	for _, key := range []string{"next_page_token", "next_page", "next_cursor", "cursor", "starting_after"} {
+		if token, ok := metadata[key].(string); ok && token != "" {
+			return true
+		}
+	}
+	pages, ok := metadataInt(metadata, "total_pages")
+	return ok && pages > 1
+}
+
 func metadataInt(metadata map[string]interface{}, keys ...string) (int, bool) {
 	for _, key := range keys {
 		switch value := metadata[key].(type) {
@@ -471,17 +489,25 @@ func metadataInt(metadata map[string]interface{}, keys ...string) (int, bool) {
 	return 0, false
 }
 
-// PaginationKeys are the envelope fields that carry paging bookkeeping rather
-// than payload. The generator classifies a response as a collection from these
-// too, so the two must not drift: a cursor the table hides in its footer is the
-// same cursor that proves the response is one page of many.
-var PaginationKeys = []string{
+// PaginationEvidenceKeys are the envelope fields that say a collection was
+// retrieved rather than computed: a cursor, a more-pages flag, or a tally of the
+// rows. The generator classifies a response as a collection from these, so a key
+// belongs here only when it describes the collection itself. `limit` and its
+// friends describe the request that asked for it and prove nothing.
+var PaginationEvidenceKeys = []string{
 	"has_more", "has_next_page", "next_page_token", "next_page",
 	"next_cursor", "prev_cursor", "cursor", "next", "previous",
 	"starting_after", "ending_before",
 	"total", "total_count", "total_pages", "count",
-	"limit", "offset", "page", "per_page",
 }
+
+// FooterSuppressedKeys are the envelope fields the table hides below itself: the
+// paging evidence, plus the request echoes that prove nothing but are still
+// noise under a table. Hiding a key is cheap to get wrong and classifying an
+// operation from it is not, which is why this is the wider of the two lists and
+// why widening it does not change what renders as a table.
+var FooterSuppressedKeys = append(append([]string{}, PaginationEvidenceKeys...),
+	"limit", "offset", "page", "per_page")
 
 // isEnvelopePlumbing reports whether a top-level key is paging bookkeeping, or
 // only restates that the response is a collection (Stripe-style object: list).
@@ -490,7 +516,7 @@ func isEnvelopePlumbing(key string, value interface{}) bool {
 	case "object", "kind", "type":
 		return value == "list" || value == "collection"
 	}
-	return slices.Contains(PaginationKeys, key)
+	return slices.Contains(FooterSuppressedKeys, key)
 }
 
 // autoColumns picks columns for a collection without x-cli-list-fields:

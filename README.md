@@ -109,11 +109,15 @@ Bartolo will synthesize a decent CLI from a plain schema, but it gets significan
 Collection paths and responses are inferred automatically for GET operations.
 Any method is also inferred as a collection when its 2xx JSON response is a
 conventional page of rows: an array of objects under `data`, `items`, `results`,
-`records`, `entries` or `servers`, next to a pagination field such as `has_more`,
-`next_page_token`, `next_cursor`, `total_count` or `count`. That covers the usual
-POST search and query endpoints without annotation. Every part is required: an
-embeddings call returns a `data` array with no cursor and stays serialized, and an
-array of plain strings is not something a table can render.
+`records`, `entries` or `servers`, next to a pagination field — `has_more`,
+`next_page_token`, `total_count`, `count` and the rest of
+`cli.PaginationEvidenceKeys`. A key counts as evidence only when it describes the
+collection, so an echoed `limit` or `offset` does not classify an operation, even
+though the table footer hides it. That covers the usual POST search and query endpoints without
+annotation. Every part is required: an embeddings call returns a `data` array
+with no cursor and stays serialized, and an array of plain strings is not
+something a table can render. Only immediate properties are read, so an envelope
+or a row schema composed with `allOf`/`oneOf` needs `x-cli-list` too.
 
 Use `x-cli-list: true` for a collection that does not match, such as rows under a
 resource-named key, or `x-cli-list-fields` to both mark it and set the columns. A

@@ -2281,6 +2281,14 @@ func TestProcessAPIInfersPaginatedCollectionResponses(t *testing.T) {
 			wantList: true,
 		},
 		{
+			name:   "an echoed limit describes the request, not the collection",
+			method: "post",
+			path:   "/widgets/preview",
+			properties: "                  data: {type: array, items: {type: object}}\n" +
+				"                  limit: {type: integer}\n",
+			wantList: false,
+		},
+		{
 			name:       "POST with a collection key but no pagination sibling",
 			method:     "post",
 			path:       "/router/embeddings",
@@ -2325,6 +2333,23 @@ func TestProcessAPIInfersPaginatedCollectionResponses(t *testing.T) {
 			path:       "/traces/query",
 			properties: "                  search: {type: object, properties: {data: {type: array, items: {type: object}}, has_more: {type: boolean}}}\n",
 			wantList:   false,
+		},
+		{
+			name:      "the media type is matched case-insensitively",
+			method:    "post",
+			path:      "/reporting/query",
+			mediaType: "Application/JSON; charset=utf-8",
+			properties: "                  data: {type: array, items: {type: object}}\n" +
+				"                  has_more: {type: boolean}\n",
+			wantList: true,
+		},
+		{
+			name:   "composed row schemas need the annotation",
+			method: "post",
+			path:   "/composed/search",
+			properties: "                  data: {type: array, items: {allOf: [{type: object, properties: {id: {type: string}}}]}}\n" +
+				"                  has_more: {type: boolean}\n",
+			wantList: false,
 		},
 		{
 			name:      "a non-JSON envelope is not inspected",

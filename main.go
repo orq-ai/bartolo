@@ -1239,9 +1239,14 @@ func isCollectionResponse(operation *openapi3.Operation) bool {
 }
 
 // isPaginatedCollectionResponse reports whether a 2xx JSON response is a page of
-// rows. All three halves are load-bearing: the pagination key is what separates
-// retrieval from computation, keeping /v2/router/embeddings out; requiring rows
-// to be objects keeps out envelopes the table renderer would reject anyway.
+// rows: a JSON media type, an array of objects under a conventional collection
+// key, and a pagination sibling. Every gate is load-bearing. The pagination key
+// separates retrieval from computation, keeping /v2/router/embeddings out;
+// requiring rows to be objects keeps out envelopes the table renderer would
+// reject anyway; the conventional key keeps a stray nested array from speaking
+// for the envelope, which is what `x-cli-list` is for.
+// Only immediate properties are read, so an envelope composed with allOf/oneOf
+// needs the annotation too.
 func isPaginatedCollectionResponse(operation *openapi3.Operation) bool {
 	return forEachSuccessResponseContent(operation, func(mediaType string, content *openapi3.MediaType) bool {
 		if !isJSONMediaType(mediaType) || content.Schema == nil || content.Schema.Value == nil {
@@ -1252,7 +1257,7 @@ func isPaginatedCollectionResponse(operation *openapi3.Operation) bool {
 		if !hasObjectArrayProperty(properties, bartolocli.ConventionalCollectionKeys) {
 			return false
 		}
-		for _, key := range bartolocli.PaginationKeys {
+		for _, key := range bartolocli.PaginationEvidenceKeys {
 			if properties[key] != nil {
 				return true
 			}
@@ -1263,7 +1268,9 @@ func isPaginatedCollectionResponse(operation *openapi3.Operation) bool {
 
 func isJSONMediaType(mediaType string) bool {
 	base, _, _ := strings.Cut(mediaType, ";")
-	base = strings.TrimSpace(base)
+	// RFC 9110 media type tokens are case-insensitive, and specs do write
+	// `Application/JSON`.
+	base = strings.ToLower(strings.TrimSpace(base))
 	return base == "application/json" || strings.HasSuffix(base, "+json")
 }
 
