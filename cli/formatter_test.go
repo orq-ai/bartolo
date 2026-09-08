@@ -680,3 +680,79 @@ func TestDefaultFormatterSaysWhenColumnsAreIgnored(t *testing.T) {
 	assert.Contains(t, errOut.String(), "--columns was ignored")
 	assert.Contains(t, out.String(), `"name"`)
 }
+
+func TestDefaultFormatterSuppressesCursorPlumbingInFooter(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
+		"object": "list",
+		"data": []map[string]interface{}{
+			{"id": "trace_1", "name": "first"},
+		},
+		"has_more":        true,
+		"next_page_token": "eyJvZmZzZXQiOjUwfQ",
+		"total_pages":     3,
+	})
+
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "trace_1")
+	assert.NotContains(t, out.String(), "eyJvZmZzZXQiOjUwfQ")
+	assert.NotContains(t, out.String(), "total_pages")
+	assert.Contains(t, out.String(), "1 shown, more available")
+}
+
+func TestDefaultFormatterFooterReadsEveryMoreAvailableSpelling(t *testing.T) {
+	for name, metadata := range map[string]map[string]interface{}{
+		"has_next_page":   {"has_next_page": true},
+		"next_page_token": {"next_page_token": "eyJvZmZzZXQiOjUwfQ"},
+		"cursor":          {"cursor": "abc"},
+		"total_pages":     {"total_pages": 3},
+	} {
+		t.Run(name, func(t *testing.T) {
+			viper.Reset()
+			viper.Set("output-format", tableFormat)
+			viper.Set("jmespath", "")
+			viper.Set("raw", false)
+			out := new(bytes.Buffer)
+			original := Stdout
+			Stdout = out
+			t.Cleanup(func() { Stdout = original })
+
+			payload := map[string]interface{}{
+				"data": []map[string]interface{}{{"id": "trace_1"}},
+			}
+			for key, value := range metadata {
+				payload[key] = value
+			}
+
+			assert.NoError(t, NewDefaultFormatter(true, true).FormatList(payload))
+			assert.Contains(t, out.String(), "1 shown, more available")
+			assert.NotContains(t, out.String(), name+":")
+		})
+	}
+}
+
+func TestDefaultFormatterFooterStaysQuietWithoutMorePages(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	assert.NoError(t, NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
+		"data":        []map[string]interface{}{{"id": "trace_1"}},
+		"has_more":    false,
+		"total_pages": 1,
+	}))
+	assert.NotContains(t, out.String(), "more available")
+}

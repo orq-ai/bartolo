@@ -14,7 +14,8 @@ var updateGolden = flag.Bool("update", false, "rewrite the golden template rende
 // same blocks were copy-pasted per file: a grouped and an ungrouped operation,
 // every optional parameter type, enum/format/x-cli-no-validate parameters,
 // required and optional date-time parameters, a body with an enum and a
-// date-time field, and a destructive operation.
+// date-time field, a destructive operation, and a POST whose paginated envelope
+// is inferred as a list without annotation.
 const goldenSpec = `
 openapi: 3.0.3
 info:
@@ -92,6 +93,27 @@ paths:
                       properties:
                         id: {type: string}
                         name: {type: string}
+  /widgets/query:
+    post:
+      operationId: QueryWidgets
+      summary: Query widgets
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string}
+                        name: {type: string}
+                  has_more: {type: boolean}
+                  next_page_token: {type: string}
   /widgets/{id}:
     delete:
       operationId: DeleteWidget

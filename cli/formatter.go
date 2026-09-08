@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -436,7 +437,7 @@ func tableFooter(shown int, label string, metadata map[string]interface{}) (stri
 	parts := make([]string, 0, len(metadata))
 	if total, ok := metadataInt(metadata, "total", "total_count"); ok {
 		parts = append(parts, fmt.Sprintf("%d of %d", shown, total))
-	} else if more, ok := metadata["has_more"].(bool); ok && more {
+	} else if moreAvailable(metadata) {
 		parts = append(parts, fmt.Sprintf("%d shown, more available", shown))
 	}
 
@@ -458,6 +459,22 @@ func tableFooter(shown int, label string, metadata map[string]interface{}) (stri
 	return strings.Join(parts, " · "), nil
 }
 
+// moreAvailable reports whether the envelope says another page exists, in any of the spellings the footer hides.
+func moreAvailable(metadata map[string]interface{}) bool {
+	for _, key := range []string{"has_more", "has_next_page"} {
+		if more, ok := metadata[key].(bool); ok && more {
+			return true
+		}
+	}
+	for _, key := range []string{"next_page_token", "next_page", "next_cursor", "cursor", "starting_after"} {
+		if token, ok := metadata[key].(string); ok && token != "" {
+			return true
+		}
+	}
+	pages, ok := metadataInt(metadata, "total_pages")
+	return ok && pages > 1
+}
+
 func metadataInt(metadata map[string]interface{}, keys ...string) (int, bool) {
 	for _, key := range keys {
 		switch value := metadata[key].(type) {
@@ -470,19 +487,30 @@ func metadataInt(metadata map[string]interface{}, keys ...string) (int, bool) {
 	return 0, false
 }
 
-// isEnvelopePlumbing reports whether an envelope field is paging bookkeeping or
-// only restates that the response is a collection, such as Stripe-style
-// `"object": "list"`.
+// PaginationEvidenceKeys are the envelope fields that describe the collection
+// itself. The generator classifies from these, so `limit` and its friends, which
+// describe the request that asked for it, are not here.
+var PaginationEvidenceKeys = []string{
+	"has_more", "has_next_page", "next_page_token", "next_page",
+	"next_cursor", "prev_cursor", "cursor", "next", "previous",
+	"starting_after", "ending_before",
+	"total", "total_count", "total_pages", "count",
+}
+
+// FooterSuppressedKeys are the envelope fields the table hides below itself: the
+// paging evidence plus the request echoes. Kept separate so that widening what
+// the footer hides cannot change what renders as a table.
+var FooterSuppressedKeys = append(append([]string{}, PaginationEvidenceKeys...),
+	"limit", "offset", "page", "per_page")
+
+// isEnvelopePlumbing reports whether a top-level key is paging bookkeeping, or
+// only restates that the response is a collection (Stripe-style object: list).
 func isEnvelopePlumbing(key string, value interface{}) bool {
 	switch key {
 	case "object", "kind", "type":
 		return value == "list" || value == "collection"
-	case "has_more", "total", "total_count", "count", "limit", "offset", "page",
-		"per_page", "cursor", "next_cursor", "prev_cursor", "next", "previous",
-		"starting_after", "ending_before":
-		return true
 	}
-	return false
+	return slices.Contains(FooterSuppressedKeys, key)
 }
 
 // autoColumns picks columns for a collection without x-cli-list-fields:
@@ -590,9 +618,10 @@ func tableRows(data interface{}, requestedColumns []string) ([]map[string]interf
 	return nil, "", nil, false
 }
 
-// conventionalKeys are envelope names that outrank a wrapper named after the
-// resource, so a stray nested array is not mistaken for the collection.
-var conventionalKeys = []string{"items", "data", "results", "records", "entries", "servers"}
+// ConventionalCollectionKeys are envelope names that outrank a wrapper named
+// after the resource, so a stray nested array is not mistaken for the
+// collection.
+var ConventionalCollectionKeys = []string{"items", "data", "results", "records", "entries", "servers"}
 
 func collectionCandidate(object map[string]interface{}, allowEmpty bool) ([]map[string]interface{}, string, bool) {
 	// An empty array only speaks for the envelope when nothing else can be the
@@ -603,7 +632,7 @@ func collectionCandidate(object map[string]interface{}, allowEmpty bool) ([]map[
 		return nil, "", false
 	}
 
-	for _, key := range conventionalKeys {
+	for _, key := range ConventionalCollectionKeys {
 		if rows, valid := objectRowsValue(object[key], allowEmpty); valid {
 			return rows, key, true
 		}

@@ -405,8 +405,7 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 			}
 			markedList := len(listFields) > 0 || listOverride
 			inferenceDisabled := hasListOverride && !listOverride
-			isList := markedList || (!inferenceDisabled && strings.EqualFold(method, "get") &&
-				(isCollectionPath(path) || isCollectionResponse(operation)))
+			isList := markedList || (!inferenceDisabled && isInferredList(method, path, operation))
 
 			params := getParams(item, method)
 			requiredParams := getRequiredParams(params)
@@ -1195,38 +1194,101 @@ func isCollectionPath(rawPath string) bool {
 	return true
 }
 
-func isCollectionResponse(operation *openapi3.Operation) bool {
+func forEachSuccessResponseContent(operation *openapi3.Operation, fn func(mediaType string, content *openapi3.MediaType) bool) bool {
 	for code, response := range operation.Responses.Map() {
 		status, err := strconv.Atoi(code)
 		if err != nil || status < 200 || status >= 300 || response == nil || response.Value == nil {
 			continue
 		}
 
-		for _, content := range response.Value.Content {
+		for mediaType, content := range response.Value.Content {
 			if content == nil {
 				continue
 			}
-			if _, ok := content.Example.([]interface{}); ok {
+			if fn(mediaType, content) {
 				return true
-			}
-			if content.Schema == nil || content.Schema.Value == nil {
-				continue
-			}
-
-			schema := content.Schema.Value
-			if schema.Items != nil {
-				return true
-			}
-			// Any array property counts: wrappers are named after the resource
-			// as often as they are called `data` or `items`.
-			for _, property := range schema.Properties {
-				if property != nil && property.Value != nil && property.Value.Items != nil {
-					return true
-				}
 			}
 		}
 	}
+
 	return false
+}
+
+func isCollectionResponse(operation *openapi3.Operation) bool {
+	return forEachSuccessResponseContent(operation, func(_ string, content *openapi3.MediaType) bool {
+		if _, ok := content.Example.([]interface{}); ok {
+			return true
+		}
+		if content.Schema == nil || content.Schema.Value == nil {
+			return false
+		}
+
+		schema := content.Schema.Value
+		if schema.Items != nil {
+			return true
+		}
+		// Any array property counts: wrappers are named after the resource
+		// as often as they are called `data` or `items`.
+		for _, property := range schema.Properties {
+			if property != nil && property.Value != nil && property.Value.Items != nil {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// isPaginatedCollectionResponse reports whether a 2xx JSON response is a page of
+// rows: an array of objects under a conventional collection key, next to a field
+// describing the collection. That last gate separates retrieval from computation,
+// keeping /v2/router/embeddings out. Only immediate properties are read, so an
+// allOf/oneOf envelope needs `x-cli-list` instead.
+func isPaginatedCollectionResponse(operation *openapi3.Operation) bool {
+	return forEachSuccessResponseContent(operation, func(mediaType string, content *openapi3.MediaType) bool {
+		if !isJSONMediaType(mediaType) || content.Schema == nil || content.Schema.Value == nil {
+			return false
+		}
+
+		properties := content.Schema.Value.Properties
+		if !hasObjectArrayProperty(properties, bartolocli.ConventionalCollectionKeys) {
+			return false
+		}
+		for _, key := range bartolocli.PaginationEvidenceKeys {
+			if properties[key] != nil {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func isJSONMediaType(mediaType string) bool {
+	base, _, _ := strings.Cut(mediaType, ";")
+	// RFC 9110 media type tokens are case-insensitive; specs do write `Application/JSON`.
+	base = strings.ToLower(strings.TrimSpace(base))
+	return base == "application/json" || strings.HasSuffix(base, "+json")
+}
+
+func hasObjectArrayProperty(properties openapi3.Schemas, keys []string) bool {
+	for _, key := range keys {
+		property := properties[key]
+		if property == nil || property.Value == nil || property.Value.Items == nil {
+			continue
+		}
+		// `items: {type: object}` parses with a nil Properties map, so the declared type has to be consulted too.
+		if items := property.Value.Items.Value; items != nil && (items.Type.Is("object") || items.Properties != nil) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isInferredList(method, path string, operation *openapi3.Operation) bool {
+	if strings.EqualFold(method, "get") && (isCollectionPath(path) || isCollectionResponse(operation)) {
+		return true
+	}
+	return isPaginatedCollectionResponse(operation)
 }
 
 func isVersionToken(segment string) bool {

@@ -99,7 +99,7 @@ Bartolo will synthesize a decent CLI from a plain schema, but it gets significan
 | `x-cli-group` | Force an operation into a higher-level noun. |
 | `x-cli-hidden` | Hide a path or operation from normal help. |
 | `x-cli-ignore` | Exclude a path, operation, or parameter entirely. |
-| `x-cli-list` | Set to `true` to mark an operation as a collection, or `false` to suppress automatic GET collection detection. |
+| `x-cli-list` | Set to `true` to mark an operation as a collection, or `false` to suppress automatic collection detection. |
 | `x-cli-list-fields` | Set and order the default columns for an interactive collection response; a non-empty list also marks the operation as a collection. |
 | `x-cli-name` | Override a generated CLI name for an API, operation, or parameter. |
 | `x-cli-no-validate` | Set to `true` to skip the client-side `enum`/`format` check for a parameter, for a schema that is stricter than the API it describes. |
@@ -107,12 +107,24 @@ Bartolo will synthesize a decent CLI from a plain schema, but it gets significan
 | `x-cli-waiters` | Add polling-based waiter commands and follow-up flags. |
 
 Collection paths and responses are inferred automatically for GET operations.
-For other HTTP methods, use `x-cli-list: true` to opt into inferred columns or
-provide `x-cli-list-fields`. A non-empty field list also marks the operation as
-a collection, while `x-cli-list: false` disables automatic GET inference. An
-empty `x-cli-list-fields: []` marks nothing on its own, and combining
-`x-cli-list: false` with declared columns is a contradiction that fails
-generation.
+Any method is also inferred as a collection when its 2xx JSON response is a
+conventional page of rows: an array of objects under `data`, `items`, `results`,
+`records`, `entries` or `servers`, next to a pagination field — `has_more`,
+`next_page_token`, `total_count`, `count` and the rest of
+`cli.PaginationEvidenceKeys`. A key counts as evidence only when it describes the
+collection, so an echoed `limit` or `offset` does not classify an operation, even
+though the table footer hides it. That covers the usual POST search and query endpoints without
+annotation. Every part is required: an embeddings call returns a `data` array
+with no cursor and stays serialized, and an array of plain strings is not
+something a table can render. Only immediate properties are read, so an envelope
+or a row schema composed with `allOf`/`oneOf` needs `x-cli-list` too.
+
+Use `x-cli-list: true` for a collection that does not match, such as rows under a
+resource-named key, or `x-cli-list-fields` to both mark it and set the columns. A
+non-empty field list also marks the operation as a collection, while
+`x-cli-list: false` disables all automatic inference. An empty
+`x-cli-list-fields: []` marks nothing on its own, and combining `x-cli-list: false`
+with declared columns is a contradiction that fails generation.
 
 For example, a POST search can define the default interactive columns while
 leaving the complete response available through `-o json` or a pipe:

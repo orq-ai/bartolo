@@ -217,6 +217,44 @@ func ExampleDeleteWidget(paramId string, params *viper.Viper) (*gentleman.Respon
 	return resp, decoded, nil
 }
 
+// ExampleQueryWidgets Query widgets
+func ExampleQueryWidgets(params *viper.Viper) (*gentleman.Response, map[string]interface{}, error) {
+	handlerPath := "widgets query"
+	server := bartolocli.ResolveServer()
+
+	url := server + "/widgets/query"
+
+	req := bartolocli.Client.Post().URL(url)
+
+	bartolocli.HandleBefore(handlerPath, params, req)
+
+	resp, err := req.Do()
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "request failed")
+	}
+
+	var decoded map[string]interface{}
+
+	if resp.StatusCode < 400 {
+		if err := bartolocli.UnmarshalResponse(resp, &decoded); err != nil {
+			return nil, nil, errors.Wrap(err, "unmarshalling response failed")
+		}
+	} else {
+		return nil, nil, bartolocli.ResponseError(resp)
+	}
+
+	after := bartolocli.HandleAfter(handlerPath, params, resp, decoded)
+	if after != nil {
+		replaced, ok := after.(map[string]interface{})
+		if !ok {
+			return nil, nil, errors.Errorf("after handler for %q returned %T, expected map[string]interface{}", handlerPath, after)
+		}
+		decoded = replaced
+	}
+
+	return resp, decoded, nil
+}
+
 // ExampleSearchWidgets Search widgets
 func ExampleSearchWidgets(params *viper.Viper) (*gentleman.Response, map[string]interface{}, error) {
 	handlerPath := "widgets search"
