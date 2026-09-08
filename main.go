@@ -1273,6 +1273,8 @@ func hasObjectArrayProperty(properties openapi3.Schemas, keys []string) bool {
 		if property == nil || property.Value == nil || property.Value.Items == nil {
 			continue
 		}
+		// items: {type: object} with no nested properties: parses with a nil
+		// Properties map, so the declared type has to be consulted too.
 		if items := property.Value.Items.Value; items != nil && (items.Type.Is("object") || items.Properties != nil) {
 			return true
 		}

@@ -483,6 +483,8 @@ var PaginationKeys = []string{
 	"limit", "offset", "page", "per_page",
 }
 
+// isEnvelopePlumbing reports whether a top-level key is paging bookkeeping, or
+// only restates that the response is a collection (Stripe-style object: list).
 func isEnvelopePlumbing(key string, value interface{}) bool {
 	switch key {
 	case "object", "kind", "type":
