@@ -2181,3 +2181,165 @@ func TestLoadProjectConfigReadsTheLegacyFormatKey(t *testing.T) {
 		t.Fatalf("the legacy key must not be written back, got %q", config.LegacyDefaultOutputFormat)
 	}
 }
+
+func TestProcessAPIInfersPaginatedCollectionResponses(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		mediaType  string
+		properties string
+		wantList   bool
+	}{
+		{
+			name:   "POST with a collection key and a pagination sibling",
+			method: "post",
+			path:   "/traces/search",
+			properties: "                  data: {type: array, items: {type: object}}\n" +
+				"                  has_more: {type: boolean}\n",
+			wantList: true,
+		},
+		{
+			name:   "POST with next_page_token instead of has_more",
+			method: "post",
+			path:   "/logs/search",
+			properties: "                  data: {type: array, items: {type: object}}\n" +
+				"                  next_page_token: {type: string}\n",
+			wantList: true,
+		},
+		{
+			name:   "POST with items and count",
+			method: "post",
+			path:   "/webhooks/query",
+			properties: "                  items: {type: array, items: {type: object}}\n" +
+				"                  count: {type: integer}\n",
+			wantList: true,
+		},
+		{
+			name:       "POST with a collection key but no pagination sibling",
+			method:     "post",
+			path:       "/router/embeddings",
+			properties: "                  data: {type: array, items: {type: object}}\n",
+			wantList:   false,
+		},
+		{
+			name:   "object list marker is not a pagination sibling",
+			method: "post",
+			path:   "/router/rerank",
+			properties: "                  object: {type: string, enum: [list]}\n" +
+				"                  results: {type: array, items: {type: object}}\n",
+			wantList: false,
+		},
+		{
+			name:   "rows the table cannot render do not qualify",
+			method: "post",
+			path:   "/ids/search",
+			properties: "                  data: {type: array, items: {type: string}}\n" +
+				"                  has_more: {type: boolean}\n",
+			wantList: false,
+		},
+		{
+			name:   "pagination without a conventional collection key",
+			method: "post",
+			path:   "/knowledge/search",
+			properties: "                  matches: {type: array, items: {type: object}}\n" +
+				"                  has_more: {type: boolean}\n",
+			wantList: false,
+		},
+		{
+			name:   "a scalar named data does not qualify",
+			method: "post",
+			path:   "/jobs/run",
+			properties: "                  data: {type: string}\n" +
+				"                  has_more: {type: boolean}\n",
+			wantList: false,
+		},
+		{
+			name:       "nested rows stay out of scope",
+			method:     "post",
+			path:       "/traces/query",
+			properties: "                  search: {type: object, properties: {data: {type: array, items: {type: object}}, has_more: {type: boolean}}}\n",
+			wantList:   false,
+		},
+		{
+			name:      "a non-JSON envelope is not inspected",
+			method:    "post",
+			path:      "/exports/search",
+			mediaType: "application/xml",
+			properties: "                  data: {type: array, items: {type: object}}\n" +
+				"                  has_more: {type: boolean}\n",
+			wantList: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mediaType := tt.mediaType
+			if mediaType == "" {
+				mediaType = "application/json"
+			}
+			doc := loadTestSpec(t, fmt.Sprintf(`
+openapi: 3.0.3
+info:
+  title: Paginated API
+  version: "1"
+paths:
+  %s:
+    %s:
+      operationId: testPaginatedInference
+      responses:
+        "200":
+          description: ok
+          content:
+            %s:
+              schema:
+                type: object
+                properties:
+%s`, tt.path, tt.method, mediaType, tt.properties))
+
+			byRoute := operationsByRoute(ProcessAPI("example", doc))
+			op, ok := byRoute[strings.ToUpper(tt.method)+" "+tt.path]
+			if !ok {
+				t.Fatalf("%s %s is missing from the generated CLI", tt.method, tt.path)
+			}
+			if got := op.IsList; got != tt.wantList {
+				t.Fatalf("IsList = %t, want %t", got, tt.wantList)
+			}
+			if op.IsList && len(op.ListFields) != 0 {
+				t.Fatalf("inferred list should declare no columns, got %v", op.ListFields)
+			}
+		})
+	}
+}
+
+func TestProcessAPIExplicitFalseSuppressesPaginatedInference(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Suppressed API
+  version: "1"
+paths:
+  /traces/search:
+    post:
+      operationId: searchTraces
+      x-cli-list: false
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {type: object}}
+                  has_more: {type: boolean}
+`)
+
+	op, ok := operationsByRoute(ProcessAPI("example", doc))["POST /traces/search"]
+	if !ok {
+		t.Fatal("POST /traces/search is missing from the generated CLI")
+	}
+	if op.IsList {
+		t.Fatal("x-cli-list: false should suppress paginated inference")
+	}
+}
