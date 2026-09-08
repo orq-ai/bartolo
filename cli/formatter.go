@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -470,19 +471,24 @@ func metadataInt(metadata map[string]interface{}, keys ...string) (int, bool) {
 	return 0, false
 }
 
-// isEnvelopePlumbing reports whether an envelope field is paging bookkeeping or
-// only restates that the response is a collection, such as Stripe-style
-// `"object": "list"`.
+// PaginationKeys are the envelope fields that carry paging bookkeeping rather
+// than payload. The generator classifies a response as a collection from these
+// too, so the two must not drift: a cursor the table hides in its footer is the
+// same cursor that proves the response is one page of many.
+var PaginationKeys = []string{
+	"has_more", "has_next_page", "next_page_token", "next_page",
+	"next_cursor", "prev_cursor", "cursor", "next", "previous",
+	"starting_after", "ending_before",
+	"total", "total_count", "total_pages", "count",
+	"limit", "offset", "page", "per_page",
+}
+
 func isEnvelopePlumbing(key string, value interface{}) bool {
 	switch key {
 	case "object", "kind", "type":
 		return value == "list" || value == "collection"
-	case "has_more", "total", "total_count", "count", "limit", "offset", "page",
-		"per_page", "cursor", "next_cursor", "prev_cursor", "next", "previous",
-		"starting_after", "ending_before":
-		return true
 	}
-	return false
+	return slices.Contains(PaginationKeys, key)
 }
 
 // autoColumns picks columns for a collection without x-cli-list-fields:
@@ -590,9 +596,10 @@ func tableRows(data interface{}, requestedColumns []string) ([]map[string]interf
 	return nil, "", nil, false
 }
 
-// conventionalKeys are envelope names that outrank a wrapper named after the
-// resource, so a stray nested array is not mistaken for the collection.
-var conventionalKeys = []string{"items", "data", "results", "records", "entries", "servers"}
+// ConventionalCollectionKeys are envelope names that outrank a wrapper named
+// after the resource, so a stray nested array is not mistaken for the
+// collection.
+var ConventionalCollectionKeys = []string{"items", "data", "results", "records", "entries", "servers"}
 
 func collectionCandidate(object map[string]interface{}, allowEmpty bool) ([]map[string]interface{}, string, bool) {
 	// An empty array only speaks for the envelope when nothing else can be the
@@ -603,7 +610,7 @@ func collectionCandidate(object map[string]interface{}, allowEmpty bool) ([]map[
 		return nil, "", false
 	}
 
-	for _, key := range conventionalKeys {
+	for _, key := range ConventionalCollectionKeys {
 		if rows, valid := objectRowsValue(object[key], allowEmpty); valid {
 			return rows, key, true
 		}

@@ -680,3 +680,29 @@ func TestDefaultFormatterSaysWhenColumnsAreIgnored(t *testing.T) {
 	assert.Contains(t, errOut.String(), "--columns was ignored")
 	assert.Contains(t, out.String(), `"name"`)
 }
+
+func TestDefaultFormatterSuppressesCursorPlumbingInFooter(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
+		"object": "list",
+		"data": []map[string]interface{}{
+			{"id": "trace_1", "name": "first"},
+		},
+		"has_more":        true,
+		"next_page_token": "eyJvZmZzZXQiOjUwfQ",
+		"total_pages":     3,
+	})
+
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "trace_1")
+	assert.NotContains(t, out.String(), "eyJvZmZzZXQiOjUwfQ")
+	assert.NotContains(t, out.String(), "total_pages")
+}
