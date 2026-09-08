@@ -43,6 +43,21 @@ func loadTestSpec(t *testing.T, spec string) *openapi3.T {
 	return doc
 }
 
+func loadOrqSpec(t *testing.T) *openapi3.T {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join("testdata", "orq", "openapi.json"))
+	if err != nil {
+		t.Fatalf("read orq spec: %v", err)
+	}
+	doc, err := loadOpenAPIDocument(data)
+	if err != nil {
+		t.Fatalf("load orq spec: %v", err)
+	}
+
+	return doc
+}
+
 func TestNormalizeSpecName(t *testing.T) {
 	cases := map[string]string{
 		"openapi.yaml":    "openapi",
@@ -416,14 +431,7 @@ paths:
 // shipped orq CLI is generated elsewhere, so this pins generator behaviour and
 // guards the annotations against a re-vendor, not the customer-facing bug.
 func TestProcessAPIMarksOrqPostCollections(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("testdata", "orq", "openapi.json"))
-	if err != nil {
-		t.Fatalf("read orq spec: %v", err)
-	}
-	doc, err := loadOpenAPIDocument(data)
-	if err != nil {
-		t.Fatalf("load orq spec: %v", err)
-	}
+	doc := loadOrqSpec(t)
 
 	byRoute := operationsByRoute(ProcessAPI("orq", doc))
 	marked := map[string][]string{
@@ -442,6 +450,63 @@ func TestProcessAPIMarksOrqPostCollections(t *testing.T) {
 			t.Errorf("%s columns = %q, want %q", route, got, strings.Join(wantFields, ","))
 		}
 	}
+}
+
+// The rule keys off property names, so the regression that matters is a route
+// nobody looked at starting to render as a table. Assert the whole non-GET set,
+// not just the routes this change was aimed at.
+func TestProcessAPIClassifiesOrqNonGetListsExactly(t *testing.T) {
+	const chunksRoute = "POST /v2/knowledge/{knowledge_id}/datasources/{datasource_id}/chunks/list"
+
+	t.Run("inference alone classifies the paginated route", func(t *testing.T) {
+		doc := loadOrqSpec(t)
+		item := doc.Paths.Find("/v2/knowledge/{knowledge_id}/datasources/{datasource_id}/chunks/list")
+		if item == nil || item.Post == nil {
+			t.Fatal("the chunks route is missing from the fixture")
+		}
+		delete(item.Post.Extensions, ExtList)
+		delete(item.Post.Extensions, ExtListFields)
+
+		op, ok := operationsByRoute(ProcessAPI("orq", doc))[chunksRoute]
+		if !ok {
+			t.Fatalf("%s is missing from the generated CLI", chunksRoute)
+		}
+		if !op.IsList {
+			t.Error("a data + has_more envelope should be inferred as a list without annotation")
+		}
+		if len(op.ListFields) != 0 {
+			t.Errorf("inferred list should declare no columns, got %v", op.ListFields)
+		}
+	})
+
+	t.Run("no other non-GET operation classifies", func(t *testing.T) {
+		want := map[string]bool{
+			// Inferred: data + has_more.
+			chunksRoute: true,
+			// Annotated by ENG-2942, not inferred: `matches` is not a
+			// conventional collection key.
+			"POST /v2/knowledge/{knowledge_id}/search": true,
+		}
+
+		got := map[string]bool{}
+		for route, op := range operationsByRoute(ProcessAPI("orq", loadOrqSpec(t))) {
+			if !op.IsList || strings.HasPrefix(route, "GET ") {
+				continue
+			}
+			got[route] = true
+		}
+
+		for route := range got {
+			if !want[route] {
+				t.Errorf("%s newly renders as a list; add it to the expected set only if that is intended", route)
+			}
+		}
+		for route := range want {
+			if !got[route] {
+				t.Errorf("%s should render as a list but does not", route)
+			}
+		}
+	})
 }
 
 func TestProcessAPIRecognizesNestedCollectionResponse(t *testing.T) {
