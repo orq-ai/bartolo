@@ -1156,3 +1156,52 @@ func TestProfilePromptValidatorRunsOnlyForRequiredKeys(t *testing.T) {
 		assert.NoError(t, validator("secret"))
 	}
 }
+
+// A profile carries whatever type the build that wrote it stored. When the
+// CLI later registers its handler under another name — or under none, as
+// UseAuth("") allows — that stored string must not strand the profile.
+func TestAuthHandlerResolvesAProfileTypeNoHandlerIsRegisteredUnder(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	name, handler := resolveAuthHandler(map[string]string{"type": "apikey"})
+	assert.NotNil(t, handler, "a stored type the registry does not answer to stranded the profile")
+	assert.Equal(t, "", name, "the resolved name is the registered one, not the stored label")
+}
+
+// The fallback is for a CLI with one way to authenticate. With several
+// registered there is no single answer, so an unknown type resolves to none.
+func TestAuthHandlerRefusesAnUnknownTypeWhenSeveralAreRegistered(t *testing.T) {
+	initTestCLI(t, "apikey", stubAuthHandler{})
+	UseAuth("oauth", stubOptionalKeyHandler{})
+
+	_, handler := resolveAuthHandler(map[string]string{"type": "somethingelse"})
+	assert.Nil(t, handler, "an ambiguous registry must not guess which handler a profile meant")
+
+	_, exact := resolveAuthHandler(map[string]string{"type": "oauth"})
+	assert.NotNil(t, exact, "an exact match must still win outright")
+}
+
+// `auth profile list` resolves a profile the way a request does, so the fields
+// it lists are the ones the profile would authenticate with. Without that, a
+// profile whose stored type is merely an unregistered label falls into the
+// list-everything fallback and prints fields the handler never declared.
+func TestListProfilesShowsHandlerFieldsForAnUnregisteredStoredType(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	Creds.Set("profiles.acme.type", "apikey")
+	Creds.Set("profiles.acme.api_key", "sk-orq-abcdefghijklmnop")
+	Creds.Set("profiles.acme.stray_field", "not a declared key")
+
+	viper.Set("output-format", "json")
+	decoded := executeJSON(t, "auth profile list -o json")
+	profiles, ok := decoded["profiles"].([]interface{})
+	assert.True(t, ok)
+	assert.Len(t, profiles, 1)
+	entry, ok := profiles[0].(map[string]interface{})
+	assert.True(t, ok)
+
+	assert.Equal(t, "apikey", entry["type"], "the stored label is still reported as stored")
+	assert.Equal(t, "sk-o****mnop", entry["api_key"])
+	_, stray := entry["stray_field"]
+	assert.False(t, stray, "a field the handler never declared was listed: %v", entry)
+}

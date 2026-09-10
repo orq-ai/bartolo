@@ -166,7 +166,10 @@ func profileListEntry(name string, profile map[string]interface{}, active string
 	entry := map[string]interface{}{"name": name, "type": typeName, "active": name == active}
 
 	keys := []string{"server"}
-	if handler := AuthHandlers[typeName]; handler != nil {
+	// Resolved the way a request resolves it, so the fields listed for a
+	// profile are the ones it would authenticate with. Listing every stored
+	// key is the fallback for a profile no registered handler claims.
+	if _, handler := authHandlerFor(typeName); handler != nil {
 		keys = append(keys, handler.ProfileKeys()...)
 	} else {
 		keys = append(keys, sortedKeys(profile)...)
@@ -397,9 +400,26 @@ func redactTree(key string, value interface{}, mask func(string, interface{}) in
 }
 
 func resolveAuthHandler(profile map[string]string) (string, AuthHandler) {
-	typeName := profile["type"]
-	if typeName != "" {
-		return typeName, AuthHandlers[typeName]
+	return authHandlerFor(profile["type"])
+}
+
+// authHandlerFor resolves the handler a stored profile type names. The type is
+// looked up verbatim; anything the registry does not answer to falls back to
+// the sole registered handler, because a CLI with one way to authenticate has
+// only one answer to give.
+//
+// That fallback is not only for the empty type. A profile carries whatever
+// type the build that wrote it chose to store, and a CLI that later registers
+// its handler under a different name — or under none, as UseAuth("") allows —
+// would otherwise strand every profile already on disk, with "no
+// authentication handler configured" and no way back other than editing
+// credentials.json by hand. The stored string is a label, not a capability.
+//
+// With several handlers registered there is no single answer, so an unknown
+// type resolves to nothing and the caller reports it.
+func authHandlerFor(typeName string) (string, AuthHandler) {
+	if handler := AuthHandlers[typeName]; handler != nil {
+		return typeName, handler
 	}
 
 	if len(AuthHandlers) == 1 {
