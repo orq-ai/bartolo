@@ -2,7 +2,11 @@ package cli
 
 import (
 	"os"
+	"reflect"
+	"strings"
 	"testing"
+
+	"github.com/spf13/viper"
 )
 
 // An application .env holds far more than the CLI's own variables.
@@ -141,5 +145,151 @@ func clearDotEnvEnv(t *testing.T, keys ...string) {
 	for _, key := range append([]string{"MYAPP_DOTENV"}, keys...) {
 		t.Setenv(key, "")
 		os.Unsetenv(key)
+	}
+}
+
+// scanDotEnvFile is the parser behind both the import and the candidate paths,
+// and every other fixture here is a bare KEY=value, so the dialect it accepts
+// is pinned once, here.
+func TestScanDotEnvFileParsesTheDotEnvDialect(t *testing.T) {
+	chdirToDotEnv(t, ".env", strings.Join([]string{
+		"# a comment",
+		"",
+		"   ",
+		"PLAIN=value",
+		"export EXPORTED=exported-value",
+		`DOUBLE="double quoted"`,
+		"SINGLE='single quoted'",
+		"SPACED   =   padded   ",
+		"EMPTY=",
+		"NO_EQUALS",
+		"=no-key",
+		`UNBALANCED="half`,
+		"WITH_EQUALS=a=b",
+	}, "\n")+"\n")
+
+	found := map[string]string{}
+	if err := scanDotEnvFile(".env", func(key, value string) {
+		found[key] = value
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]string{
+		"PLAIN":       "value",
+		"EXPORTED":    "exported-value",
+		"DOUBLE":      "double quoted",
+		"SINGLE":      "single quoted",
+		"SPACED":      "padded",
+		"EMPTY":       "",
+		"UNBALANCED":  `"half`,
+		"WITH_EQUALS": "a=b",
+	}
+	if !reflect.DeepEqual(found, want) {
+		t.Errorf("parsed %#v, want %#v", found, want)
+	}
+}
+
+// An absent file is the normal case and not an error; anything else is, or an
+// unreadable .env would look exactly like one that was never there.
+func TestScanDotEnvFileReportsOnlyRealFailures(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	if err := scanDotEnvFile(".env", func(string, string) {}); err != nil {
+		t.Fatalf("an absent file is not a failure: %v", err)
+	}
+
+	if os.Geteuid() == 0 {
+		t.Skip("root reads unreadable files")
+	}
+
+	if err := os.WriteFile(".env", []byte("MYAPP_API_KEY=x\n"), 0000); err != nil {
+		t.Fatal(err)
+	}
+	if err := scanDotEnvFile(".env", func(string, string) {}); err == nil {
+		t.Error("an unreadable file was reported as a clean read")
+	}
+}
+
+// The candidate is advice, so every state where acting on it would change
+// nothing must report nothing: the switch already on, a value that would not
+// resolve the key anyway, a variable the environment already supplies, and a
+// switch the CLI could not parse in the first place.
+func TestDotEnvCandidateOnlyReportsActionableKeys(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		contents string
+		setup    func(t *testing.T)
+		wantFile string
+	}{
+		{
+			name:     "off and the file defines the key",
+			contents: "MYAPP_API_KEY=from-dotenv\n",
+			wantFile: ".env",
+		},
+		{
+			name:     "loading already on",
+			contents: "MYAPP_API_KEY=from-dotenv\n",
+			setup:    func(t *testing.T) { t.Setenv("MYAPP_DOTENV", "1") },
+		},
+		{
+			name:     "switch is unparseable",
+			contents: "MYAPP_API_KEY=from-dotenv\n",
+			setup:    func(t *testing.T) { t.Setenv("MYAPP_DOTENV", "yes") },
+		},
+		{
+			name:     "value would not resolve the key",
+			contents: "MYAPP_API_KEY=\n",
+		},
+		{
+			name:     "environment already supplies it",
+			contents: "MYAPP_API_KEY=from-dotenv\n",
+			setup:    func(t *testing.T) { t.Setenv("MYAPP_API_KEY", "exported") },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			chdirToDotEnv(t, ".env", tc.contents)
+			clearDotEnvEnv(t, "MYAPP_API_KEY")
+
+			viper.Set("env-prefix", "MYAPP")
+			t.Cleanup(func() { viper.Set("env-prefix", nil) })
+			if tc.setup != nil {
+				tc.setup(t)
+			}
+
+			file, key := DotEnvCandidate([]string{"MYAPP_API_KEY"})
+
+			if file != tc.wantFile {
+				t.Errorf("file: got %q, want %q", file, tc.wantFile)
+			}
+			if tc.wantFile == "" && key != "" {
+				t.Errorf("key: got %q, want no key", key)
+			}
+			if tc.wantFile != "" && key != "MYAPP_API_KEY" {
+				t.Errorf("key: got %q, want MYAPP_API_KEY", key)
+			}
+			if got := os.Getenv("MYAPP_API_KEY"); got == "from-dotenv" {
+				t.Error("reporting a candidate must not import it")
+			}
+		})
+	}
+}
+
+// dotEnvFiles order decides which file the advice names; naming .env while the
+// CLI would load .env.local would point the user at the wrong line.
+func TestDotEnvCandidateFollowsTheFileOrder(t *testing.T) {
+	dir := chdirToDotEnv(t, ".env", "MYAPP_API_KEY=from-dotenv\n")
+	if err := os.WriteFile(dir+"/.env.local", []byte("MYAPP_API_KEY=from-local\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	clearDotEnvEnv(t, "MYAPP_API_KEY")
+
+	viper.Set("env-prefix", "MYAPP")
+	t.Cleanup(func() { viper.Set("env-prefix", nil) })
+
+	file, _ := DotEnvCandidate([]string{"MYAPP_API_KEY"})
+
+	if file != dotEnvFiles[0] {
+		t.Errorf("got %q, want the first file loadDotEnvFiles would read, %q", file, dotEnvFiles[0])
 	}
 }
