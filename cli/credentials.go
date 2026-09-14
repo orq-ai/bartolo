@@ -475,13 +475,26 @@ func GetAuthStatus() map[string]interface{} {
 		return status
 	}
 
-	status["configured"] = len(profile) > 0
+	configured := len(profile) > 0 && profileHoldsRequiredKeys(handler, profile)
+	status["configured"] = configured
 	status["source"] = "missing"
-	if len(profile) > 0 {
+	if configured {
 		status["source"] = "profile"
 	}
 
 	return status
+}
+
+// profileHoldsRequiredKeys reports whether the profile has a value for every
+// key the handler requires, so a profile written for another handler does not
+// read as configured.
+func profileHoldsRequiredKeys(handler AuthHandler, profile map[string]string) bool {
+	for _, key := range requiredProfileKeys(handler, handler.ProfileKeys()) {
+		if profile[normalizeProfileKeyName(key)] == "" {
+			return false
+		}
+	}
+	return true
 }
 
 // registeredAuthTypes lists the named auth types, sorted. The anonymous ""

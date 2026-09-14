@@ -1265,6 +1265,22 @@ func TestAuthStatusReportsTheStoredTypeResolvedByTheAnonymousHandler(t *testing.
 	assert.Equal(t, true, status["configured"])
 }
 
+type clientIDAuthHandler struct{}
+
+func (clientIDAuthHandler) ProfileKeys() []string                              { return []string{"client-id"} }
+func (clientIDAuthHandler) OnRequest(_ *zerolog.Logger, _ *http.Request) error { return nil }
+
+func TestAuthStatusReportsAProfileWithoutTheHandlerKeysAsUnconfigured(t *testing.T) {
+	initTestCLI(t, "", clientIDAuthHandler{})
+	Creds.Set("profiles.acme.type", "apikey")
+	Creds.Set("profiles.acme.api_key", "secret")
+	viper.Set("profile", "acme")
+
+	status := GetAuthStatus()
+	assert.Equal(t, false, status["configured"])
+	assert.Equal(t, "missing", status["source"])
+}
+
 // onlyListedProfile runs `auth profile list` and returns its single entry.
 func onlyListedProfile(t *testing.T) map[string]interface{} {
 	t.Helper()
