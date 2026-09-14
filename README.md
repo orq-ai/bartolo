@@ -143,7 +143,13 @@ Without `x-cli-list-fields` the columns are inferred from the response: nested
 objects are skipped, a list shows its first three entries followed by `…`,
 long values are truncated, and columns that do not fit the terminal are
 dropped from the right. Declared or explicit columns can reach into nested
-objects with a dotted path such as `model.id` or `--columns model.id`.
+objects with a dotted path such as `model.id`. They can also project a field from each object
+in one nested array, such as `settings.tools[].key`; missing, null, and
+non-object elements are omitted, and the surviving values use the same
+three-entry list abbreviation. A selector supports one `[]` and requires a
+field after it. Array indexes and multiple projections are not column syntax;
+use `--jmespath` when a response needs indexing, filtering, aggregation, or
+other restructuring.
 
 Bartolo also groups operations automatically from:
 

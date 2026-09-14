@@ -380,7 +380,7 @@ git commit -m "feat(cli): project table columns through arrays"
 In `templates_golden_test.go`, change the search declaration and row schema to:
 
 ```yaml
-      x-cli-list-fields: [name, tools[].key]
+      x-cli-list-fields: [name, "tools[].key"]
       responses:
         "200":
           description: ok
