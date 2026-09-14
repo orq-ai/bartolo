@@ -57,8 +57,9 @@ func TestLoadDotEnvFilesOffByDefault(t *testing.T) {
 	}
 }
 
-// The config file is read before the dotenv files, so it can turn them on.
-func TestLoadDotEnvFilesEnabledByConfig(t *testing.T) {
+// A config-file key would re-enable the cwd-decides-identity problem
+// everywhere, so only the environment variable turns dotenv loading on.
+func TestLoadDotEnvFilesIgnoresConfigKey(t *testing.T) {
 	chdirToDotEnv(t, ".env", "MYAPP_API_KEY=from-dotenv\n")
 
 	t.Setenv("MYAPP_API_KEY", "")
@@ -73,8 +74,8 @@ func TestLoadDotEnvFilesEnabledByConfig(t *testing.T) {
 
 	loadDotEnvFiles("MYAPP", "")
 
-	if got := os.Getenv("MYAPP_API_KEY"); got != "from-dotenv" {
-		t.Errorf("config did not enable dotenv loading: got %q", got)
+	if got := os.Getenv("MYAPP_API_KEY"); got != "" {
+		t.Errorf("a config key enabled dotenv loading: got %q", got)
 	}
 }
 

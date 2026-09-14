@@ -192,16 +192,21 @@ func DotEnvOrigin(key string) string {
 }
 
 // dotEnvEnabled reports whether dotenv loading is turned on. It is off by
-// default: which directory you happen to be in should not decide which
-// credentials you send. Turn it on per-invocation with $PREFIX_DOTENV=1 or
-// permanently with `dotenv: true` in the config file.
+// default: reading credentials out of the working directory is a job for the
+// shell or a tool like direnv, not for an API client, and it would otherwise
+// let the directory you happen to be in decide which credentials you send.
+// $PREFIX_DOTENV=1 turns it on for callers who want the old behaviour. There is
+// deliberately no config-file key: a persisted setting would re-enable the
+// cwd-decides-identity problem everywhere, invisibly.
 func dotEnvEnabled(envPrefix string) bool {
-	if value := strings.TrimSpace(os.Getenv(envPrefix + "_DOTENV")); value != "" {
-		enabled, err := strconv.ParseBool(value)
-		return err == nil && enabled
+	value := strings.TrimSpace(os.Getenv(envPrefix + "_DOTENV"))
+	if value == "" {
+		return false
 	}
 
-	return viper.GetBool("dotenv")
+	enabled, err := strconv.ParseBool(value)
+
+	return err == nil && enabled
 }
 
 // loadDotEnvFiles imports the CLI's own variables from project-local dotenv
@@ -279,9 +284,8 @@ func initConfig(appName, envPrefix, apiKeyEnvVar, serializationFormat string) {
 	viper.AddConfigPath("$HOME/." + appName + "/")
 	viper.ReadInConfig()
 
-	// Load local dotenv files before environment variables so project-level
-	// credentials work without requiring an explicit `export`. Opt-in only, and
-	// read after the config file so `dotenv: true` there can turn it on.
+	// Opt-in only. When enabled, dotenv files are read before the environment so
+	// project-level credentials work without an explicit `export`.
 	loadDotEnvFiles(envPrefix, apiKeyEnvVar)
 
 	// Load configuration from the environment if provided. Flags below get
@@ -618,7 +622,15 @@ $flags
 
 Environment variables must be capitalized, prefixed with ¬$APP¬, and words are separated by an underscore rather than a dash. For example, setting ¬$APP_VERBOSE=1¬ is equivalent to passing ¬--verbose¬ to the command.
 
-Project-local ¬.env¬ and ¬.env.local¬ files are **not** read unless you ask for it, because the lookup is relative to the directory you run the command in and would otherwise let a file decide which credentials you send. Turn it on for one invocation with ¬$APP_DOTENV=1¬, or permanently with ¬"dotenv": true¬ in the config file. When it is on, only ¬$APP_¬-prefixed variables (plus the configured API key variable) are imported, and ¬doctor¬ reports the file that supplied a key.
+### Dotenv files
+
+The CLI does **not** read ¬.env¬ or ¬.env.local¬ by default. Loading credentials out of the working directory means the directory you are standing in decides which credentials you send, which is a job for your shell or a tool like ¬direnv¬, not for this CLI.
+
+Set ¬$APP_DOTENV=1¬ to turn it on for that invocation. There is no configuration-file equivalent on purpose: a persisted setting would bring the surprise back everywhere. When it is enabled:
+
+- Only ¬$APP_¬-prefixed variables and the configured API key variable are imported. The rest of an application ¬.env¬ — ¬OPENAI_API_KEY¬, ¬DATABASE_URL¬ and friends — is ignored.
+- A variable already set in the environment always wins; a file never overwrites an explicit ¬export¬.
+- ¬doctor¬ reports a ¬dotenv¬ auth source and names the file that supplied the key, so a credential from a file is never mistaken for one you exported.
 
 ## Configuration Files
 
@@ -638,7 +650,6 @@ Name      | Type   | Description
 --------- | ------ | -----------
 ¬color¬   | ¬bool¬ | Force colorized output.
 ¬nocolor¬ | ¬bool¬ | Disable colorized output.
-¬dotenv¬  | ¬bool¬ | Read ¬.env¬ and ¬.env.local¬ from the current directory.
 `
 
 	help = strings.Replace(help, "¬", "`", -1)
