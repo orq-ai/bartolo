@@ -63,14 +63,14 @@ jobs:
           echo "::error::Releases are cut from main only; this run targets ${{ github.ref }}."
           exit 1
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # The commit ci verified, not whatever main has drifted to since.
           ref: ${{ github.event.workflow_run.head_sha || github.ref }}
           fetch-depth: 0 # full history + tags for version derivation
           persist-credentials: true # the tag push below reuses this credential
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
