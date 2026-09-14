@@ -3,12 +3,14 @@ package apikey
 import (
 	"bytes"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/orq-ai/bartolo/cli"
+	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 )
@@ -228,4 +230,139 @@ func TestMissingKeyErrorWithNoEnvVarsIsACompleteSentence(t *testing.T) {
 	assert.NotContains(t, err.Error(), "set one of")
 	assert.False(t, strings.HasSuffix(err.Error(), ": "))
 	assert.False(t, strings.HasSuffix(err.Error(), "or "))
+}
+
+// `doctor` has to name the file, or a dotenv key looks like an exported one.
+func TestAuthStatusNamesTheDotEnvFile(t *testing.T) {
+	resetCLI(t)
+	t.Setenv("TEST_API_KEY", "")
+	os.Unsetenv("TEST_API_KEY")
+	t.Setenv("TEST_DOTENV", "1")
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("TEST_API_KEY=from-dotenv\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	cli.Init(&cli.Config{AppName: "test", EnvPrefix: "TEST"})
+	Init("x-auth", LocationHeader)
+
+	handler := cli.AuthHandlers[""].(*Handler)
+	status := handler.AuthStatus(nil)
+
+	assert.Equal(t, true, status["configured"])
+	assert.Equal(t, "dotenv", status["source"])
+	assert.Equal(t, ".env", status["dotenv_file"])
+}
+
+// An exported key must not be reported as dotenv-sourced either.
+func TestAuthStatusOmitsTheDotEnvFileForAnExportedKey(t *testing.T) {
+	resetCLI(t)
+	t.Setenv("TEST_API_KEY", "from-shell")
+	t.Chdir(t.TempDir())
+
+	cli.Init(&cli.Config{AppName: "test", EnvPrefix: "TEST"})
+	Init("x-auth", LocationHeader)
+
+	status := cli.AuthHandlers[""].(*Handler).AuthStatus(nil)
+
+	assert.Equal(t, "env", status["source"])
+	assert.NotContains(t, status, "dotenv_file")
+}
+
+// The standard remedies read as already satisfied when a .env holds the key.
+func TestMissingKeyErrorNamesAnIgnoredDotEnvFile(t *testing.T) {
+	resetCLI(t)
+	t.Setenv("TEST_API_KEY", "")
+	os.Unsetenv("TEST_API_KEY")
+	t.Setenv("TEST_DOTENV", "")
+	os.Unsetenv("TEST_DOTENV")
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("TEST_API_KEY=from-dotenv\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	cli.Init(&cli.Config{AppName: "test", EnvPrefix: "TEST"})
+	Init("x-auth", LocationHeader)
+
+	err := cli.AuthHandlers[""].(*Handler).OnRequest(&zerolog.Logger{}, httptest.NewRequest("GET", "/", nil))
+
+	assert.ErrorContains(t, err, "missing API key")
+	assert.ErrorContains(t, err, ".env defines TEST_API_KEY")
+	assert.ErrorContains(t, err, "TEST_DOTENV=1")
+}
+
+// No .env, no hint: a remedy that fires everywhere trains people to ignore it.
+func TestMissingKeyErrorWithoutADotEnvFile(t *testing.T) {
+	resetCLI(t)
+	t.Setenv("TEST_API_KEY", "")
+	os.Unsetenv("TEST_API_KEY")
+	t.Chdir(t.TempDir())
+
+	cli.Init(&cli.Config{AppName: "test", EnvPrefix: "TEST"})
+	Init("x-auth", LocationHeader)
+
+	err := cli.AuthHandlers[""].(*Handler).OnRequest(&zerolog.Logger{}, httptest.NewRequest("GET", "/", nil))
+
+	assert.ErrorContains(t, err, "missing API key")
+	assert.NotContains(t, err.Error(), "dotenv loading is off")
+}
+
+// The dotenv-file field names where a credential came from, so it must appear
+// only for a key that came from a file — logging it empty on every profile and
+// exported key is what it looked like before.
+func TestOnRequestLogsTheDotEnvFileOnlyForADotEnvKey(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		dotEnv     bool
+		wantSource string
+	}{
+		{name: "exported key", wantSource: "env"},
+		{name: "dotenv key", dotEnv: true, wantSource: "dotenv"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetCLI(t)
+
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("TEST_API_KEY=from-dotenv\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(dir)
+
+			t.Setenv("TEST_API_KEY", "")
+			os.Unsetenv("TEST_API_KEY")
+			if tc.dotEnv {
+				t.Setenv("TEST_DOTENV", "1")
+			} else {
+				t.Setenv("TEST_DOTENV", "")
+				os.Unsetenv("TEST_DOTENV")
+				t.Setenv("TEST_API_KEY", "exported")
+			}
+
+			cli.Init(&cli.Config{AppName: "test", EnvPrefix: "TEST"})
+
+			// cli.Init pins the global level to Warn, which gates Debug events
+			// regardless of the logger's own level.
+			previous := zerolog.GlobalLevel()
+			zerolog.SetGlobalLevel(zerolog.DebugLevel)
+			t.Cleanup(func() { zerolog.SetGlobalLevel(previous) })
+
+			logged := &bytes.Buffer{}
+			logger := zerolog.New(logged).Level(zerolog.DebugLevel)
+			h := &Handler{Name: "x-auth", In: LocationHeader, EnvVars: []string{"TEST_API_KEY"}}
+
+			request := httptest.NewRequest("GET", "http://example.com", nil)
+			assert.NoError(t, h.OnRequest(&logger, request))
+
+			assert.Contains(t, logged.String(), `"auth-source":"`+tc.wantSource+`"`)
+			if tc.dotEnv {
+				assert.Contains(t, logged.String(), `"dotenv-file":".env"`)
+			} else {
+				assert.NotContains(t, logged.String(), "dotenv-file")
+			}
+		})
+	}
 }
