@@ -179,13 +179,37 @@ func userHomeDir() string {
 	return os.Getenv("HOME")
 }
 
-func loadDotEnvFiles() {
+// dotEnvOrigins records which dotenv file supplied each variable this process
+// imported, so the credential chain can name the file instead of presenting it
+// as an ordinary exported variable.
+var dotEnvOrigins = map[string]string{}
+
+// DotEnvOrigin returns the dotenv file a variable was loaded from, or "" when
+// the value did not come from one.
+func DotEnvOrigin(key string) string {
+	return dotEnvOrigins[key]
+}
+
+// loadDotEnvFiles imports the CLI's own variables from project-local dotenv
+// files. Only keys under envPrefix (plus apiKeyEnvVar, which may sit outside
+// it) are imported: an application .env also holds unrelated secrets such as
+// OPENAI_API_KEY or DATABASE_URL, and nothing here reads those.
+func loadDotEnvFiles(envPrefix, apiKeyEnvVar string) {
+	if os.Getenv(envPrefix+"_NO_DOTENV") != "" {
+		return
+	}
+
+	wanted := func(key string) bool {
+		return (envPrefix != "" && strings.HasPrefix(key, envPrefix+"_")) ||
+			(apiKeyEnvVar != "" && key == apiKeyEnvVar)
+	}
+
 	for _, filename := range []string{".env", ".env.local"} {
-		loadDotEnvFile(filename)
+		loadDotEnvFile(filename, wanted)
 	}
 }
 
-func loadDotEnvFile(filename string) {
+func loadDotEnvFile(filename string, wanted func(string) bool) {
 	file, err := os.Open(filename)
 	if err != nil {
 		return
@@ -210,7 +234,7 @@ func loadDotEnvFile(filename string) {
 
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
-		if key == "" || os.Getenv(key) != "" {
+		if key == "" || !wanted(key) || os.Getenv(key) != "" {
 			continue
 		}
 
@@ -220,7 +244,9 @@ func loadDotEnvFile(filename string) {
 			}
 		}
 
-		_ = os.Setenv(key, value)
+		if os.Setenv(key, value) == nil {
+			dotEnvOrigins[key] = filename
+		}
 	}
 }
 
@@ -241,7 +267,7 @@ func initConfig(appName, envPrefix, apiKeyEnvVar, serializationFormat string) {
 
 	// Load local dotenv files before environment variables so project-level
 	// credentials work without requiring an explicit `export`.
-	loadDotEnvFiles()
+	loadDotEnvFiles(envPrefix, apiKeyEnvVar)
 
 	// Load configuration from the environment if provided. Flags below get
 	// transformed automatically, e.g. `client-id` -> `PREFIX_CLIENT_ID`.
@@ -576,6 +602,8 @@ $flags
 ## Environment Variables
 
 Environment variables must be capitalized, prefixed with ¬$APP¬, and words are separated by an underscore rather than a dash. For example, setting ¬$APP_VERBOSE=1¬ is equivalent to passing ¬--verbose¬ to the command.
+
+Project-local ¬.env¬ and ¬.env.local¬ files in the current directory are read before the environment, and only ¬$APP_¬-prefixed variables (plus the configured API key variable) are imported. Because the lookup is relative to where you run the command, a key in one of these files can change which credentials are used; ¬doctor¬ reports the file when it supplied the key. Set ¬$APP_NO_DOTENV=1¬ to skip these files entirely.
 
 ## Configuration Files
 

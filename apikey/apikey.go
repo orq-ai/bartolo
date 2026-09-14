@@ -52,12 +52,12 @@ func (h *Handler) RequiredProfileKeys() []string {
 func (h *Handler) OnRequest(log *zerolog.Logger, request *http.Request) error {
 	profile := cli.GetProfile()
 	activeProfile := cli.ActiveProfileName()
-	key, source := h.lookupKey(profile, activeProfile)
+	key, source, dotEnvFile := h.lookupKey(profile, activeProfile)
 	if key == "" {
 		return h.missingKeyError(activeProfile, source)
 	}
 
-	log.Debug().Str("auth-source", source).Msg("Using API key authentication")
+	log.Debug().Str("auth-source", source).Str("dotenv-file", dotEnvFile).Msg("Using API key authentication")
 	h.applyKey(request, key)
 
 	return nil
@@ -89,10 +89,16 @@ func (h *Handler) applyKey(request *http.Request, key string) {
 
 // AuthStatus describes whether auth is configured for `doctor`.
 func (h *Handler) AuthStatus(profile map[string]string) map[string]interface{} {
-	key, source := h.lookupKey(profile, cli.ActiveProfileName())
+	key, source, dotEnvFile := h.lookupKey(profile, cli.ActiveProfileName())
 	status := map[string]interface{}{
 		"configured": key != "",
 		"source":     source,
+	}
+
+	// A key read out of a .env is otherwise indistinguishable from one the user
+	// exported on purpose, so name the file that supplied it.
+	if dotEnvFile != "" {
+		status["dotenv_file"] = dotEnvFile
 	}
 
 	if len(h.EnvVars) > 0 {
@@ -102,9 +108,11 @@ func (h *Handler) AuthStatus(profile map[string]string) map[string]interface{} {
 	return status
 }
 
-func (h *Handler) lookupKey(profile map[string]string, activeProfile string) (string, string) {
+// lookupKey resolves the key and reports where it came from: "profile", "env",
+// "dotenv" (with the file that supplied it), or a missing-key reason.
+func (h *Handler) lookupKey(profile map[string]string, activeProfile string) (key string, source string, dotEnvFile string) {
 	if key := strings.TrimSpace(profile[apiKey]); key != "" {
-		return h.applyPrefix(key), "profile"
+		return h.applyPrefix(key), "profile", ""
 	}
 
 	// A chosen profile is authoritative. Falling back to an ambient key here is
@@ -112,18 +120,21 @@ func (h *Handler) lookupKey(profile map[string]string, activeProfile string) (st
 	// to avoid, so an incomplete or unknown profile is an error instead.
 	if activeProfile != "" {
 		if cli.ProfileExists(activeProfile) {
-			return "", "profile-incomplete"
+			return "", "profile-incomplete", ""
 		}
-		return "", "profile-unknown"
+		return "", "profile-unknown", ""
 	}
 
 	for _, envVar := range h.EnvVars {
 		if value := strings.TrimSpace(os.Getenv(envVar)); value != "" {
-			return h.applyPrefix(value), "env"
+			if file := cli.DotEnvOrigin(envVar); file != "" {
+				return h.applyPrefix(value), "dotenv", file
+			}
+			return h.applyPrefix(value), "env", ""
 		}
 	}
 
-	return "", "missing"
+	return "", "missing", ""
 }
 
 func (h *Handler) missingKeyError(name string, source string) error {
