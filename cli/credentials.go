@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -105,7 +106,7 @@ func initAuth() {
 	// Install auth middleware
 	Client.UseRequest(func(ctx *context.Context, h context.Handler) {
 		profile := GetProfile()
-		handler := resolveAuthHandler(profile)
+		handler := authHandlerFor(profile["type"])
 		if handler == nil {
 			h.Error(ctx, unresolvedAuthError(profile["type"]))
 			return
@@ -167,29 +168,23 @@ func newProfileListCommand() *cobra.Command {
 	}
 }
 
-// profileListEntry renders one stored profile for `auth profile list`. The
-// handler a request would authenticate the profile with names the fields worth
-// leading with, and every other stored field follows (secrets masked), so a
-// field that is on disk is never absent from the listing — including on a
-// profile whose stored type names a handler this build no longer registers.
+// profileListEntry renders one stored profile for `auth profile list`: every
+// field it holds, secrets masked, whatever handler would authenticate it. The
+// resolved handler used to choose the fields, which hid a stored credential
+// whenever the profile's type label named a scheme this build no longer
+// registers — the listing is where someone goes to find that credential.
 func profileListEntry(name string, profile map[string]interface{}, active string) map[string]interface{} {
 	typeName, _ := profile["type"].(string)
 	entry := map[string]interface{}{"name": name, "type": typeName, "active": name == active}
 
-	keys := []string{"server"}
-	if handler := authHandlerFor(typeName); handler != nil {
-		keys = append(keys, handler.ProfileKeys()...)
-	}
-	keys = append(keys, sortedKeys(profile)...)
-
-	for _, key := range keys {
+	for _, key := range sortedKeys(profile) {
+		// Read by the stored spelling, report by the normalized one: a
+		// hand-written "api-key" is a field on disk like any other.
 		field := normalizeProfileKeyName(key)
 		if field == "type" {
 			continue
 		}
-		if value, ok := profile[field]; ok {
-			entry[field] = maskIfSecret(field, value)
-		}
+		entry[field] = maskIfSecret(field, profile[key])
 	}
 
 	return entry
@@ -406,10 +401,6 @@ func redactTree(key string, value interface{}, mask func(string, interface{}) in
 	}
 }
 
-func resolveAuthHandler(profile map[string]string) AuthHandler {
-	return authHandlerFor(profile["type"])
-}
-
 // authHandlerFor resolves the handler a stored profile type names, and only
 // the handler: the stored label is the caller's to report, since this returns
 // no name a caller could mistake for one.
@@ -429,21 +420,21 @@ func authHandlerFor(typeName string) AuthHandler {
 		}
 	}
 
-	_, handler, _ := soleAuthHandler()
+	_, handler := soleAuthHandler()
 	return handler
 }
 
 // soleAuthHandler returns the registered handler when there is exactly one,
 // along with the name it registered under, which is empty for an anonymous
-// registration.
-func soleAuthHandler() (string, AuthHandler, bool) {
+// registration. A nil handler means there is not exactly one.
+func soleAuthHandler() (string, AuthHandler) {
 	if len(AuthHandlers) != 1 {
-		return "", nil, false
+		return "", nil
 	}
 	for name, handler := range AuthHandlers {
-		return name, handler, true
+		return name, handler
 	}
-	return "", nil, false
+	return "", nil
 }
 
 // unresolvedAuthError explains which stored label failed to resolve and which
@@ -453,11 +444,7 @@ func unresolvedAuthError(storedType string) error {
 	if storedType == "" {
 		return fmt.Errorf("no authentication handler configured")
 	}
-	types := registeredAuthTypes()
-	if len(types) == 0 {
-		return fmt.Errorf("profile declares auth type %q, which this CLI does not register", storedType)
-	}
-	return fmt.Errorf("profile declares auth type %q; this CLI registers %s", storedType, strings.Join(types, ", "))
+	return fmt.Errorf("profile declares auth type %q; this CLI registers %s", storedType, strings.Join(registeredAuthTypes(), ", "))
 }
 
 // GetAuthStatus returns machine-readable auth diagnostics for `doctor`.
@@ -479,7 +466,7 @@ func GetAuthStatus() map[string]interface{} {
 	profile := GetProfile()
 	status["profile"] = ActiveProfileName()
 
-	handler := resolveAuthHandler(profile)
+	handler := authHandlerFor(profile["type"])
 	if typeName := profile["type"]; typeName != "" {
 		// The label the profile stores, which is the one `auth profile list`
 		// shows. An anonymous handler has no name to report in its place.
@@ -489,7 +476,7 @@ func GetAuthStatus() map[string]interface{} {
 	if handler == nil {
 		status["configured"] = false
 		status["source"] = "missing"
-		status["message"] = "configure a profile with `auth setup`"
+		status["message"] = unresolvedAuthError(profile["type"]).Error()
 		return status
 	}
 
@@ -798,7 +785,7 @@ func pickAuthHandler(preferredType string) (string, AuthHandler, error) {
 		return preferredType, handler, nil
 	}
 
-	if name, handler, ok := soleAuthHandler(); ok {
+	if name, handler := soleAuthHandler(); handler != nil {
 		return name, handler, nil
 	}
 
@@ -1143,16 +1130,14 @@ func (c *CredentialsFile) Set(key string, value interface{}) { c.viper.Set(key, 
 // key rather than a nested one is what keeps the other profiles readable: a
 // viper override covering a proper subset of a map hides the rest of it.
 func (c *CredentialsFile) SetProfile(name string, fields map[string]string) {
-	profiles := c.viper.GetStringMap("profiles")
-	if profiles == nil {
-		profiles = map[string]interface{}{}
-	}
+	// Viper lower-cases every map key it stores, so an uncanonicalized name
+	// both misses the profile already there and collides with it on write.
+	name = sanitizeProfileName(name)
 
+	profiles := c.viper.GetStringMap("profiles")
 	merged := map[string]interface{}{}
 	if existing, ok := profiles[name].(map[string]interface{}); ok {
-		for key, value := range existing {
-			merged[key] = value
-		}
+		maps.Copy(merged, existing)
 	}
 	for key, value := range fields {
 		merged[key] = value

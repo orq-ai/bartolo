@@ -21,6 +21,10 @@ func resetCLI(t *testing.T) {
 	t.Helper()
 
 	viper.Reset()
+	// cli.AuthHandlers is a package global that viper.Reset does not touch,
+	// and resolution branches on how many handlers are registered.
+	cli.AuthHandlers = map[string]cli.AuthHandler{}
+	t.Cleanup(func() { cli.AuthHandlers = map[string]cli.AuthHandler{} })
 	t.Setenv("HOME", t.TempDir())
 }
 

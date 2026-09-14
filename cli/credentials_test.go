@@ -84,6 +84,9 @@ func resetAuthState(t *testing.T) string {
 	t.Helper()
 
 	resetAuthSingletons()
+	// Resolution branches on len(AuthHandlers), so a leaked registration
+	// changes what the next test resolves instead of failing it loudly.
+	t.Cleanup(resetAuthSingletons)
 
 	home := t.TempDir()
 	oldHome := os.Getenv("HOME")
@@ -1159,7 +1162,7 @@ func TestProfilePromptValidatorRunsOnlyForRequiredKeys(t *testing.T) {
 	}
 }
 
-func TestResolveAuthHandler(t *testing.T) {
+func TestAuthHandlerFor(t *testing.T) {
 	type registration struct {
 		name    string
 		handler AuthHandler
@@ -1213,7 +1216,7 @@ func TestResolveAuthHandler(t *testing.T) {
 				UseAuth(r.name, r.handler)
 			}
 
-			assert.Equal(t, tc.wantHandler, resolveAuthHandler(map[string]string{"type": tc.storedType}))
+			assert.Equal(t, tc.wantHandler, authHandlerFor(tc.storedType))
 		})
 	}
 }
@@ -1286,6 +1289,20 @@ func TestSetProfileMergesOverStoredFields(t *testing.T) {
 	assert.Equal(t, "second", stored["api_key"])
 	assert.Equal(t, "apikey", stored["type"], "an untouched field must survive a merge")
 	assert.Equal(t, "https://orq.acme.internal", stored["server"])
+}
+
+// saveAuthProfile deliberately omits an empty optional field, so a correctly
+// saved profile for a handler with optional keys holds only the required ones.
+// Without the requiredProfileKeys narrowing, doctor calls that profile
+// unconfigured and offers to reconfigure a profile that is already fine.
+func TestAuthStatusReportsAProfileMissingOnlyAnOptionalKeyAsConfigured(t *testing.T) {
+	initTestCLI(t, "", stubOptionalKeyHandler{})
+	Creds.Set("profiles.acme.api_key", "secret")
+	viper.Set("profile", "acme")
+
+	status := GetAuthStatus()
+	assert.Equal(t, true, status["configured"], "an absent optional key must not read as unconfigured")
+	assert.Equal(t, "profile", status["source"])
 }
 
 // The read path went lenient while `auth setup --type` stayed strict, because
@@ -1373,31 +1390,63 @@ func onlyListedProfile(t *testing.T) map[string]interface{} {
 	return entry
 }
 
-// A rescued profile is listed by the handler that authenticates it, and the
-// listing still shows what else is on disk. A stored label is stale, not
-// wrong, so the two field sets usually coincide — but when the anonymous
-// handler changed scheme between builds they do not, and a credential the
-// listing omits is one the user cannot find while debugging the failure.
-func TestListProfilesShowsHandlerFieldsAndEveryOtherStoredFieldForAStoredLabel(t *testing.T) {
-	initTestCLI(t, "", stubAuthHandler{})
-	Creds.Set("profiles.acme.type", "apikey")
-	Creds.Set("profiles.acme.api_key", "sk-orq-abcdefghijklmnop")
-	Creds.Set("profiles.acme.stray_field", "not a declared key")
+// What the listing shows must not depend on which handler would authenticate
+// the profile. A stored label is stale rather than wrong, so the handler's
+// fields and the stored ones usually coincide; when the anonymous handler
+// changed scheme between builds they do not, and the credential the listing
+// would have omitted is the one the user is looking for.
+func TestListProfilesShowsEveryStoredFieldWhateverResolves(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T)
+	}{
+		{"a stored label resolves through the sole anonymous handler", func(t *testing.T) {
+			initTestCLI(t, "", stubAuthHandler{})
+		}},
+		{"no handler resolves the stored label", func(t *testing.T) {
+			initTestCLI(t, "apikey", stubAuthHandler{})
+			UseAuth("oauth", stubOptionalKeyHandler{})
+		}},
+	}
 
-	entry := onlyListedProfile(t)
-	assert.Equal(t, "apikey", entry["type"])
-	assert.Contains(t, entry, "api_key")
-	assert.Contains(t, entry, "stray_field")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup(t)
+			Creds.Set("profiles.acme.type", "legacy")
+			Creds.Set("profiles.acme.api_key", "sk-orq-abcdefghijklmnop")
+			Creds.Set("profiles.acme.stray_field", "not a declared key")
+
+			entry := onlyListedProfile(t)
+			assert.Equal(t, "legacy", entry["type"])
+			assert.Contains(t, entry, "api_key")
+			assert.Contains(t, entry, "stray_field")
+		})
+	}
 }
 
-func TestListProfilesShowsEveryStoredFieldWhenNoHandlerResolves(t *testing.T) {
-	initTestCLI(t, "apikey", stubAuthHandler{})
-	UseAuth("oauth", stubOptionalKeyHandler{})
-	Creds.Set("profiles.acme.type", "legacy")
-	Creds.Set("profiles.acme.api_key", "sk-orq-abcdefghijklmnop")
-	Creds.Set("profiles.acme.stray_field", "kept")
+// A field written by hand under its dashed spelling is a field on disk, and
+// the listing is what someone reads to find it.
+func TestListProfilesShowsAFieldStoredUnderItsDashedSpelling(t *testing.T) {
+	home := resetAuthState(t)
+	writeCredentials(t, home, `{"profiles":{"acme":{"type":"","api-key":"sk-orq-abcdefghijklmnop"}}}`)
+	bootCLI(t, home)
 
 	entry := onlyListedProfile(t)
-	assert.Equal(t, "legacy", entry["type"])
-	assert.Contains(t, entry, "stray_field")
+	assert.Contains(t, entry, "api_key")
+}
+
+// SetProfile canonicalizes the name it is handed. Viper lower-cases map keys,
+// so an uncanonicalized name misses the profile already stored and then
+// collides with it, dropping one of the two at random.
+func TestSetProfileCanonicalizesTheProfileName(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+	Creds.Set("profiles.acme.type", "apikey")
+	Creds.Set("profiles.acme.server", "https://orq.acme.internal")
+
+	Creds.SetProfile("ACME", map[string]string{"api_key": "secret"})
+
+	stored := Creds.GetStringMapString("profiles.acme")
+	assert.Equal(t, "secret", stored["api_key"])
+	assert.Equal(t, "https://orq.acme.internal", stored["server"], "the stored profile must not be replaced by a differently-cased name")
+	assert.Len(t, Creds.GetStringMap("profiles"), 1, "a differently-cased name must not create a second profile")
 }
