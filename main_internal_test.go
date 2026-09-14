@@ -737,14 +737,14 @@ func TestGenerateFromJSONFixtureBuildsCLI(t *testing.T) {
 	}
 }
 
-func TestGeneratedListCommandRendersNestedResponse(t *testing.T) {
+func TestGeneratedListCommandRendersArrayElementPath(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/files" {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"id":"file_1","model":{"id":"model_1"}}]`))
+		_, _ = w.Write([]byte(`[{"id":"file_1","settings":{"tools":[{"key":"lookup"},{"key":"refund"},{"key":"policy"},{"key":"escalate"}]}}]`))
 	}))
 	defer server.Close()
 
@@ -784,7 +784,8 @@ paths:
     get:
       operationId: listFiles
       x-cli-list-fields:
-        - model.id
+        - id
+        - settings.tools[].key
       responses:
         "200":
           description: ok
@@ -812,6 +813,23 @@ paths:
 		t.Fatalf("generateFromSpec: %v", err)
 	}
 
+	customRegister := `package custom
+
+import (
+	bartolocli "github.com/orq-ai/bartolo/cli"
+	"github.com/spf13/cobra"
+)
+
+func Register(root *cobra.Command) {
+	_ = root
+	bartolocli.Formatter = bartolocli.NewDefaultFormatter(true, true)
+}
+`
+	customPath := filepath.Join(tmp, "cli", "custom", "register.go")
+	if err := os.WriteFile(customPath, []byte(customRegister), 0o644); err != nil {
+		t.Fatalf("write custom table hook: %v", err)
+	}
+
 	tidy := exec.Command("go", "mod", "tidy")
 	tidy.Dir = tmp
 	if out, err := tidy.CombinedOutput(); err != nil {
@@ -825,14 +843,14 @@ paths:
 		t.Fatalf("build generated CLI: %v\n%s", err, string(out))
 	}
 
-	args := append(strings.Fields(commandPath), "-o", "json")
-	run := exec.Command(cliPath, args...)
+	run := exec.Command(cliPath, strings.Fields(commandPath)...)
 	run.Dir = tmp
 	out, err := run.CombinedOutput()
 	if err != nil {
 		t.Fatalf("run generated list command: %v\n%s", err, string(out))
 	}
-	if !strings.Contains(string(out), `"id": "model_1"`) {
+	if !strings.Contains(string(out), "SETTINGS . TOOLS[] . KEY") ||
+		!strings.Contains(string(out), "lookup, refund, policy, …") {
 		t.Fatalf("generated list command returned unexpected response: %s", out)
 	}
 }
