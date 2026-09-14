@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/olekukonko/tablewriter/tw"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 )
@@ -493,6 +494,29 @@ func TestDefaultFormatterValidatesArrayElementColumnsAcrossRows(t *testing.T) {
 		checkColumns([]string{"settings.tools[]"}, rows, false),
 		`declared column: "settings.tools[]" is not a field of the returned items`,
 	)
+}
+
+func TestTableHeaderPreservesWholeHeaderFormattingForNonProjections(t *testing.T) {
+	headers := []string{
+		"settings.tools[0].key",
+		"settings.tools[1].key",
+		"settings.tools[*].key",
+		"settings.tools[ ].key",
+		"settings.tools[]",
+		"groups[].tools[].key",
+		"settings.tools[][].key",
+	}
+
+	for _, header := range headers {
+		t.Run(header, func(t *testing.T) {
+			want := tw.Title(strings.Join(tw.SplitCamelCase(header), tw.Space))
+			assert.Equal(t, want, tableHeader(header))
+		})
+	}
+}
+
+func TestTableHeaderPreservesValidArrayProjection(t *testing.T) {
+	assert.Equal(t, "SETTINGS . TOOLS[] . KEY", tableHeader("settings.tools[].key"))
 }
 
 // Every envelope shape the table extractor classifies, in one place. A

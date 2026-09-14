@@ -495,21 +495,39 @@ func renderTable(data interface{}, requestedColumns []string, userColumns bool) 
 	return true, nil
 }
 
-// tableHeader mirrors tablewriter's header formatting while keeping [] joined
-// to the projected field name.
+// tableHeader preserves tablewriter's whole-header formatting except for one
+// valid array projection, whose [] marker stays joined to the projected field.
 func tableHeader(header string) string {
-	parts := strings.Split(header, ".")
-	for i, part := range parts {
-		projection := strings.HasSuffix(part, "[]")
-		if projection {
-			part = strings.TrimSuffix(part, "[]")
-		}
-		parts[i] = tw.Title(strings.Join(tw.SplitCamelCase(part), tw.Space))
-		if projection {
-			parts[i] += "[]"
-		}
+	format := func(value string) string {
+		return tw.Title(strings.Join(tw.SplitCamelCase(value), tw.Space))
 	}
-	return strings.Join(parts, " . ")
+
+	parts := strings.Split(header, ".")
+	projection := -1
+	for i, part := range parts {
+		if part == "" {
+			return format(header)
+		}
+		if !strings.HasSuffix(part, "[]") {
+			continue
+		}
+		if projection >= 0 || i == len(parts)-1 || strings.Count(part, "[]") != 1 {
+			return format(header)
+		}
+		parts[i] = strings.TrimSuffix(part, "[]")
+		if parts[i] == "" {
+			return format(header)
+		}
+		projection = i
+	}
+
+	if projection < 0 {
+		return format(header)
+	}
+
+	prefix := format(strings.Join(parts[:projection+1], "."))
+	suffix := format(strings.Join(parts[projection+1:], "."))
+	return prefix + "[] . " + suffix
 }
 
 // tableFooter summarizes the envelope in one line below the table: how many
