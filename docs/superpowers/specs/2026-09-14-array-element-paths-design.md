@@ -147,11 +147,11 @@ Given this row:
   "key": "refund-agent",
   "settings": {
     "tools": [
-      {"key": "lookup-order"},
-      {"key": "issue-refund"},
+      {"key": "lookup"},
+      {"key": "refund"},
       {"key": null},
       {"id": "tool-without-key"},
-      {"key": "get-policy"},
+      {"key": "policy"},
       {"key": "escalate"}
     ]
   }
@@ -169,7 +169,7 @@ x-cli-list-fields:
 renders the projected cell as:
 
 ```text
-lookup-order, issue-refund, get-policy, …
+lookup, refund, policy, …
 ```
 
 The equivalent per-invocation override is:
