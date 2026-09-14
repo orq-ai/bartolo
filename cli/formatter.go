@@ -329,8 +329,73 @@ func checkColumns(requestedColumns []string, rows []map[string]interface{}, user
 	return nil
 }
 
-// tableField resolves dotted paths while preserving literal dotted keys.
+// tableField resolves dotted object paths and one array projection while
+// preserving literal top-level keys.
 func tableField(row map[string]interface{}, column string) (interface{}, bool) {
+	if value, ok := row[column]; ok {
+		return value, true
+	}
+
+	parts := strings.Split(column, ".")
+	if len(parts) < 2 {
+		return nil, false
+	}
+
+	projection := -1
+	for i, part := range parts {
+		if part == "" {
+			return nil, false
+		}
+		if !strings.HasSuffix(part, "[]") {
+			continue
+		}
+		if projection >= 0 || i == len(parts)-1 || strings.Count(part, "[]") != 1 {
+			return nil, false
+		}
+		parts[i] = strings.TrimSuffix(part, "[]")
+		if parts[i] == "" {
+			return nil, false
+		}
+		projection = i
+	}
+
+	if projection < 0 {
+		return objectField(row, column)
+	}
+
+	value, ok := objectField(row, strings.Join(parts[:projection+1], "."))
+	if !ok {
+		return nil, false
+	}
+	items, ok := value.([]interface{})
+	if !ok {
+		return nil, false
+	}
+	if len(items) == 0 {
+		return []interface{}{}, true
+	}
+
+	suffix := strings.Join(parts[projection+1:], ".")
+	projected := make([]interface{}, 0, len(items))
+	for _, item := range items {
+		object, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		child, ok := objectField(object, suffix)
+		if !ok || child == nil {
+			continue
+		}
+		projected = append(projected, child)
+	}
+	if len(projected) == 0 {
+		return nil, false
+	}
+	return projected, true
+}
+
+// objectField resolves exact or dotted keys through objects only.
+func objectField(row map[string]interface{}, column string) (interface{}, bool) {
 	if value, ok := row[column]; ok {
 		return value, true
 	}
@@ -402,10 +467,15 @@ func renderTable(data interface{}, requestedColumns []string, userColumns bool) 
 	}
 
 	table := tablewriter.NewTable(Stdout,
+		tablewriter.WithHeaderAutoFormat(tw.Off),
 		tablewriter.WithHeaderAutoWrap(tw.WrapNone),
 		tablewriter.WithRowAutoWrap(tw.WrapNone),
 	)
-	table.Header(headers)
+	renderedHeaders := make([]string, len(headers))
+	for i, header := range headers {
+		renderedHeaders[i] = tableHeader(header)
+	}
+	table.Header(renderedHeaders)
 	for _, cells := range values {
 		if err := table.Append(cells); err != nil {
 			return false, err
@@ -423,6 +493,23 @@ func renderTable(data interface{}, requestedColumns []string, userColumns bool) 
 		fmt.Fprintln(Stdout, footer)
 	}
 	return true, nil
+}
+
+// tableHeader mirrors tablewriter's header formatting while keeping [] joined
+// to the projected field name.
+func tableHeader(header string) string {
+	parts := strings.Split(header, ".")
+	for i, part := range parts {
+		projection := strings.HasSuffix(part, "[]")
+		if projection {
+			part = strings.TrimSuffix(part, "[]")
+		}
+		parts[i] = tw.Title(strings.Join(tw.SplitCamelCase(part), tw.Space))
+		if projection {
+			parts[i] += "[]"
+		}
+	}
+	return strings.Join(parts, " . ")
 }
 
 // tableFooter summarizes the envelope in one line below the table: how many
