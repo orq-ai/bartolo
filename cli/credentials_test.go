@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1167,47 +1168,40 @@ func TestResolveAuthHandler(t *testing.T) {
 		name        string
 		registered  []registration
 		storedType  string
-		wantName    string
 		wantHandler AuthHandler
 	}{
 		{
 			name:        "exact match wins among several",
 			registered:  []registration{{"apikey", stubAuthHandler{}}, {"oauth", stubOptionalKeyHandler{}}},
 			storedType:  "oauth",
-			wantName:    "oauth",
 			wantHandler: stubOptionalKeyHandler{},
 		},
 		{
 			name:        "stored label resolves through the sole anonymous handler",
 			registered:  []registration{{"", stubAuthHandler{}}},
 			storedType:  "apikey",
-			wantName:    "",
 			wantHandler: stubAuthHandler{},
 		},
 		{
 			name:       "a named handler does not answer to another label",
 			registered: []registration{{"bearer", stubAuthHandler{}}},
 			storedType: "apikey",
-			wantName:   "apikey",
 		},
 		{
-			name:       "unknown label with several handlers resolves to none",
+			name:       "an anonymous handler does not claim a label alongside a named one",
 			registered: []registration{{"", stubAuthHandler{}}, {"oauth", stubOptionalKeyHandler{}}},
 			storedType: "apikey",
-			wantName:   "apikey",
 		},
 		{
 			name:        "empty type resolves to the sole named handler",
 			registered:  []registration{{"bearer", stubAuthHandler{}}},
 			storedType:  "",
-			wantName:    "bearer",
 			wantHandler: stubAuthHandler{},
 		},
 		{
 			name:       "empty type with several handlers resolves to none",
 			registered: []registration{{"apikey", stubAuthHandler{}}, {"oauth", stubOptionalKeyHandler{}}},
 			storedType: "",
-			wantName:   "",
 		},
 	}
 
@@ -1219,10 +1213,93 @@ func TestResolveAuthHandler(t *testing.T) {
 				UseAuth(r.name, r.handler)
 			}
 
-			name, handler := resolveAuthHandler(map[string]string{"type": tc.storedType})
-			assert.Equal(t, tc.wantName, name)
-			assert.Equal(t, tc.wantHandler, handler)
+			assert.Equal(t, tc.wantHandler, resolveAuthHandler(map[string]string{"type": tc.storedType}))
 		})
+	}
+}
+
+// A named handler answering only to its own name is the half of the contract
+// that must keep refusing, so assert it end to end and not just in the table:
+// a request must fail rather than be signed by a handler the profile does not
+// name, and the error must say which label failed and which would not have.
+func TestRequestRefusesAStoredLabelNoHandlerAnswersTo(t *testing.T) {
+	initTestCLI(t, "", headerAuthHandler{})
+	UseAuth("oauth", stubOptionalKeyHandler{})
+	Creds.Set("profiles.acme.type", "legacy")
+	Creds.Set("profiles.acme.api_key", "secret")
+	viper.Set("profile", "acme")
+
+	reached := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	_, err := Client.URL(server.URL).Get().Do()
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), `"legacy"`, "the message must name the label that failed")
+		assert.Contains(t, err.Error(), "oauth", "the message must name a label that would resolve")
+	}
+	assert.False(t, reached, "an unauthenticated request must not go out on the wire")
+}
+
+// Saving a profile used to write nested keys ("profiles.<name>.<field>"),
+// which places a viper override covering only part of the profiles map and
+// hides every sibling from any later read of "profiles". Listing in the same
+// process then showed only the profile just saved, while the others sat
+// untouched on disk. This is the second symptom RES-1463 reports.
+func TestSavingAProfileKeepsTheOthersListable(t *testing.T) {
+	home := resetAuthState(t)
+	// The profiles have to arrive from the file rather than from an earlier
+	// Set in the same process: the override only hides what a lower layer
+	// supplies, so seeding them in memory would not reproduce the defect.
+	writeCredentials(t, home, `{"profiles":{"prod":{"type":"","api_key":"secret-prod"},"scratch":{"type":"","api_key":"secret-scratch"}}}`)
+	bootCLI(t, home)
+
+	execute("auth profile add third secret-third")
+
+	decoded := executeJSON(t, "auth profile list -o json")
+	profiles, _ := decoded["profiles"].([]interface{})
+	names := make([]string, 0, len(profiles))
+	for _, entry := range profiles {
+		if profile, ok := entry.(map[string]interface{}); ok {
+			names = append(names, fmt.Sprintf("%v", profile["name"]))
+		}
+	}
+
+	assert.ElementsMatch(t, []string{"prod", "scratch", "third"}, names, "a save must not mask the profiles it did not write")
+	assert.Equal(t, "secret-prod", Creds.GetStringMapString("profiles.prod")["api_key"])
+}
+
+// SetProfile merges over what a profile already holds, so rotating one field
+// does not drop the rest.
+func TestSetProfileMergesOverStoredFields(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+	Creds.Set("profiles.acme.type", "apikey")
+	Creds.Set("profiles.acme.api_key", "first")
+	Creds.Set("profiles.acme.server", "https://orq.acme.internal")
+
+	Creds.SetProfile("acme", map[string]string{"api_key": "second"})
+
+	stored := Creds.GetStringMapString("profiles.acme")
+	assert.Equal(t, "second", stored["api_key"])
+	assert.Equal(t, "apikey", stored["type"], "an untouched field must survive a merge")
+	assert.Equal(t, "https://orq.acme.internal", stored["server"])
+}
+
+// The read path went lenient while `auth setup --type` stayed strict, because
+// one is a label read back from a file and the other is something the user
+// typed. Pin the asymmetry, or a later change that "makes setup consistent"
+// reopens RES-1463 from the other side.
+func TestSetupRejectsALabelTheReadPathWouldResolve(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	assert.Equal(t, stubAuthHandler{}, authHandlerFor("apikey"), "the read path resolves a stored label")
+
+	_, _, err := pickAuthHandler("apikey")
+	if assert.Error(t, err, "an explicitly typed --type must not") {
+		assert.Contains(t, err.Error(), `unknown auth type "apikey"`)
 	}
 }
 
@@ -1296,7 +1373,12 @@ func onlyListedProfile(t *testing.T) map[string]interface{} {
 	return entry
 }
 
-func TestListProfilesShowsHandlerFieldsForAStoredLabel(t *testing.T) {
+// A rescued profile is listed by the handler that authenticates it, and the
+// listing still shows what else is on disk. A stored label is stale, not
+// wrong, so the two field sets usually coincide — but when the anonymous
+// handler changed scheme between builds they do not, and a credential the
+// listing omits is one the user cannot find while debugging the failure.
+func TestListProfilesShowsHandlerFieldsAndEveryOtherStoredFieldForAStoredLabel(t *testing.T) {
 	initTestCLI(t, "", stubAuthHandler{})
 	Creds.Set("profiles.acme.type", "apikey")
 	Creds.Set("profiles.acme.api_key", "sk-orq-abcdefghijklmnop")
@@ -1305,7 +1387,7 @@ func TestListProfilesShowsHandlerFieldsForAStoredLabel(t *testing.T) {
 	entry := onlyListedProfile(t)
 	assert.Equal(t, "apikey", entry["type"])
 	assert.Contains(t, entry, "api_key")
-	assert.NotContains(t, entry, "stray_field")
+	assert.Contains(t, entry, "stray_field")
 }
 
 func TestListProfilesShowsEveryStoredFieldWhenNoHandlerResolves(t *testing.T) {

@@ -54,7 +54,9 @@ type RequiredKeysHandler interface {
 	RequiredProfileKeys() []string
 }
 
-// AuthHandlers is the map of registered auth type names to handlers
+// AuthHandlers is the map of registered auth type names to handlers. The empty
+// name is the anonymous registration made by UseAuth(""); as the only entry it
+// answers for a profile whatever type label that profile stores.
 var AuthHandlers = make(map[string]AuthHandler)
 
 var authInitialized bool
@@ -103,13 +105,21 @@ func initAuth() {
 	// Install auth middleware
 	Client.UseRequest(func(ctx *context.Context, h context.Handler) {
 		profile := GetProfile()
-		_, handler := resolveAuthHandler(profile)
+		handler := resolveAuthHandler(profile)
 		if handler == nil {
-			h.Error(ctx, fmt.Errorf("no authentication handler configured"))
+			h.Error(ctx, unresolvedAuthError(profile["type"]))
 			return
 		}
 
-		if err := handler.OnRequest(ctx.Get("log").(*zerolog.Logger), ctx.Request); err != nil {
+		log := ctx.Get("log").(*zerolog.Logger)
+		if stored := profile["type"]; stored != "" && AuthHandlers[stored] == nil {
+			// The label is stale, not wrong: an older build wrote a name this
+			// one does not register. Say so once rather than authenticating
+			// through a handler the profile does not name in silence.
+			log.Debug().Str("type", stored).Msg("profile auth type is not registered; using the sole anonymous handler")
+		}
+
+		if err := handler.OnRequest(log, ctx.Request); err != nil {
 			h.Error(ctx, err)
 			return
 		}
@@ -158,19 +168,19 @@ func newProfileListCommand() *cobra.Command {
 }
 
 // profileListEntry renders one stored profile for `auth profile list`. The
-// handler a request would authenticate the profile with decides which fields
-// are shown. When none resolves, every stored field is listed, so a profile
-// saved by a handler that is no longer registered still shows what it holds.
+// handler a request would authenticate the profile with names the fields worth
+// leading with, and every other stored field follows (secrets masked), so a
+// field that is on disk is never absent from the listing — including on a
+// profile whose stored type names a handler this build no longer registers.
 func profileListEntry(name string, profile map[string]interface{}, active string) map[string]interface{} {
 	typeName, _ := profile["type"].(string)
 	entry := map[string]interface{}{"name": name, "type": typeName, "active": name == active}
 
 	keys := []string{"server"}
-	if _, handler := authHandlerFor(typeName); handler != nil {
+	if handler := authHandlerFor(typeName); handler != nil {
 		keys = append(keys, handler.ProfileKeys()...)
-	} else {
-		keys = append(keys, sortedKeys(profile)...)
 	}
+	keys = append(keys, sortedKeys(profile)...)
 
 	for _, key := range keys {
 		field := normalizeProfileKeyName(key)
@@ -396,33 +406,36 @@ func redactTree(key string, value interface{}, mask func(string, interface{}) in
 	}
 }
 
-func resolveAuthHandler(profile map[string]string) (string, AuthHandler) {
+func resolveAuthHandler(profile map[string]string) AuthHandler {
 	return authHandlerFor(profile["type"])
 }
 
-// authHandlerFor resolves the handler a stored profile type names. An exact
-// match wins. An empty type resolves to the sole registered handler, and so
-// does any other label when that handler is anonymous (UseAuth("")), since an
-// anonymous handler has no name a stored type could match. A named handler
-// only answers to its own name.
-func authHandlerFor(typeName string) (string, AuthHandler) {
+// authHandlerFor resolves the handler a stored profile type names, and only
+// the handler: the stored label is the caller's to report, since this returns
+// no name a caller could mistake for one.
+//
+// An exact match wins. An empty type resolves to the sole registered handler,
+// and so does any other label when that sole handler is anonymous
+// (UseAuth("")), since an anonymous handler has no name a stored type could
+// match. A named handler answers only to its own name, and with several
+// handlers registered an unrecognized label resolves to nothing.
+func authHandlerFor(typeName string) AuthHandler {
 	if typeName != "" {
 		if handler := AuthHandlers[typeName]; handler != nil {
-			return typeName, handler
+			return handler
 		}
 		if _, anonymous := AuthHandlers[""]; !anonymous {
-			return typeName, nil
+			return nil
 		}
 	}
 
-	if name, handler, ok := soleAuthHandler(); ok {
-		return name, handler
-	}
-
-	return typeName, nil
+	_, handler, _ := soleAuthHandler()
+	return handler
 }
 
-// soleAuthHandler returns the registered handler when there is exactly one.
+// soleAuthHandler returns the registered handler when there is exactly one,
+// along with the name it registered under, which is empty for an anonymous
+// registration.
 func soleAuthHandler() (string, AuthHandler, bool) {
 	if len(AuthHandlers) != 1 {
 		return "", nil, false
@@ -431,6 +444,20 @@ func soleAuthHandler() (string, AuthHandler, bool) {
 		return name, handler, true
 	}
 	return "", nil, false
+}
+
+// unresolvedAuthError explains which stored label failed to resolve and which
+// labels would, so the message points at the profile in credentials.json
+// rather than leaving the user to guess that the CLI has no auth at all.
+func unresolvedAuthError(storedType string) error {
+	if storedType == "" {
+		return fmt.Errorf("no authentication handler configured")
+	}
+	types := registeredAuthTypes()
+	if len(types) == 0 {
+		return fmt.Errorf("profile declares auth type %q, which this CLI does not register", storedType)
+	}
+	return fmt.Errorf("profile declares auth type %q; this CLI registers %s", storedType, strings.Join(types, ", "))
 }
 
 // GetAuthStatus returns machine-readable auth diagnostics for `doctor`.
@@ -452,12 +479,10 @@ func GetAuthStatus() map[string]interface{} {
 	profile := GetProfile()
 	status["profile"] = ActiveProfileName()
 
-	typeName, handler := resolveAuthHandler(profile)
-	if typeName == "" {
-		// Resolved through the anonymous handler: report the type the profile stores.
-		typeName = profile["type"]
-	}
-	if typeName != "" {
+	handler := resolveAuthHandler(profile)
+	if typeName := profile["type"]; typeName != "" {
+		// The label the profile stores, which is the one `auth profile list`
+		// shows. An anonymous handler has no name to report in its place.
 		status["type"] = typeName
 	}
 
@@ -512,9 +537,17 @@ func registeredAuthTypes() []string {
 	return types
 }
 
-// UseAuth registers a new auth handler for a given type name. For backward-
-// compatibility, the auth type name can be a blank string. It is recommended
-// to always pass a value for the type name.
+// UseAuth registers a new auth handler for a given type name.
+//
+// A blank type name registers the handler anonymously, which is what the
+// bundled helpers (apikey.InitBearer, oauth.InitClientCredentials,
+// oauth.InitAuthCode) do. As the only registered handler it authenticates
+// every profile whatever type label the profile stores, so a CLI that once
+// wrote some other label keeps working without rewriting credentials.json.
+//
+// Pass a name when the CLI offers a choice of auth types. A named handler
+// answers only to its own name: renaming it later strands every profile
+// already stored under the old name, so the name is a lasting commitment.
 func UseAuth(typeName string, handler AuthHandler) {
 	// Initialize auth system if it isn't already set up.
 	initAuth()
@@ -990,12 +1023,12 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 		return err
 	}
 
-	Creds.Set("profiles."+profileName+".type", typeName)
-	setProfileValues(profileName, requiredProfileKeys(handler, keys), keys, values)
-
+	fields := profileValues(requiredProfileKeys(handler, keys), keys, values)
+	fields["type"] = typeName
 	if server = strings.TrimSpace(server); server != "" {
-		Creds.Set("profiles."+profileName+".server", server)
+		fields["server"] = server
 	}
+	Creds.SetProfile(profileName, fields)
 
 	filename := filepath.Join(viper.GetString("config-directory"), "credentials.json")
 	if err := Creds.Save(filename); err != nil {
@@ -1013,16 +1046,18 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 	return nil
 }
 
-// setProfileValues stores one profile's fields. An omitted optional field
+// profileValues collects one profile's fields. An omitted optional field
 // (e.g. a generator-supplied region) is left out entirely rather than stored
 // as "", so a later read cannot tell it apart from one never supplied.
-func setProfileValues(profileName string, required []string, keys []string, values []string) {
+func profileValues(required []string, keys []string, values []string) map[string]string {
+	fields := make(map[string]string, len(keys))
 	for i, key := range keys {
 		if strings.TrimSpace(values[i]) == "" && !keyRequired(required, key) {
 			continue
 		}
-		Creds.Set("profiles."+profileName+"."+normalizeProfileKeyName(key), values[i])
+		fields[normalizeProfileKeyName(key)] = values[i]
 	}
+	return fields
 }
 
 // HasInteractiveInput reports whether stdin is a terminal. It is the floor under
@@ -1097,8 +1132,36 @@ type CredentialsFile struct {
 	viper *viper.Viper
 }
 
+// Set places a viper override at key. Never call it with a nested profile key
+// ("profiles.<name>.<field>"): the override then masks every sibling profile
+// for any later read of "profiles", so `auth profile list` in the same process
+// shows only the profile just written. Use SetProfile.
 func (c *CredentialsFile) Set(key string, value interface{}) { c.viper.Set(key, value) }
-func (c *CredentialsFile) GetString(key string) string       { return c.viper.GetString(key) }
+
+// SetProfile stores one profile's fields, merged over whatever that profile
+// already holds, by rewriting the whole "profiles" map. Overriding the parent
+// key rather than a nested one is what keeps the other profiles readable: a
+// viper override covering a proper subset of a map hides the rest of it.
+func (c *CredentialsFile) SetProfile(name string, fields map[string]string) {
+	profiles := c.viper.GetStringMap("profiles")
+	if profiles == nil {
+		profiles = map[string]interface{}{}
+	}
+
+	merged := map[string]interface{}{}
+	if existing, ok := profiles[name].(map[string]interface{}); ok {
+		for key, value := range existing {
+			merged[key] = value
+		}
+	}
+	for key, value := range fields {
+		merged[key] = value
+	}
+
+	profiles[name] = merged
+	c.viper.Set("profiles", profiles)
+}
+func (c *CredentialsFile) GetString(key string) string { return c.viper.GetString(key) }
 func (c *CredentialsFile) GetStringMap(key string) map[string]interface{} {
 	return c.viper.GetStringMap(key)
 }
