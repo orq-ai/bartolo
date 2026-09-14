@@ -57,8 +57,7 @@ func (h *Handler) OnRequest(log *zerolog.Logger, request *http.Request) error {
 		return h.missingKeyError(activeProfile, source)
 	}
 
-	// Only a key that actually came from a file carries one, so the field is
-	// added rather than logged empty on every profile and exported key.
+	// Added, not always set: every profile and exported key would log it empty.
 	event := log.Debug().Str("auth-source", source)
 	if dotEnvFile != "" {
 		event = event.Str("dotenv-file", dotEnvFile)

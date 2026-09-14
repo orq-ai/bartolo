@@ -310,3 +310,59 @@ func TestMissingKeyErrorWithoutADotEnvFile(t *testing.T) {
 	assert.ErrorContains(t, err, "missing API key")
 	assert.NotContains(t, err.Error(), "dotenv loading is off")
 }
+
+// The dotenv-file field names where a credential came from, so it must appear
+// only for a key that came from a file — logging it empty on every profile and
+// exported key is what it looked like before.
+func TestOnRequestLogsTheDotEnvFileOnlyForADotEnvKey(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		dotEnv     bool
+		wantSource string
+	}{
+		{name: "exported key", wantSource: "env"},
+		{name: "dotenv key", dotEnv: true, wantSource: "dotenv"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetCLI(t)
+
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("TEST_API_KEY=from-dotenv\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Chdir(dir)
+
+			t.Setenv("TEST_API_KEY", "")
+			os.Unsetenv("TEST_API_KEY")
+			if tc.dotEnv {
+				t.Setenv("TEST_DOTENV", "1")
+			} else {
+				t.Setenv("TEST_DOTENV", "")
+				os.Unsetenv("TEST_DOTENV")
+				t.Setenv("TEST_API_KEY", "exported")
+			}
+
+			cli.Init(&cli.Config{AppName: "test", EnvPrefix: "TEST"})
+
+			// cli.Init pins the global level to Warn, which gates Debug events
+			// regardless of the logger's own level.
+			previous := zerolog.GlobalLevel()
+			zerolog.SetGlobalLevel(zerolog.DebugLevel)
+			t.Cleanup(func() { zerolog.SetGlobalLevel(previous) })
+
+			logged := &bytes.Buffer{}
+			logger := zerolog.New(logged).Level(zerolog.DebugLevel)
+			h := &Handler{Name: "x-auth", In: LocationHeader, EnvVars: []string{"TEST_API_KEY"}}
+
+			request := httptest.NewRequest("GET", "http://example.com", nil)
+			assert.NoError(t, h.OnRequest(&logger, request))
+
+			assert.Contains(t, logged.String(), `"auth-source":"`+tc.wantSource+`"`)
+			if tc.dotEnv {
+				assert.Contains(t, logged.String(), `"dotenv-file":".env"`)
+			} else {
+				assert.NotContains(t, logged.String(), "dotenv-file")
+			}
+		})
+	}
+}

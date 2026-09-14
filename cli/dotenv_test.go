@@ -3,6 +3,7 @@ package cli
 import (
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -202,6 +203,9 @@ func TestScanDotEnvFileReportsOnlyRealFailures(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root reads unreadable files")
 	}
+	if runtime.GOOS == "windows" {
+		t.Skip("mode 0000 does not deny reads on Windows")
+	}
 
 	if err := os.WriteFile(".env", []byte("MYAPP_API_KEY=x\n"), 0000); err != nil {
 		t.Fatal(err)
@@ -287,9 +291,14 @@ func TestDotEnvCandidateFollowsTheFileOrder(t *testing.T) {
 	viper.Set("env-prefix", "MYAPP")
 	t.Cleanup(func() { viper.Set("env-prefix", nil) })
 
-	file, _ := DotEnvCandidate([]string{"MYAPP_API_KEY"})
+	file, key := DotEnvCandidate([]string{"MYAPP_API_KEY"})
 
-	if file != dotEnvFiles[0] {
-		t.Errorf("got %q, want the first file loadDotEnvFiles would read, %q", file, dotEnvFiles[0])
+	// Literal, not dotEnvFiles[0]: comparing against the slice the
+	// implementation iterates moves both sides together and never fails.
+	if file != ".env" {
+		t.Errorf("file: got %q, want .env", file)
+	}
+	if key != "MYAPP_API_KEY" {
+		t.Errorf("key: got %q, want MYAPP_API_KEY", key)
 	}
 }
