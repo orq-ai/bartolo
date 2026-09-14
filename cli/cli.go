@@ -229,6 +229,14 @@ func dotEnvEnabled(envPrefix string) (bool, error) {
 // files. Only keys under envPrefix (plus apiKeyEnvVar, which may sit outside
 // it) are imported: an application .env also holds unrelated secrets such as
 // OPENAI_API_KEY or DATABASE_URL, and nothing here reads those.
+// dotEnvFiles are read in order, and because a variable already set is never
+// overwritten, the first file to define a key wins.
+var dotEnvFiles = []string{".env", ".env.local"}
+
+// loadDotEnvFiles imports the CLI's own variables from project-local dotenv
+// files. Only keys under envPrefix (plus apiKeyEnvVar, which may sit outside
+// it) are imported: an application .env also holds unrelated secrets such as
+// OPENAI_API_KEY or DATABASE_URL, and nothing here reads those.
 func loadDotEnvFiles(envPrefix, apiKeyEnvVar string) {
 	// Origins describe the current load, so a second Init does not report a
 	// file that supplied nothing this time.
@@ -240,25 +248,80 @@ func loadDotEnvFiles(envPrefix, apiKeyEnvVar string) {
 		return
 	}
 
-	wanted := func(key string) bool {
-		return (envPrefix != "" && strings.HasPrefix(key, envPrefix+"_")) ||
-			(apiKeyEnvVar != "" && key == apiKeyEnvVar)
-	}
+	for _, filename := range dotEnvFiles {
+		err := scanDotEnvFile(filename, func(key, value string) {
+			if !dotEnvWanted(key, envPrefix, apiKeyEnvVar) {
+				return
+			}
 
-	for _, filename := range []string{".env", ".env.local"} {
-		loadDotEnvFile(filename, wanted)
+			// LookupEnv, not Getenv: `export KEY=` blanks a credential on
+			// purpose, and refilling it from a file is the worse of the two
+			// outcomes.
+			if _, set := os.LookupEnv(key); set {
+				return
+			}
+
+			if os.Setenv(key, value) == nil {
+				dotEnvOrigins[key] = filename
+			}
+		})
+		if err != nil {
+			fmt.Fprintf(Stderr, "warning: %s was not fully read (%v); some variables were not imported\n", filename, err)
+		}
 	}
 }
 
-func loadDotEnvFile(filename string, wanted func(string) bool) {
+// DotEnvCandidate reports a dotenv file that defines one of keys while dotenv
+// loading is off, so a missing-credential error can say the key is sitting
+// right there and name the switch that would use it. It reads nothing into the
+// environment. Returns empty strings when loading is on, when the value would
+// not have been imported anyway, or when no file defines any of the keys.
+func DotEnvCandidate(keys []string) (file string, key string) {
+	enabled, err := dotEnvEnabled(viper.GetString("env-prefix"))
+	if enabled || err != nil {
+		return "", ""
+	}
+
+	wanted := make(map[string]bool, len(keys))
+	for _, candidate := range keys {
+		if _, set := os.LookupEnv(candidate); !set {
+			wanted[candidate] = true
+		}
+	}
+
+	for _, filename := range dotEnvFiles {
+		// Errors are the caller's problem to ignore: this runs on a path that
+		// has already failed, and a second warning about an unreadable file
+		// nobody asked to read is noise.
+		_ = scanDotEnvFile(filename, func(candidate, value string) {
+			if file == "" && value != "" && wanted[candidate] {
+				file, key = filename, candidate
+			}
+		})
+		if file != "" {
+			return file, key
+		}
+	}
+
+	return "", ""
+}
+
+func dotEnvWanted(key, envPrefix, apiKeyEnvVar string) bool {
+	return (envPrefix != "" && strings.HasPrefix(key, envPrefix+"_")) ||
+		(apiKeyEnvVar != "" && key == apiKeyEnvVar)
+}
+
+// scanDotEnvFile parses a dotenv file and hands every key/value pair to visit.
+// An absent file is not an error; anything else is, including a scan that stops
+// early — a line over bufio.Scanner's 64KB limit ends it exactly like EOF, and
+// a key below that line would otherwise be silently skipped.
+func scanDotEnvFile(filename string, visit func(key, value string)) error {
 	file, err := os.Open(filename)
 	if err != nil {
-		// Absent is the normal case. Unreadable is not, and the user has just
-		// said this file matters.
-		if !errors.Is(err, fs.ErrNotExist) {
-			fmt.Fprintf(Stderr, "warning: could not read %s: %v\n", filename, err)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
 		}
-		return
+		return err
 	}
 	defer file.Close()
 
@@ -280,13 +343,7 @@ func loadDotEnvFile(filename string, wanted func(string) bool) {
 
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
-		if key == "" || !wanted(key) {
-			continue
-		}
-
-		// LookupEnv, not Getenv: `export KEY=` blanks a credential on purpose,
-		// and refilling it from a file is the worse of the two outcomes.
-		if _, set := os.LookupEnv(key); set {
+		if key == "" {
 			continue
 		}
 
@@ -296,17 +353,10 @@ func loadDotEnvFile(filename string, wanted func(string) bool) {
 			}
 		}
 
-		if os.Setenv(key, value) == nil {
-			dotEnvOrigins[key] = filename
-		}
+		visit(key, value)
 	}
 
-	// A line over bufio.Scanner's 64KB limit ends the scan exactly like EOF, so
-	// without this a key below it is never imported and the lookup falls
-	// through to a different credential.
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(Stderr, "warning: %s was only partially read (%v); some variables were not imported\n", filename, err)
-	}
+	return scanner.Err()
 }
 
 func initConfig(appName, envPrefix, apiKeyEnvVar, serializationFormat string) {

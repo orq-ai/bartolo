@@ -3,12 +3,14 @@ package apikey
 import (
 	"bytes"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/orq-ai/bartolo/cli"
+	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 )
@@ -270,4 +272,46 @@ func TestAuthStatusOmitsTheDotEnvFileForAnExportedKey(t *testing.T) {
 
 	assert.Equal(t, "env", status["source"])
 	assert.NotContains(t, status, "dotenv_file")
+}
+
+// The remedies in a missing-key error all read as already satisfied to someone
+// looking at a .env that holds the key, so the error has to name the file and
+// the switch that would read it.
+func TestMissingKeyErrorNamesAnIgnoredDotEnvFile(t *testing.T) {
+	resetCLI(t)
+	t.Setenv("TEST_API_KEY", "")
+	os.Unsetenv("TEST_API_KEY")
+	t.Setenv("TEST_DOTENV", "")
+	os.Unsetenv("TEST_DOTENV")
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("TEST_API_KEY=from-dotenv\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	cli.Init(&cli.Config{AppName: "test", EnvPrefix: "TEST"})
+	Init("x-auth", LocationHeader)
+
+	err := cli.AuthHandlers[""].(*Handler).OnRequest(&zerolog.Logger{}, httptest.NewRequest("GET", "/", nil))
+
+	assert.ErrorContains(t, err, "missing API key")
+	assert.ErrorContains(t, err, ".env defines TEST_API_KEY")
+	assert.ErrorContains(t, err, "TEST_DOTENV=1")
+}
+
+// No .env, no hint: a remedy that fires everywhere trains people to ignore it.
+func TestMissingKeyErrorWithoutADotEnvFile(t *testing.T) {
+	resetCLI(t)
+	t.Setenv("TEST_API_KEY", "")
+	os.Unsetenv("TEST_API_KEY")
+	t.Chdir(t.TempDir())
+
+	cli.Init(&cli.Config{AppName: "test", EnvPrefix: "TEST"})
+	Init("x-auth", LocationHeader)
+
+	err := cli.AuthHandlers[""].(*Handler).OnRequest(&zerolog.Logger{}, httptest.NewRequest("GET", "/", nil))
+
+	assert.ErrorContains(t, err, "missing API key")
+	assert.NotContains(t, err.Error(), "dotenv loading is off")
 }

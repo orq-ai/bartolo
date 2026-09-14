@@ -149,7 +149,17 @@ func (h *Handler) missingKeyError(name string, source string) error {
 	if len(h.EnvVars) > 0 {
 		remedies = append(remedies, "set one of "+strings.Join(h.EnvVars, ", "))
 	}
-	return fmt.Errorf("missing API key; %s", strings.Join(remedies, " or "))
+	err := fmt.Errorf("missing API key; %s", strings.Join(remedies, " or "))
+
+	// The key may be sitting in a .env this CLI deliberately did not read. Say
+	// so: the remedies above all read as already satisfied to someone looking
+	// at that file.
+	if file, key := cli.DotEnvCandidate(h.EnvVars); file != "" {
+		return fmt.Errorf("%w. %s defines %s, but dotenv loading is off; run with %s_DOTENV=1 to use it",
+			err, file, key, viper.GetString("env-prefix"))
+	}
+
+	return err
 }
 
 func (h *Handler) applyPrefix(value string) string {
