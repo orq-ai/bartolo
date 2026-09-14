@@ -252,6 +252,7 @@ type ProjectConfig struct {
 type AuthDoc struct {
 	Enabled         bool
 	Kind            string
+	EnvPrefix       string
 	EnvVars         []string
 	ProfileCommand  string
 	Summary         string
@@ -2901,6 +2902,9 @@ func getAuthDocFromProject(api *OpenAPI, project *ProjectConfig) *AuthDoc {
 	}
 
 	doc := getAuthDocFromSpec(api, envPrefix)
+	if doc != nil {
+		doc.EnvPrefix = envPrefix
+	}
 	if doc != nil && apiKeyEnvVar != "" {
 		for i, envVar := range doc.EnvVars {
 			if strings.HasSuffix(envVar, "_API_KEY") {
@@ -3133,6 +3137,7 @@ func writeGeneratedProjectTooling(config *ProjectConfig) {
 	templateData := map[string]string{
 		"CommandName":  config.AppName,
 		"APIKeyEnvVar": config.APIKeyEnvVar,
+		"NameEnv":      config.EnvPrefix,
 	}
 
 	writeTemplateFileIfMissing("templates/generated_makefile.tmpl", "Makefile", 0600, templateData)

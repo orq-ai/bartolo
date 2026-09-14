@@ -660,8 +660,9 @@ func newAuthSetupCommand() *cobra.Command {
 // command is using. When no profile is in force either, it prompts for a name
 // rather than inventing one: there is no implicit `default` profile anymore.
 func RunAuthSetup(profileName string, preferredType string, server string) error {
-	if !isInteractive() {
-		return fmt.Errorf("auth setup requires an interactive terminal")
+	if !canPrompt() {
+		// A UsageError like the other two gates: one flag drives all three.
+		return NewValueError(fmt.Errorf("auth setup requires an interactive terminal"))
 	}
 
 	typeName, handler, err := pickAuthHandler(preferredType)
@@ -793,7 +794,7 @@ func resolveProfileValue(cmd *cobra.Command, key string, args []string, i int, r
 	}
 
 	// 3. prompt
-	if !isInteractive() {
+	if !canPrompt() {
 		// An omitted optional key is unset, as pressing Enter would leave it.
 		if !required {
 			return "", nil
@@ -987,7 +988,9 @@ func setProfileValues(profileName string, required []string, keys []string, valu
 	}
 }
 
-func hasInteractiveInput() bool {
+// HasInteractiveInput reports whether stdin is a terminal. It is the floor under
+// every prompt and deliberately not replaceable: see PromptAllowed.
+func HasInteractiveInput() bool {
 	return isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
 }
 
@@ -996,8 +999,23 @@ func surveyStderr() survey.AskOpt {
 	return survey.WithStdio(os.Stdin, os.Stderr, os.Stderr)
 }
 
-// isInteractive is a var so ConfirmDestructive is testable without a TTY.
-var isInteractive = hasInteractiveInput
+// PromptAllowed vetoes prompting at all three prompt sites, so a CLI's own
+// "never prompt" flag reaches them instead of a CI job with a TTY blocking on a
+// question nothing will answer:
+//
+//	cli.PromptAllowed = func() bool { return !viper.GetBool("no-input") }
+//
+// A veto, not a replacement: a terminal is still required, so no override can
+// prompt against a pipe and hang on a question with nowhere to appear.
+var PromptAllowed = func() bool { return true }
+
+// A var only so in-package tests can fake a terminal; the exported surface has
+// no such seam, which is the point of the veto.
+var hasInteractiveInput = HasInteractiveInput
+
+func canPrompt() bool {
+	return hasInteractiveInput() && PromptAllowed()
+}
 
 var askConfirm = func(action string) (bool, error) {
 	proceed := false
@@ -1022,7 +1040,7 @@ func ConfirmDestructive(cmd *cobra.Command, args []string) error {
 
 	action := strings.TrimSpace(cmd.CommandPath() + " " + strings.Join(args, " "))
 
-	if !isInteractive() {
+	if !canPrompt() {
 		return NewValueError(fmt.Errorf("refusing to run %q without --force in a non-interactive shell", action))
 	}
 	proceed, err := askConfirm(action)

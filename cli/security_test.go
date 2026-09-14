@@ -27,18 +27,18 @@ func TestConfirmDestructive(t *testing.T) {
 		return c
 	}
 	args := []string{"abc"}
-	origInteractive, origAsk := isInteractive, askConfirm
-	t.Cleanup(func() { isInteractive, askConfirm = origInteractive, origAsk })
+	origInteractive, origAsk := hasInteractiveInput, askConfirm
+	t.Cleanup(func() { hasInteractiveInput, askConfirm = origInteractive, origAsk })
 
 	// --force set: proceeds, and the prompt is never consulted.
-	isInteractive = func() bool { return true }
+	hasInteractiveInput = func() bool { return true }
 	askConfirm = func(string) (bool, error) { t.Fatal("prompt ran despite --force"); return false, nil }
 	if err := ConfirmDestructive(cmdWithForce(true), args); err != nil {
 		t.Errorf("--force should proceed, got %v", err)
 	}
 
 	// Non-interactive without --force: returns a UsageError.
-	isInteractive = func() bool { return false }
+	hasInteractiveInput = func() bool { return false }
 	askConfirm = func(string) (bool, error) { t.Fatal("prompt ran in a non-interactive shell"); return false, nil }
 	err := ConfirmDestructive(cmdWithForce(false), args)
 	if err == nil {
@@ -50,7 +50,7 @@ func TestConfirmDestructive(t *testing.T) {
 	}
 
 	// Interactive No: returns ErrDestructiveRefused.
-	isInteractive = func() bool { return true }
+	hasInteractiveInput = func() bool { return true }
 	askConfirm = func(string) (bool, error) { return false, nil }
 	if err := ConfirmDestructive(cmdWithForce(false), args); !errors.Is(err, ErrDestructiveRefused) {
 		t.Errorf("answering No should return ErrDestructiveRefused, got %v", err)
@@ -84,7 +84,7 @@ func TestHasInteractiveInputRejectsDevNull(t *testing.T) {
 	}
 	t.Cleanup(func() { f.Close() })
 	os.Stdin = f
-	if hasInteractiveInput() {
+	if HasInteractiveInput() {
 		t.Error("/dev/null on stdin must not read as interactive")
 	}
 }
@@ -245,9 +245,9 @@ func TestCredentialsSaveIsNotWorldReadable(t *testing.T) {
 
 // resolveProfileValue must resolve from --<key>-file, then positional, then prompt.
 func TestResolveProfileValue(t *testing.T) {
-	origPrompt, origInteractive := promptProfileValue, isInteractive
-	t.Cleanup(func() { promptProfileValue, isInteractive = origPrompt, origInteractive })
-	isInteractive = func() bool { return true }
+	origPrompt, origInteractive := promptProfileValue, hasInteractiveInput
+	t.Cleanup(func() { promptProfileValue, hasInteractiveInput = origPrompt, origInteractive })
+	hasInteractiveInput = func() bool { return true }
 
 	makeCmd := func(keyFileVal string) *cobra.Command {
 		cmd := &cobra.Command{Use: "test"}
@@ -292,7 +292,7 @@ func TestResolveProfileValue(t *testing.T) {
 
 	// 4. No terminal: returns a UsageError, not a hang.
 	t.Run("no_terminal", func(t *testing.T) {
-		isInteractive = func() bool { return false }
+		hasInteractiveInput = func() bool { return false }
 		promptProfileValue = func(string, bool) (string, error) {
 			t.Fatal("prompt ran without a terminal")
 			return "", nil
@@ -310,7 +310,7 @@ func TestResolveProfileValue(t *testing.T) {
 
 	// 5. Multi-key handler: second key at index 1 resolves correctly.
 	t.Run("multi_key_index", func(t *testing.T) {
-		isInteractive = func() bool { return true }
+		hasInteractiveInput = func() bool { return true }
 		promptProfileValue = func(key string, required bool) (string, error) {
 			if key != "client_secret" {
 				t.Errorf("unexpected prompt for %q, want client_secret", key)
@@ -796,5 +796,35 @@ func TestReadStdinDoesNotLogTheBody(t *testing.T) {
 	}
 	if out := logged.String(); strings.Contains(out, secret) {
 		t.Fatalf("the debug log printed the body:\n%s", out)
+	}
+}
+
+// The veto has to reach every prompt, not just the destructive confirmation.
+// The terminal is real here, so the veto is what refuses.
+func TestPromptAllowedGatesAuthSetup(t *testing.T) {
+	origAllowed, origTTY := PromptAllowed, hasInteractiveInput
+	t.Cleanup(func() { PromptAllowed, hasInteractiveInput = origAllowed, origTTY })
+	hasInteractiveInput = func() bool { return true }
+	PromptAllowed = func() bool { return false }
+
+	err := RunAuthSetup("ci", "", "")
+	if err == nil || !strings.Contains(err.Error(), "requires an interactive terminal") {
+		t.Fatalf("auth setup should refuse when prompting is off, got %v", err)
+	}
+	// All three gates are driven by one flag, so all three exit the same way.
+	if got := ExitCodeFor(err); got != ExitUsage {
+		t.Errorf("auth setup refusal exited %d, want %d", got, ExitUsage)
+	}
+}
+
+// The veto can only narrow: no override can prompt against a pipe and hang.
+func TestPromptAllowedCannotEnablePromptingWithoutATerminal(t *testing.T) {
+	origAllowed, origTTY := PromptAllowed, hasInteractiveInput
+	t.Cleanup(func() { PromptAllowed, hasInteractiveInput = origAllowed, origTTY })
+	hasInteractiveInput = func() bool { return false }
+	PromptAllowed = func() bool { return true }
+
+	if canPrompt() {
+		t.Fatal("prompting was enabled without a terminal")
 	}
 }

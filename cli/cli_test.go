@@ -134,7 +134,9 @@ func TestDefaultFormatCommandPersistsConfig(t *testing.T) {
 	assert.Contains(t, string(data), "\"output-format\": \"toon\"")
 }
 
-func TestInitLoadsDotEnvFile(t *testing.T) {
+func TestInitLoadsDotEnvFileWhenEnabled(t *testing.T) {
+	t.Setenv("TEST_DOTENV", "1")
+
 	viper.Reset()
 	Cache = nil
 	Client = nil
