@@ -184,33 +184,22 @@ func userHomeDir() string {
 	return os.Getenv("HOME")
 }
 
-// dotEnvOrigins records which dotenv file supplied each variable this process
-// imported, so the credential chain can name the file instead of presenting it
-// as an ordinary exported variable.
+// dotEnvOrigins lets the credential chain name the file a variable came from.
 var dotEnvOrigins = map[string]string{}
 
-// DotEnvOrigin returns the dotenv file a variable was loaded from, or "" when
-// the value did not come from one.
+// DotEnvOrigin returns the dotenv file a variable was loaded from, or "".
 func DotEnvOrigin(key string) string {
 	return dotEnvOrigins[key]
 }
 
-// dotEnvErr carries an unusable $PREFIX_DOTENV value from Init to the first
-// command run, where it can be reported as a usage error instead of a panic.
+// dotEnvErr defers an unusable $PREFIX_DOTENV to the first command run, where it
+// can be a usage error rather than a panic in Init.
 var dotEnvErr error
 
-// dotEnvEnabled reports whether dotenv loading is turned on. It is off by
-// default: reading credentials out of the working directory is a job for the
-// shell or a tool like direnv, not for an API client, and it would otherwise
-// let the directory you happen to be in decide which credentials you send.
-// $PREFIX_DOTENV=1 turns it on explicitly; imports stay filtered to the CLI's
-// own variables either way. There is deliberately no config-file key: a
-// persisted setting would re-enable the cwd-decides-identity problem
-// everywhere, invisibly.
-//
-// A value that is not a boolean is an error rather than an "off", because this
-// switch gates credentials: $PREFIX_DOTENV=yes silently meaning "no" sends the
-// user to a missing-key error with nothing to pull on.
+// dotEnvEnabled reports whether $PREFIX_DOTENV turns dotenv loading on. Off by
+// default: the directory you stand in must not decide which credentials you
+// send. No config-file key, deliberately — persisting it brings that back.
+// A non-boolean value is an error, not an "off": this switch gates credentials.
 func dotEnvEnabled(envPrefix string) (bool, error) {
 	value := strings.TrimSpace(os.Getenv(envPrefix + "_DOTENV"))
 	if value == "" {
@@ -225,21 +214,14 @@ func dotEnvEnabled(envPrefix string) (bool, error) {
 	return enabled, nil
 }
 
-// loadDotEnvFiles imports the CLI's own variables from project-local dotenv
-// files. Only keys under envPrefix (plus apiKeyEnvVar, which may sit outside
-// it) are imported: an application .env also holds unrelated secrets such as
-// OPENAI_API_KEY or DATABASE_URL, and nothing here reads those.
-// dotEnvFiles are read in order, and because a variable already set is never
-// overwritten, the first file to define a key wins.
+// dotEnvFiles are read in order, and a set variable is never overwritten, so
+// the first file to define a key wins.
 var dotEnvFiles = []string{".env", ".env.local"}
 
-// loadDotEnvFiles imports the CLI's own variables from project-local dotenv
-// files. Only keys under envPrefix (plus apiKeyEnvVar, which may sit outside
-// it) are imported: an application .env also holds unrelated secrets such as
-// OPENAI_API_KEY or DATABASE_URL, and nothing here reads those.
+// loadDotEnvFiles imports only envPrefix-prefixed keys and apiKeyEnvVar, never
+// the unrelated secrets an application .env also holds.
 func loadDotEnvFiles(envPrefix, apiKeyEnvVar string) {
-	// Origins describe the current load, so a second Init does not report a
-	// file that supplied nothing this time.
+	// Origins describe the current load, not a previous one.
 	dotEnvOrigins = map[string]string{}
 
 	enabled, err := dotEnvEnabled(envPrefix)
@@ -254,9 +236,7 @@ func loadDotEnvFiles(envPrefix, apiKeyEnvVar string) {
 				return
 			}
 
-			// LookupEnv, not Getenv: `export KEY=` blanks a credential on
-			// purpose, and refilling it from a file is the worse of the two
-			// outcomes.
+			// LookupEnv, not Getenv: `export KEY=` blanks a credential on purpose.
 			if _, set := os.LookupEnv(key); set {
 				return
 			}
@@ -271,11 +251,9 @@ func loadDotEnvFiles(envPrefix, apiKeyEnvVar string) {
 	}
 }
 
-// DotEnvCandidate reports a dotenv file that defines one of keys while dotenv
-// loading is off, so a missing-credential error can say the key is sitting
-// right there and name the switch that would use it. It reads nothing into the
-// environment. Returns empty strings when loading is on, when the value would
-// not have been imported anyway, or when no file defines any of the keys.
+// DotEnvCandidate reports a dotenv file defining one of keys while loading is
+// off, so a missing-credential error can name the file and the switch. It reads
+// nothing into the environment, and returns "" when loading is already on.
 func DotEnvCandidate(keys []string) (file string, key string) {
 	enabled, err := dotEnvEnabled(viper.GetString("env-prefix"))
 	if enabled || err != nil {
@@ -290,9 +268,7 @@ func DotEnvCandidate(keys []string) (file string, key string) {
 	}
 
 	for _, filename := range dotEnvFiles {
-		// Errors are the caller's problem to ignore: this runs on a path that
-		// has already failed, and a second warning about an unreadable file
-		// nobody asked to read is noise.
+		// Errors stay quiet: nobody asked to read this file.
 		_ = scanDotEnvFile(filename, func(candidate, value string) {
 			if file == "" && value != "" && wanted[candidate] {
 				file, key = filename, candidate
@@ -311,10 +287,9 @@ func dotEnvWanted(key, envPrefix, apiKeyEnvVar string) bool {
 		(apiKeyEnvVar != "" && key == apiKeyEnvVar)
 }
 
-// scanDotEnvFile parses a dotenv file and hands every key/value pair to visit.
-// An absent file is not an error; anything else is, including a scan that stops
-// early — a line over bufio.Scanner's 64KB limit ends it exactly like EOF, and
-// a key below that line would otherwise be silently skipped.
+// scanDotEnvFile hands every key/value pair to visit. An absent file is not an
+// error; a scan that stops early is, since a line over bufio.Scanner's 64KB
+// limit ends it exactly like EOF and would silently drop the keys below it.
 func scanDotEnvFile(filename string, visit func(key, value string)) error {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -374,9 +349,7 @@ func initConfig(appName, envPrefix, apiKeyEnvVar, serializationFormat string) {
 	viper.AddConfigPath("$HOME/." + appName + "/")
 	viper.ReadInConfig()
 
-	// Opt-in only. When enabled, dotenv values are imported into the process
-	// environment before viper binds it, so project-level credentials work
-	// without an explicit `export`; a variable already set is never overwritten.
+	// Opt-in only, and before viper binds the environment; a set variable wins.
 	loadDotEnvFiles(envPrefix, apiKeyEnvVar)
 
 	// Load configuration from the environment if provided. Flags below get
@@ -744,9 +717,7 @@ Name      | Type   | Description
 `
 
 	help = strings.Replace(help, "¬", "`", -1)
-	// $PREFIX is the environment variable prefix viper actually binds. It is not
-	// the app name uppercased: `my-cli` binds MY_CLI_, and printing MY-CLI_ hands
-	// the reader a name no shell will accept.
+	// The prefix viper binds, not the app name uppercased: my-cli binds MY_CLI_.
 	help = strings.Replace(help, "$PREFIX", viper.GetString("env-prefix"), -1)
 	help = strings.Replace(help, "$APP", strings.ToUpper(viper.GetString("app-name")), -1)
 	help = strings.Replace(help, "$app", viper.GetString("app-name"), -1)

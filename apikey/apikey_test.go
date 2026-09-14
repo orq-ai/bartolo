@@ -232,9 +232,7 @@ func TestMissingKeyErrorWithNoEnvVarsIsACompleteSentence(t *testing.T) {
 	assert.False(t, strings.HasSuffix(err.Error(), "or "))
 }
 
-// A key read out of a .env is otherwise indistinguishable from one the user
-// exported on purpose, which is the confusion dotenv opt-in exists to remove.
-// `doctor` has to name the file, and only when a file actually supplied it.
+// `doctor` has to name the file, or a dotenv key looks like an exported one.
 func TestAuthStatusNamesTheDotEnvFile(t *testing.T) {
 	resetCLI(t)
 	t.Setenv("TEST_API_KEY", "")
@@ -258,8 +256,7 @@ func TestAuthStatusNamesTheDotEnvFile(t *testing.T) {
 	assert.Equal(t, ".env", status["dotenv_file"])
 }
 
-// An exported key is not a dotenv key, and reporting it as one would be the
-// same mislabelling in the other direction.
+// An exported key must not be reported as dotenv-sourced either.
 func TestAuthStatusOmitsTheDotEnvFileForAnExportedKey(t *testing.T) {
 	resetCLI(t)
 	t.Setenv("TEST_API_KEY", "from-shell")
@@ -274,9 +271,7 @@ func TestAuthStatusOmitsTheDotEnvFileForAnExportedKey(t *testing.T) {
 	assert.NotContains(t, status, "dotenv_file")
 }
 
-// The remedies in a missing-key error all read as already satisfied to someone
-// looking at a .env that holds the key, so the error has to name the file and
-// the switch that would read it.
+// The standard remedies read as already satisfied when a .env holds the key.
 func TestMissingKeyErrorNamesAnIgnoredDotEnvFile(t *testing.T) {
 	resetCLI(t)
 	t.Setenv("TEST_API_KEY", "")

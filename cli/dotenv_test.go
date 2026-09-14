@@ -5,8 +5,7 @@ import (
 	"testing"
 )
 
-// An application .env holds far more than the CLI's own key; only the CLI's own
-// variables may reach the process environment.
+// An application .env holds far more than the CLI's own variables.
 func TestLoadDotEnvFilesOnlyImportsOwnVariables(t *testing.T) {
 	chdirToDotEnv(t, ".env", "MYAPP_API_KEY=from-dotenv\nOPENAI_API_KEY=leaked\nCUSTOM_TOKEN=custom\n")
 
@@ -32,8 +31,7 @@ func TestLoadDotEnvFilesOnlyImportsOwnVariables(t *testing.T) {
 	}
 }
 
-// A file must never overwrite an export, including one deliberately blanked to
-// take a credential out of play.
+// A file must never overwrite an export, including one blanked on purpose.
 func TestLoadDotEnvFilesNeverOverwritesAnExport(t *testing.T) {
 	chdirToDotEnv(t, ".env", "MYAPP_API_KEY=from-dotenv\nMYAPP_TOKEN=from-dotenv\n")
 
@@ -55,8 +53,7 @@ func TestLoadDotEnvFilesNeverOverwritesAnExport(t *testing.T) {
 	}
 }
 
-// .env is read before .env.local and a set variable is never overwritten, so
-// the first file wins.
+// A set variable is never overwritten, so the first file read wins.
 func TestLoadDotEnvFilesFirstFileWins(t *testing.T) {
 	dir := chdirToDotEnv(t, ".env", "MYAPP_API_KEY=from-env\n")
 	if err := os.WriteFile(dir+"/.env.local", []byte("export MYAPP_API_KEY=\"from-local\"\nMYAPP_SERVER='https://local.example.com'\n"), 0600); err != nil {
@@ -79,8 +76,7 @@ func TestLoadDotEnvFilesFirstFileWins(t *testing.T) {
 	}
 }
 
-// Which directory you are in must not decide which credentials you send, so
-// nothing is read until dotenv loading is explicitly turned on.
+// The directory you stand in must not decide which credentials you send.
 func TestLoadDotEnvFilesOffByDefault(t *testing.T) {
 	chdirToDotEnv(t, ".env", "MYAPP_API_KEY=from-dotenv\n")
 
@@ -93,10 +89,8 @@ func TestLoadDotEnvFilesOffByDefault(t *testing.T) {
 	}
 }
 
-// The switch gates credentials, so a value that is not a boolean has to be an
-// error. Silently meaning "off" sends the user to a missing-key error with
-// nothing to pull on. A config-file key is not consulted at all: persisting the
-// setting would bring back the behaviour the opt-in exists to remove.
+// A non-boolean value is an error, not a silent "off": this gates credentials.
+// A config-file key is not consulted at all, by design.
 func TestDotEnvEnabled(t *testing.T) {
 	for _, tc := range []struct {
 		value   string
@@ -127,8 +121,7 @@ func TestDotEnvEnabled(t *testing.T) {
 	}
 }
 
-// chdirToDotEnv writes a dotenv file in a fresh working directory and returns
-// it so a test can add a second file.
+// chdirToDotEnv returns the directory so a test can add a second file.
 func chdirToDotEnv(t *testing.T, filename, contents string) string {
 	t.Helper()
 
@@ -141,8 +134,7 @@ func chdirToDotEnv(t *testing.T, filename, contents string) string {
 	return dir
 }
 
-// clearDotEnvEnv unsets the switch and the named variables for one test, and
-// restores them afterwards.
+// clearDotEnvEnv unsets the switch and the named variables for one test.
 func clearDotEnvEnv(t *testing.T, keys ...string) {
 	t.Helper()
 

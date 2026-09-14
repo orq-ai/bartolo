@@ -95,8 +95,7 @@ func (h *Handler) AuthStatus(profile map[string]string) map[string]interface{} {
 		"source":     source,
 	}
 
-	// A key read out of a .env is otherwise indistinguishable from one the user
-	// exported on purpose, so name the file that supplied it.
+	// A key from a .env is otherwise indistinguishable from an exported one.
 	if dotEnvFile != "" {
 		status["dotenv_file"] = dotEnvFile
 	}
@@ -108,8 +107,8 @@ func (h *Handler) AuthStatus(profile map[string]string) map[string]interface{} {
 	return status
 }
 
-// lookupKey resolves the key and reports where it came from: "profile", "env",
-// "dotenv" (with the file that supplied it), or a missing-key reason.
+// lookupKey reports where the key came from: profile, env, dotenv + file, or a
+// missing-key reason.
 func (h *Handler) lookupKey(profile map[string]string, activeProfile string) (key string, source string, dotEnvFile string) {
 	if key := strings.TrimSpace(profile[apiKey]); key != "" {
 		return h.applyPrefix(key), "profile", ""
@@ -151,9 +150,8 @@ func (h *Handler) missingKeyError(name string, source string) error {
 	}
 	err := fmt.Errorf("missing API key; %s", strings.Join(remedies, " or "))
 
-	// The key may be sitting in a .env this CLI deliberately did not read. Say
-	// so: the remedies above all read as already satisfied to someone looking
-	// at that file.
+	// The remedies above read as already satisfied to someone looking at a .env
+	// that holds the key, so name that file.
 	if file, key := cli.DotEnvCandidate(h.EnvVars); file != "" {
 		return fmt.Errorf("%w. %s defines %s, but dotenv loading is off; run with %s_DOTENV=1 to use it",
 			err, file, key, viper.GetString("env-prefix"))
