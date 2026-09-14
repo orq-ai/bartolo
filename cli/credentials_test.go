@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1157,51 +1158,148 @@ func TestProfilePromptValidatorRunsOnlyForRequiredKeys(t *testing.T) {
 	}
 }
 
-// A profile carries whatever type the build that wrote it stored. When the
-// CLI later registers its handler under another name — or under none, as
-// UseAuth("") allows — that stored string must not strand the profile.
-func TestAuthHandlerResolvesAProfileTypeNoHandlerIsRegisteredUnder(t *testing.T) {
-	initTestCLI(t, "", stubAuthHandler{})
+func TestResolveAuthHandler(t *testing.T) {
+	type registration struct {
+		name    string
+		handler AuthHandler
+	}
+	tests := []struct {
+		name        string
+		registered  []registration
+		storedType  string
+		wantName    string
+		wantHandler AuthHandler
+	}{
+		{
+			name:        "exact match wins among several",
+			registered:  []registration{{"apikey", stubAuthHandler{}}, {"oauth", stubOptionalKeyHandler{}}},
+			storedType:  "oauth",
+			wantName:    "oauth",
+			wantHandler: stubOptionalKeyHandler{},
+		},
+		{
+			name:        "stored label resolves through the sole anonymous handler",
+			registered:  []registration{{"", stubAuthHandler{}}},
+			storedType:  "apikey",
+			wantName:    "",
+			wantHandler: stubAuthHandler{},
+		},
+		{
+			name:       "a named handler does not answer to another label",
+			registered: []registration{{"bearer", stubAuthHandler{}}},
+			storedType: "apikey",
+			wantName:   "apikey",
+		},
+		{
+			name:       "unknown label with several handlers resolves to none",
+			registered: []registration{{"", stubAuthHandler{}}, {"oauth", stubOptionalKeyHandler{}}},
+			storedType: "apikey",
+			wantName:   "apikey",
+		},
+		{
+			name:        "empty type resolves to the sole named handler",
+			registered:  []registration{{"bearer", stubAuthHandler{}}},
+			storedType:  "",
+			wantName:    "bearer",
+			wantHandler: stubAuthHandler{},
+		},
+		{
+			name:       "empty type with several handlers resolves to none",
+			registered: []registration{{"apikey", stubAuthHandler{}}, {"oauth", stubOptionalKeyHandler{}}},
+			storedType: "",
+			wantName:   "",
+		},
+	}
 
-	name, handler := resolveAuthHandler(map[string]string{"type": "apikey"})
-	assert.NotNil(t, handler, "a stored type the registry does not answer to stranded the profile")
-	assert.Equal(t, "", name, "the resolved name is the registered one, not the stored label")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAuthState(t)
+			Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+			for _, r := range tc.registered {
+				UseAuth(r.name, r.handler)
+			}
+
+			name, handler := resolveAuthHandler(map[string]string{"type": tc.storedType})
+			assert.Equal(t, tc.wantName, name)
+			assert.Equal(t, tc.wantHandler, handler)
+		})
+	}
 }
 
-// The fallback is for a CLI with one way to authenticate. With several
-// registered there is no single answer, so an unknown type resolves to none.
-func TestAuthHandlerRefusesAnUnknownTypeWhenSeveralAreRegistered(t *testing.T) {
-	initTestCLI(t, "apikey", stubAuthHandler{})
-	UseAuth("oauth", stubOptionalKeyHandler{})
+// headerAuthHandler marks each request it authenticates, so a test can tell
+// the request middleware used it.
+type headerAuthHandler struct{}
 
-	_, handler := resolveAuthHandler(map[string]string{"type": "somethingelse"})
-	assert.Nil(t, handler, "an ambiguous registry must not guess which handler a profile meant")
-
-	_, exact := resolveAuthHandler(map[string]string{"type": "oauth"})
-	assert.NotNil(t, exact, "an exact match must still win outright")
+func (headerAuthHandler) ProfileKeys() []string { return []string{"api-key"} }
+func (headerAuthHandler) OnRequest(_ *zerolog.Logger, r *http.Request) error {
+	r.Header.Set("X-Test-Auth", "anonymous")
+	return nil
 }
 
-// `auth profile list` resolves a profile the way a request does, so the fields
-// it lists are the ones the profile would authenticate with. Without that, a
-// profile whose stored type is merely an unregistered label falls into the
-// list-everything fallback and prints fields the handler never declared.
-func TestListProfilesShowsHandlerFieldsForAnUnregisteredStoredType(t *testing.T) {
-	initTestCLI(t, "", stubAuthHandler{})
+func TestRequestAuthenticatesAStoredLabelThroughTheAnonymousHandler(t *testing.T) {
+	initTestCLI(t, "", headerAuthHandler{})
+	Creds.Set("profiles.acme.type", "apikey")
+	Creds.Set("profiles.acme.api_key", "secret")
+	viper.Set("profile", "acme")
 
+	var got string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("X-Test-Auth")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	_, err := Client.URL(server.URL).Get().Do()
+	assert.NoError(t, err)
+	assert.Equal(t, "anonymous", got)
+}
+
+func TestAuthStatusReportsTheStoredTypeResolvedByTheAnonymousHandler(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+	Creds.Set("profiles.acme.type", "apikey")
+	Creds.Set("profiles.acme.api_key", "secret")
+	viper.Set("profile", "acme")
+
+	status := GetAuthStatus()
+	assert.Equal(t, "apikey", status["type"])
+	assert.Equal(t, true, status["configured"])
+}
+
+// onlyListedProfile runs `auth profile list` and returns its single entry.
+func onlyListedProfile(t *testing.T) map[string]interface{} {
+	t.Helper()
+	decoded := executeJSON(t, "auth profile list -o json")
+	profiles, _ := decoded["profiles"].([]interface{})
+	if !assert.Len(t, profiles, 1) {
+		t.FailNow()
+	}
+	entry, ok := profiles[0].(map[string]interface{})
+	if !assert.True(t, ok) {
+		t.FailNow()
+	}
+	return entry
+}
+
+func TestListProfilesShowsHandlerFieldsForAStoredLabel(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
 	Creds.Set("profiles.acme.type", "apikey")
 	Creds.Set("profiles.acme.api_key", "sk-orq-abcdefghijklmnop")
 	Creds.Set("profiles.acme.stray_field", "not a declared key")
 
-	viper.Set("output-format", "json")
-	decoded := executeJSON(t, "auth profile list -o json")
-	profiles, ok := decoded["profiles"].([]interface{})
-	assert.True(t, ok)
-	assert.Len(t, profiles, 1)
-	entry, ok := profiles[0].(map[string]interface{})
-	assert.True(t, ok)
+	entry := onlyListedProfile(t)
+	assert.Equal(t, "apikey", entry["type"])
+	assert.Contains(t, entry, "api_key")
+	assert.NotContains(t, entry, "stray_field")
+}
 
-	assert.Equal(t, "apikey", entry["type"], "the stored label is still reported as stored")
-	assert.Equal(t, "sk-o****mnop", entry["api_key"])
-	_, stray := entry["stray_field"]
-	assert.False(t, stray, "a field the handler never declared was listed: %v", entry)
+func TestListProfilesShowsEveryStoredFieldWhenNoHandlerResolves(t *testing.T) {
+	initTestCLI(t, "apikey", stubAuthHandler{})
+	UseAuth("oauth", stubOptionalKeyHandler{})
+	Creds.Set("profiles.acme.type", "legacy")
+	Creds.Set("profiles.acme.api_key", "sk-orq-abcdefghijklmnop")
+	Creds.Set("profiles.acme.stray_field", "kept")
+
+	entry := onlyListedProfile(t)
+	assert.Equal(t, "legacy", entry["type"])
+	assert.Contains(t, entry, "stray_field")
 }

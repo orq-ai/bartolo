@@ -157,18 +157,15 @@ func newProfileListCommand() *cobra.Command {
 	}
 }
 
-// profileListEntry renders one stored profile for `auth profile list`. A
-// registered handler decides which fields are shown; without one every stored
-// field is listed, so a profile saved by a handler that is no longer
-// registered still shows what it holds.
+// profileListEntry renders one stored profile for `auth profile list`. The
+// handler a request would authenticate the profile with decides which fields
+// are shown. When none resolves, every stored field is listed, so a profile
+// saved by a handler that is no longer registered still shows what it holds.
 func profileListEntry(name string, profile map[string]interface{}, active string) map[string]interface{} {
 	typeName, _ := profile["type"].(string)
 	entry := map[string]interface{}{"name": name, "type": typeName, "active": name == active}
 
 	keys := []string{"server"}
-	// Resolved the way a request resolves it, so the fields listed for a
-	// profile are the ones it would authenticate with. Listing every stored
-	// key is the fallback for a profile no registered handler claims.
 	if _, handler := authHandlerFor(typeName); handler != nil {
 		keys = append(keys, handler.ProfileKeys()...)
 	} else {
@@ -403,32 +400,37 @@ func resolveAuthHandler(profile map[string]string) (string, AuthHandler) {
 	return authHandlerFor(profile["type"])
 }
 
-// authHandlerFor resolves the handler a stored profile type names. The type is
-// looked up verbatim; anything the registry does not answer to falls back to
-// the sole registered handler, because a CLI with one way to authenticate has
-// only one answer to give.
-//
-// That fallback is not only for the empty type. A profile carries whatever
-// type the build that wrote it chose to store, and a CLI that later registers
-// its handler under a different name — or under none, as UseAuth("") allows —
-// would otherwise strand every profile already on disk, with "no
-// authentication handler configured" and no way back other than editing
-// credentials.json by hand. The stored string is a label, not a capability.
-//
-// With several handlers registered there is no single answer, so an unknown
-// type resolves to nothing and the caller reports it.
+// authHandlerFor resolves the handler a stored profile type names. An exact
+// match wins. An empty type resolves to the sole registered handler, and so
+// does any other label when that handler is anonymous (UseAuth("")), since an
+// anonymous handler has no name a stored type could match. A named handler
+// only answers to its own name.
 func authHandlerFor(typeName string) (string, AuthHandler) {
-	if handler := AuthHandlers[typeName]; handler != nil {
-		return typeName, handler
-	}
-
-	if len(AuthHandlers) == 1 {
-		for name, handler := range AuthHandlers {
-			return name, handler
+	if typeName != "" {
+		if handler := AuthHandlers[typeName]; handler != nil {
+			return typeName, handler
+		}
+		if _, anonymous := AuthHandlers[""]; !anonymous {
+			return typeName, nil
 		}
 	}
 
-	return "", nil
+	if name, handler, ok := soleAuthHandler(); ok {
+		return name, handler
+	}
+
+	return typeName, nil
+}
+
+// soleAuthHandler returns the registered handler when there is exactly one.
+func soleAuthHandler() (string, AuthHandler, bool) {
+	if len(AuthHandlers) != 1 {
+		return "", nil, false
+	}
+	for name, handler := range AuthHandlers {
+		return name, handler, true
+	}
+	return "", nil, false
 }
 
 // GetAuthStatus returns machine-readable auth diagnostics for `doctor`.
@@ -451,6 +453,10 @@ func GetAuthStatus() map[string]interface{} {
 	status["profile"] = ActiveProfileName()
 
 	typeName, handler := resolveAuthHandler(profile)
+	if typeName == "" {
+		// Resolved through the anonymous handler: report the type the profile stores.
+		typeName = profile["type"]
+	}
 	if typeName != "" {
 		status["type"] = typeName
 	}
@@ -746,10 +752,8 @@ func pickAuthHandler(preferredType string) (string, AuthHandler, error) {
 		return preferredType, handler, nil
 	}
 
-	if len(AuthHandlers) == 1 {
-		for name, handler := range AuthHandlers {
-			return name, handler, nil
-		}
+	if name, handler, ok := soleAuthHandler(); ok {
+		return name, handler, nil
 	}
 
 	name, err := promptAuthType()
