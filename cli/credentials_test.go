@@ -908,13 +908,13 @@ func TestAuthSetupCommandTargetsProfileFlagThroughCobra(t *testing.T) {
 	assert.True(t, ProfileExists("named"), "expected `--profile named` to target the `named` profile")
 }
 
-// withFakeInteractiveSetup swaps isInteractive and promptProfileValue for the
+// withFakeInteractiveSetup swaps the terminal check and promptProfileValue for the
 // duration of the test so RunAuthSetup can be exercised without a TTY.
 func withFakeInteractiveSetup(t *testing.T, prompt func(key string, required bool) (string, error)) {
 	t.Helper()
-	origInteractive, origPrompt := isInteractive, promptProfileValue
-	t.Cleanup(func() { isInteractive, promptProfileValue = origInteractive, origPrompt })
-	isInteractive = func() bool { return true }
+	origInteractive, origPrompt := hasInteractiveInput, promptProfileValue
+	t.Cleanup(func() { hasInteractiveInput, promptProfileValue = origInteractive, origPrompt })
+	hasInteractiveInput = func() bool { return true }
 	promptProfileValue = prompt
 }
 

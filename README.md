@@ -214,6 +214,34 @@ with a caller-supplied context:
 os.Exit(cli.ExecuteContext(ctx))
 ```
 
+### Suppressing prompts
+
+Auth setup, the profile value prompts, and destructive confirmations all ask
+before they act, and by default they ask whenever stdin is a terminal. A CLI
+that offers a "never prompt" flag sets `cli.PromptAllowed` so the flag reaches
+all three at once:
+
+```go
+func main() {
+	cli.Init(&cli.Config{ /* ... */ })
+
+	// After cli.Init: both calls need cli.Root, which Init creates.
+	cli.AddGlobalFlag("no-input", "", "Never prompt; fail instead", false)
+	cli.PromptAllowed = func() bool { return !viper.GetBool("no-input") }
+}
+```
+
+It is a veto, not a replacement: a terminal is still required either way, so no
+override can enable prompting against a pipe and hang on a question with nowhere
+to appear. `cli.HasInteractiveInput` reports the terminal check if you want to
+ask it yourself.
+
+Without this, a CI job that sets such a flag still blocks on a prompt as soon as
+it has a terminal — a `docker run -t` step, a self-hosted runner, or a developer
+reproducing the job locally. No site hangs once it is in place: auth setup and
+destructive confirmations return a usage error, and an optional profile key is
+simply left unset, as pressing Enter would leave it.
+
 ## Local Development
 
 Use the repo-level verification flow before publishing changes:
