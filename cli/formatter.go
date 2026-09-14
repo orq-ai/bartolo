@@ -329,6 +329,41 @@ func checkColumns(requestedColumns []string, rows []map[string]interface{}, user
 	return nil
 }
 
+type tableProjectionState uint8
+
+const (
+	tableProjectionAbsent tableProjectionState = iota
+	tableProjectionValid
+	tableProjectionInvalid
+)
+
+// parseTableProjection recognizes the formatter's narrow one-[] grammar.
+func parseTableProjection(column string) (string, string, tableProjectionState) {
+	parts := strings.Split(column, ".")
+	projection := -1
+	for i, part := range parts {
+		if part == "" {
+			return "", "", tableProjectionInvalid
+		}
+		if !strings.HasSuffix(part, "[]") {
+			continue
+		}
+		if projection >= 0 || i == len(parts)-1 || strings.Count(part, "[]") != 1 {
+			return "", "", tableProjectionInvalid
+		}
+		parts[i] = strings.TrimSuffix(part, "[]")
+		if parts[i] == "" {
+			return "", "", tableProjectionInvalid
+		}
+		projection = i
+	}
+
+	if projection < 0 {
+		return "", "", tableProjectionAbsent
+	}
+	return strings.Join(parts[:projection+1], "."), strings.Join(parts[projection+1:], "."), tableProjectionValid
+}
+
 // tableField resolves dotted object paths and one array projection while
 // preserving literal top-level keys.
 func tableField(row map[string]interface{}, column string) (interface{}, bool) {
@@ -336,34 +371,15 @@ func tableField(row map[string]interface{}, column string) (interface{}, bool) {
 		return value, true
 	}
 
-	parts := strings.Split(column, ".")
-	if len(parts) < 2 {
+	prefix, suffix, projection := parseTableProjection(column)
+	switch projection {
+	case tableProjectionAbsent:
+		return objectField(row, column)
+	case tableProjectionInvalid:
 		return nil, false
 	}
 
-	projection := -1
-	for i, part := range parts {
-		if part == "" {
-			return nil, false
-		}
-		if !strings.HasSuffix(part, "[]") {
-			continue
-		}
-		if projection >= 0 || i == len(parts)-1 || strings.Count(part, "[]") != 1 {
-			return nil, false
-		}
-		parts[i] = strings.TrimSuffix(part, "[]")
-		if parts[i] == "" {
-			return nil, false
-		}
-		projection = i
-	}
-
-	if projection < 0 {
-		return objectField(row, column)
-	}
-
-	value, ok := objectField(row, strings.Join(parts[:projection+1], "."))
+	value, ok := objectField(row, prefix)
 	if !ok {
 		return nil, false
 	}
@@ -375,7 +391,6 @@ func tableField(row map[string]interface{}, column string) (interface{}, bool) {
 		return []interface{}{}, true
 	}
 
-	suffix := strings.Join(parts[projection+1:], ".")
 	projected := make([]interface{}, 0, len(items))
 	for _, item := range items {
 		object, ok := item.(map[string]interface{})
@@ -502,32 +517,12 @@ func tableHeader(header string) string {
 		return tw.Title(strings.Join(tw.SplitCamelCase(value), tw.Space))
 	}
 
-	parts := strings.Split(header, ".")
-	projection := -1
-	for i, part := range parts {
-		if part == "" {
-			return format(header)
-		}
-		if !strings.HasSuffix(part, "[]") {
-			continue
-		}
-		if projection >= 0 || i == len(parts)-1 || strings.Count(part, "[]") != 1 {
-			return format(header)
-		}
-		parts[i] = strings.TrimSuffix(part, "[]")
-		if parts[i] == "" {
-			return format(header)
-		}
-		projection = i
-	}
-
-	if projection < 0 {
+	prefix, suffix, projection := parseTableProjection(header)
+	if projection != tableProjectionValid {
 		return format(header)
 	}
 
-	prefix := format(strings.Join(parts[:projection+1], "."))
-	suffix := format(strings.Join(parts[projection+1:], "."))
-	return prefix + "[] . " + suffix
+	return format(prefix) + "[] . " + format(suffix)
 }
 
 // tableFooter summarizes the envelope in one line below the table: how many

@@ -446,6 +446,92 @@ func TestDefaultFormatterRendersDeclaredArrayElementColumn(t *testing.T) {
 	assert.Contains(t, out.String(), "lookup, refund, policy, …")
 }
 
+func TestDefaultFormatterRendersThreeProjectedValuesWithoutEllipsis(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"settings": map[string]interface{}{
+				"tools": []interface{}{
+					map[string]interface{}{"key": "lookup"},
+					map[string]interface{}{"key": "refund"},
+					map[string]interface{}{"key": "policy"},
+				},
+			},
+		},
+	}, "settings.tools[].key")
+
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "lookup, refund, policy")
+	assert.NotContains(t, out.String(), "lookup, refund, policy, …")
+}
+
+func TestDefaultFormatterTruncatesLongProjectedCell(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"settings": map[string]interface{}{
+				"tools": []interface{}{
+					map[string]interface{}{"key": strings.Repeat("x", maxCellWidth+10)},
+				},
+			},
+		},
+	}, "settings.tools[].key")
+
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), strings.Repeat("x", maxCellWidth-1)+"…")
+	assert.NotContains(t, out.String(), strings.Repeat("x", maxCellWidth))
+}
+
+func TestDefaultFormatterRendersBlankProjectedCellForUnresolvedRow(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"settings": map[string]interface{}{
+				"tools": []interface{}{map[string]interface{}{"id": "missing-key"}},
+			},
+		},
+		map[string]interface{}{
+			"settings": map[string]interface{}{
+				"tools": []interface{}{map[string]interface{}{"key": "lookup-order"}},
+			},
+		},
+	}, "settings.tools[].key")
+
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "lookup-order")
+	blankCells := 0
+	for _, line := range strings.Split(out.String(), "\n") {
+		if strings.HasPrefix(line, "│") && strings.HasSuffix(line, "│") && strings.TrimSpace(strings.Trim(line, "│")) == "" {
+			blankCells++
+		}
+	}
+	assert.Equal(t, 1, blankCells)
+}
+
 func TestDefaultFormatterRendersExplicitArrayElementColumn(t *testing.T) {
 	viper.Reset()
 	viper.Set("output-format", tableFormat)
