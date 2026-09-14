@@ -3,6 +3,8 @@ package cli
 import (
 	"os"
 	"testing"
+
+	"github.com/spf13/viper"
 )
 
 // An application .env holds far more than the CLI's own key; only the CLI's own
@@ -10,10 +12,11 @@ import (
 func TestLoadDotEnvFilesOnlyImportsOwnVariables(t *testing.T) {
 	chdirToDotEnv(t, ".env", "MYAPP_API_KEY=from-dotenv\nOPENAI_API_KEY=leaked\nCUSTOM_TOKEN=custom\n")
 
-	for _, key := range []string{"MYAPP_API_KEY", "OPENAI_API_KEY", "CUSTOM_TOKEN", "MYAPP_NO_DOTENV"} {
+	for _, key := range []string{"MYAPP_API_KEY", "OPENAI_API_KEY", "CUSTOM_TOKEN"} {
 		t.Setenv(key, "")
 		os.Unsetenv(key)
 	}
+	t.Setenv("MYAPP_DOTENV", "1")
 	t.Cleanup(func() { dotEnvOrigins = map[string]string{} })
 
 	loadDotEnvFiles("MYAPP", "CUSTOM_TOKEN")
@@ -35,17 +38,43 @@ func TestLoadDotEnvFilesOnlyImportsOwnVariables(t *testing.T) {
 	}
 }
 
-func TestLoadDotEnvFilesOptOut(t *testing.T) {
+// Which directory you are in must not decide which credentials you send, so
+// nothing is read until dotenv loading is explicitly turned on.
+func TestLoadDotEnvFilesOffByDefault(t *testing.T) {
 	chdirToDotEnv(t, ".env", "MYAPP_API_KEY=from-dotenv\n")
 
+	t.Setenv("MYAPP_API_KEY", "")
 	os.Unsetenv("MYAPP_API_KEY")
-	t.Setenv("MYAPP_NO_DOTENV", "1")
+	t.Setenv("MYAPP_DOTENV", "")
+	os.Unsetenv("MYAPP_DOTENV")
+	viper.Set("dotenv", nil)
 	t.Cleanup(func() { dotEnvOrigins = map[string]string{} })
 
 	loadDotEnvFiles("MYAPP", "")
 
 	if got := os.Getenv("MYAPP_API_KEY"); got != "" {
-		t.Errorf("opt-out ignored: got %q", got)
+		t.Errorf("dotenv was read without being enabled: got %q", got)
+	}
+}
+
+// The config file is read before the dotenv files, so it can turn them on.
+func TestLoadDotEnvFilesEnabledByConfig(t *testing.T) {
+	chdirToDotEnv(t, ".env", "MYAPP_API_KEY=from-dotenv\n")
+
+	t.Setenv("MYAPP_API_KEY", "")
+	os.Unsetenv("MYAPP_API_KEY")
+	t.Setenv("MYAPP_DOTENV", "")
+	os.Unsetenv("MYAPP_DOTENV")
+	viper.Set("dotenv", true)
+	t.Cleanup(func() {
+		viper.Set("dotenv", nil)
+		dotEnvOrigins = map[string]string{}
+	})
+
+	loadDotEnvFiles("MYAPP", "")
+
+	if got := os.Getenv("MYAPP_API_KEY"); got != "from-dotenv" {
+		t.Errorf("config did not enable dotenv loading: got %q", got)
 	}
 }
 

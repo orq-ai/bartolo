@@ -53,12 +53,13 @@ Environment variables:
 - `{{ . }}`
 {{- end }}
 
-Project-local `.env` and `.env.local` files in the current directory are loaded
-automatically if present. Only the variables above are imported; the rest of an
-application `.env` is ignored. Since the lookup is relative to the working
-directory, a key in one of these files can change which credentials are used —
-`{{ .CommandName }} doctor` names the file when it supplied the key. Set
-`{{ .AuthDoc.EnvPrefix }}_NO_DOTENV=1` to skip these files.
+Project-local `.env` and `.env.local` files are not read by default: the lookup
+is relative to the directory you run the command in, so a stray file would
+quietly decide which credentials you send. Opt in per invocation with
+`{{ .AuthDoc.EnvPrefix }}_DOTENV=1`, or permanently with `"dotenv": true` in the
+config file. When enabled, only the variables above are imported — the rest of an
+application `.env` is ignored — and `{{ .CommandName }} doctor` names the file
+that supplied the key.
 
 Profile setup:
 
