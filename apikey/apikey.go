@@ -57,7 +57,13 @@ func (h *Handler) OnRequest(log *zerolog.Logger, request *http.Request) error {
 		return h.missingKeyError(activeProfile, source)
 	}
 
-	log.Debug().Str("auth-source", source).Str("dotenv-file", dotEnvFile).Msg("Using API key authentication")
+	// Only a key that actually came from a file carries one, so the field is
+	// added rather than logged empty on every profile and exported key.
+	event := log.Debug().Str("auth-source", source)
+	if dotEnvFile != "" {
+		event = event.Str("dotenv-file", dotEnvFile)
+	}
+	event.Msg("Using API key authentication")
 	h.applyKey(request, key)
 
 	return nil
