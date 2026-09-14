@@ -106,6 +106,10 @@ func Init(config *Config) {
 			// produced JSON while reporting success. Reject it here so the
 			// flag behaves like any other enumerated one, whether the value
 			// came from the flag, the environment, or a config file.
+			if dotEnvErr != nil {
+				return NewValueError(dotEnvErr)
+			}
+
 			format := viper.GetString("output-format")
 			normalized, ok := parseOutputFormat(format)
 			if !ok {
@@ -191,22 +195,34 @@ func DotEnvOrigin(key string) string {
 	return dotEnvOrigins[key]
 }
 
+// dotEnvErr carries an unusable $PREFIX_DOTENV value from Init to the first
+// command run, where it can be reported as a usage error instead of a panic.
+var dotEnvErr error
+
 // dotEnvEnabled reports whether dotenv loading is turned on. It is off by
 // default: reading credentials out of the working directory is a job for the
 // shell or a tool like direnv, not for an API client, and it would otherwise
 // let the directory you happen to be in decide which credentials you send.
-// $PREFIX_DOTENV=1 turns it on for callers who want the old behaviour. There is
-// deliberately no config-file key: a persisted setting would re-enable the
-// cwd-decides-identity problem everywhere, invisibly.
-func dotEnvEnabled(envPrefix string) bool {
+// $PREFIX_DOTENV=1 turns it on explicitly; imports stay filtered to the CLI's
+// own variables either way. There is deliberately no config-file key: a
+// persisted setting would re-enable the cwd-decides-identity problem
+// everywhere, invisibly.
+//
+// A value that is not a boolean is an error rather than an "off", because this
+// switch gates credentials: $PREFIX_DOTENV=yes silently meaning "no" sends the
+// user to a missing-key error with nothing to pull on.
+func dotEnvEnabled(envPrefix string) (bool, error) {
 	value := strings.TrimSpace(os.Getenv(envPrefix + "_DOTENV"))
 	if value == "" {
-		return false
+		return false, nil
 	}
 
 	enabled, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s_DOTENV: %q is not a boolean; use 1 or 0", envPrefix, value)
+	}
 
-	return err == nil && enabled
+	return enabled, nil
 }
 
 // loadDotEnvFiles imports the CLI's own variables from project-local dotenv
@@ -214,7 +230,13 @@ func dotEnvEnabled(envPrefix string) bool {
 // it) are imported: an application .env also holds unrelated secrets such as
 // OPENAI_API_KEY or DATABASE_URL, and nothing here reads those.
 func loadDotEnvFiles(envPrefix, apiKeyEnvVar string) {
-	if !dotEnvEnabled(envPrefix) {
+	// Origins describe the current load, so a second Init does not report a
+	// file that supplied nothing this time.
+	dotEnvOrigins = map[string]string{}
+
+	enabled, err := dotEnvEnabled(envPrefix)
+	dotEnvErr = err
+	if err != nil || !enabled {
 		return
 	}
 
@@ -231,6 +253,11 @@ func loadDotEnvFiles(envPrefix, apiKeyEnvVar string) {
 func loadDotEnvFile(filename string, wanted func(string) bool) {
 	file, err := os.Open(filename)
 	if err != nil {
+		// Absent is the normal case. Unreadable is not, and the user has just
+		// said this file matters.
+		if !errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(Stderr, "warning: could not read %s: %v\n", filename, err)
+		}
 		return
 	}
 	defer file.Close()
@@ -253,7 +280,13 @@ func loadDotEnvFile(filename string, wanted func(string) bool) {
 
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
-		if key == "" || !wanted(key) || os.Getenv(key) != "" {
+		if key == "" || !wanted(key) {
+			continue
+		}
+
+		// LookupEnv, not Getenv: `export KEY=` blanks a credential on purpose,
+		// and refilling it from a file is the worse of the two outcomes.
+		if _, set := os.LookupEnv(key); set {
 			continue
 		}
 
@@ -266,6 +299,13 @@ func loadDotEnvFile(filename string, wanted func(string) bool) {
 		if os.Setenv(key, value) == nil {
 			dotEnvOrigins[key] = filename
 		}
+	}
+
+	// A line over bufio.Scanner's 64KB limit ends the scan exactly like EOF, so
+	// without this a key below it is never imported and the lookup falls
+	// through to a different credential.
+	if err := scanner.Err(); err != nil {
+		fmt.Fprintf(Stderr, "warning: %s was only partially read (%v); some variables were not imported\n", filename, err)
 	}
 }
 
@@ -284,8 +324,9 @@ func initConfig(appName, envPrefix, apiKeyEnvVar, serializationFormat string) {
 	viper.AddConfigPath("$HOME/." + appName + "/")
 	viper.ReadInConfig()
 
-	// Opt-in only. When enabled, dotenv files are read before the environment so
-	// project-level credentials work without an explicit `export`.
+	// Opt-in only. When enabled, dotenv values are imported into the process
+	// environment before viper binds it, so project-level credentials work
+	// without an explicit `export`; a variable already set is never overwritten.
 	loadDotEnvFiles(envPrefix, apiKeyEnvVar)
 
 	// Load configuration from the environment if provided. Flags below get
@@ -626,11 +667,11 @@ Environment variables must be capitalized, prefixed with ¬$APP¬, and words are
 
 The CLI does **not** read ¬.env¬ or ¬.env.local¬ by default. Loading credentials out of the working directory means the directory you are standing in decides which credentials you send, which is a job for your shell or a tool like ¬direnv¬, not for this CLI.
 
-Set ¬$APP_DOTENV=1¬ to turn it on for that invocation. There is no configuration-file equivalent on purpose: a persisted setting would bring the surprise back everywhere. When it is enabled:
+Run a command with ¬$PREFIX_DOTENV=1¬ to turn it on for that command. It is an ordinary environment variable, so exporting it enables dotenv for the rest of the shell session; prefer ¬$PREFIX_DOTENV=1 $app ...¬. A value that is not a boolean is an error rather than a silent "off". There is no configuration-file equivalent on purpose: a persisted setting would bring the surprise back everywhere. When it is enabled:
 
-- Only ¬$APP_¬-prefixed variables and the configured API key variable are imported. The rest of an application ¬.env¬ — ¬OPENAI_API_KEY¬, ¬DATABASE_URL¬ and friends — is ignored.
-- A variable already set in the environment always wins; a file never overwrites an explicit ¬export¬.
-- ¬doctor¬ reports a ¬dotenv¬ auth source and names the file that supplied the key, so a credential from a file is never mistaken for one you exported.
+- Only ¬$PREFIX_¬-prefixed variables and the configured API key variable are imported. That covers settings as well as credentials — ¬$PREFIX_SERVER¬ in a ¬.env¬ retargets the CLI — but the rest of an application ¬.env¬, ¬OPENAI_API_KEY¬ and ¬DATABASE_URL¬ and friends, is ignored.
+- A variable already present in the environment wins, including one exported as empty; a file never overwrites an ¬export¬.
+- For API key and bearer token auth, ¬doctor¬ reports a ¬dotenv¬ auth source and names the file that supplied the key, so a credential from a file is never mistaken for one you exported.
 
 ## Configuration Files
 
@@ -653,6 +694,10 @@ Name      | Type   | Description
 `
 
 	help = strings.Replace(help, "¬", "`", -1)
+	// $PREFIX is the environment variable prefix viper actually binds. It is not
+	// the app name uppercased: `my-cli` binds MY_CLI_, and printing MY-CLI_ hands
+	// the reader a name no shell will accept.
+	help = strings.Replace(help, "$PREFIX", viper.GetString("env-prefix"), -1)
 	help = strings.Replace(help, "$APP", strings.ToUpper(viper.GetString("app-name")), -1)
 	help = strings.Replace(help, "$app", viper.GetString("app-name"), -1)
 	help = strings.Replace(help, "$config-dir", viper.GetString("config-directory"), -1)

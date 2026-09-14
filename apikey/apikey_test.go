@@ -229,3 +229,45 @@ func TestMissingKeyErrorWithNoEnvVarsIsACompleteSentence(t *testing.T) {
 	assert.False(t, strings.HasSuffix(err.Error(), ": "))
 	assert.False(t, strings.HasSuffix(err.Error(), "or "))
 }
+
+// A key read out of a .env is otherwise indistinguishable from one the user
+// exported on purpose, which is the confusion dotenv opt-in exists to remove.
+// `doctor` has to name the file, and only when a file actually supplied it.
+func TestAuthStatusNamesTheDotEnvFile(t *testing.T) {
+	resetCLI(t)
+	t.Setenv("TEST_API_KEY", "")
+	os.Unsetenv("TEST_API_KEY")
+	t.Setenv("TEST_DOTENV", "1")
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("TEST_API_KEY=from-dotenv\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+
+	cli.Init(&cli.Config{AppName: "test", EnvPrefix: "TEST"})
+	Init("x-auth", LocationHeader)
+
+	handler := cli.AuthHandlers[""].(*Handler)
+	status := handler.AuthStatus(nil)
+
+	assert.Equal(t, true, status["configured"])
+	assert.Equal(t, "dotenv", status["source"])
+	assert.Equal(t, ".env", status["dotenv_file"])
+}
+
+// An exported key is not a dotenv key, and reporting it as one would be the
+// same mislabelling in the other direction.
+func TestAuthStatusOmitsTheDotEnvFileForAnExportedKey(t *testing.T) {
+	resetCLI(t)
+	t.Setenv("TEST_API_KEY", "from-shell")
+	t.Chdir(t.TempDir())
+
+	cli.Init(&cli.Config{AppName: "test", EnvPrefix: "TEST"})
+	Init("x-auth", LocationHeader)
+
+	status := cli.AuthHandlers[""].(*Handler).AuthStatus(nil)
+
+	assert.Equal(t, "env", status["source"])
+	assert.NotContains(t, status, "dotenv_file")
+}

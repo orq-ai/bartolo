@@ -59,12 +59,18 @@ This CLI does **not** read `.env` or `.env.local`. Loading credentials from the
 working directory would let the directory you are standing in decide which
 credentials you send; use your shell or `direnv` if you want that.
 
-Set `{{ .AuthDoc.EnvPrefix }}_DOTENV=1` to opt in for a single invocation. There
-is no config-file equivalent, deliberately. When it is enabled:
+Run a command with `{{ .AuthDoc.EnvPrefix }}_DOTENV=1` to opt in. It is an
+ordinary environment variable, so exporting it enables dotenv for the rest of
+the shell session — prefer `{{ .AuthDoc.EnvPrefix }}_DOTENV=1 {{ .CommandName }}
+...`. A value that is not a boolean is an error, not a silent "off". There is no
+config-file equivalent, deliberately. When it is enabled:
 
-- Only the variables listed above are imported. The rest of an application
-  `.env` is ignored.
-- An already-exported variable always wins over the file.
+- Only `{{ .AuthDoc.EnvPrefix }}_`-prefixed variables and the API key variable
+  above are imported. That includes settings, not just credentials —
+  `{{ .AuthDoc.EnvPrefix }}_SERVER` in a `.env` retargets the CLI — but the rest
+  of an application `.env` is ignored.
+- A variable already present in the environment wins, including one exported as
+  empty; a file never overwrites an `export`.
 - `{{ .CommandName }} doctor` reports a `dotenv` source and names the file, so a
   key from a file is never mistaken for one you exported.
 
