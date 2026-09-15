@@ -14,7 +14,7 @@
 - A selector supports exactly one `[]`, appended to a non-empty object-path segment, and requires a non-empty dotted object path after it.
 - Object paths may have arbitrary depth before and after `[]`; source array order is preserved.
 - Missing or null projected children and non-object array elements are omitted.
-- An empty source array resolves to an empty list; a non-empty array with no surviving projected values is unresolved.
+- An empty source array renders as an empty list and is indeterminate for suffix validation; a non-empty array with no surviving projected values is unresolved and prevents an empty row from masking a typo.
 - The complete literal top-level key wins before path syntax is interpreted.
 - `[0]`, `[1]`, `[*]`, and `[ ]` are ordinary property-name text, not selectors.
 - Projected values reuse the existing three-entry limit, `…` fourth marker, and 40-rune cell truncation.
@@ -590,7 +590,9 @@ non-object elements are omitted, and the surviving values use the same
 three-entry list abbreviation. A selector supports one `[]` and requires a
 field after it. Array indexes and multiple projections are not column syntax;
 use `--jmespath` when a response needs indexing, filtering, aggregation, or
-other restructuring.
+other restructuring. Because `[]` contains shell metacharacters, quote the
+complete argument when selecting a projected column, for example
+`--columns 'key,settings.tools[].key'`.
 ```
 
 - [ ] **Step 2: Update the generated README template**
@@ -598,7 +600,7 @@ other restructuring.
 Replace the corresponding collection clause in `templates/readme.tmpl` with this exact text:
 
 ```markdown
-- GET collections are inferred automatically, as is any method whose 2xx JSON response is a conventional page of rows: an array of objects under `data`, `items`, `results`, `records`, `entries` or `servers`, next to a field that describes the collection — `has_more`, `next_page_token`, a cursor, `total_count`, `count`. An echoed `limit` or `offset` is hidden from the table footer but does not classify an operation. Only immediate properties are read, so an envelope or a row schema composed with `allOf`/`oneOf` is not inferred. Anything else can opt in with `x-cli-list: true`, and `x-cli-list: false` disables inference. A non-empty `x-cli-list-fields` list both marks the operation as a collection and sets the table's ordered default columns (an empty `x-cli-list-fields: []` marks nothing on its own); otherwise columns are inferred from the response (nested objects skipped, lists abbreviated to their first three entries) and trimmed to fit the terminal. Use `--columns id,name` to pick and order them for one invocation. Declared or explicit columns can reach through nested objects with `model.id` and can project a field from one nested array with `settings.tools[].key`; missing, null, and non-object elements are omitted before the usual three-entry list abbreviation. A selector supports one `[]` and requires a field after it. Use `--jmespath` for indexing, filtering, aggregation, multiple projections, or another one-off restructuring (its result is tabled with columns inferred from the projected rows), and `-o json` for the complete response.
+- GET collections are inferred automatically, as is any method whose 2xx JSON response is a conventional page of rows: an array of objects under `data`, `items`, `results`, `records`, `entries` or `servers`, next to a field that describes the collection — `has_more`, `next_page_token`, a cursor, `total_count`, `count`. An echoed `limit` or `offset` is hidden from the table footer but does not classify an operation. Only immediate properties are read, so an envelope or a row schema composed with `allOf`/`oneOf` is not inferred. Anything else can opt in with `x-cli-list: true`, and `x-cli-list: false` disables inference. A non-empty `x-cli-list-fields` list both marks the operation as a collection and sets the table's ordered default columns (an empty `x-cli-list-fields: []` marks nothing on its own); otherwise columns are inferred from the response (nested objects skipped, lists abbreviated to their first three entries) and trimmed to fit the terminal. Use `--columns id,name` to pick and order them for one invocation. Declared or explicit columns can reach through nested objects with `model.id` and can project a field from one nested array with `settings.tools[].key`; missing, null, and non-object elements are omitted before the usual three-entry list abbreviation. A selector supports one `[]` and requires a field after it. Because `[]` contains shell metacharacters, quote the complete argument when selecting a projected column, for example `--columns 'key,settings.tools[].key'`. Use `--jmespath` for indexing, filtering, aggregation, multiple projections, or another one-off restructuring (its result is tabled with columns inferred from the projected rows), and `-o json` for the complete response.
 ```
 
 - [ ] **Step 3: Verify documentation parity and repository health**

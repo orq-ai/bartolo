@@ -303,6 +303,8 @@ func (f *DefaultFormatter) shouldRenderTable() bool {
 
 // checkColumns rejects a column no row has. A misspelled name would otherwise
 // render as a blank column, which reads as missing data rather than a typo.
+// Empty projected arrays are indeterminate: they validate an all-empty result,
+// but cannot outweigh a populated array whose elements do not contain the path.
 func checkColumns(requestedColumns []string, rows []map[string]interface{}, userColumns bool) error {
 	if len(requestedColumns) == 0 || len(rows) == 0 {
 		return nil
@@ -310,12 +312,20 @@ func checkColumns(requestedColumns []string, rows []map[string]interface{}, user
 
 	for _, column := range requestedColumns {
 		found := false
+		emptyProjection := false
+		unresolvedPopulatedProjection := false
 		for _, row := range rows {
-			if _, ok := tableField(row, column); ok {
+			_, resolution := resolveTableField(row, column)
+			switch resolution {
+			case tableFieldResolved:
 				found = true
-				break
+			case tableFieldEmptyProjection:
+				emptyProjection = true
+			case tableFieldUnresolvedPopulatedProjection:
+				unresolvedPopulatedProjection = true
 			}
 		}
+		found = found || (emptyProjection && !unresolvedPopulatedProjection)
 
 		if !found {
 			prefix := "declared column"
@@ -335,6 +345,15 @@ const (
 	tableProjectionAbsent tableProjectionState = iota
 	tableProjectionValid
 	tableProjectionInvalid
+)
+
+type tableFieldResolution uint8
+
+const (
+	tableFieldMissing tableFieldResolution = iota
+	tableFieldResolved
+	tableFieldEmptyProjection
+	tableFieldUnresolvedPopulatedProjection
 )
 
 // parseTableProjection recognizes the formatter's narrow one-[] grammar.
@@ -367,28 +386,37 @@ func parseTableProjection(column string) (string, string, tableProjectionState) 
 // tableField resolves dotted object paths and one array projection while
 // preserving literal top-level keys.
 func tableField(row map[string]interface{}, column string) (interface{}, bool) {
+	value, resolution := resolveTableField(row, column)
+	return value, resolution == tableFieldResolved || resolution == tableFieldEmptyProjection
+}
+
+func resolveTableField(row map[string]interface{}, column string) (interface{}, tableFieldResolution) {
 	if value, ok := row[column]; ok {
-		return value, true
+		return value, tableFieldResolved
 	}
 
 	prefix, suffix, projection := parseTableProjection(column)
 	switch projection {
 	case tableProjectionAbsent:
-		return objectField(row, column)
+		value, ok := objectField(row, column)
+		if !ok {
+			return nil, tableFieldMissing
+		}
+		return value, tableFieldResolved
 	case tableProjectionInvalid:
-		return nil, false
+		return nil, tableFieldMissing
 	}
 
 	value, ok := objectField(row, prefix)
 	if !ok {
-		return nil, false
+		return nil, tableFieldMissing
 	}
 	items, ok := value.([]interface{})
 	if !ok {
-		return nil, false
+		return nil, tableFieldMissing
 	}
 	if len(items) == 0 {
-		return []interface{}{}, true
+		return []interface{}{}, tableFieldEmptyProjection
 	}
 
 	projected := make([]interface{}, 0, len(items))
@@ -404,9 +432,9 @@ func tableField(row map[string]interface{}, column string) (interface{}, bool) {
 		projected = append(projected, child)
 	}
 	if len(projected) == 0 {
-		return nil, false
+		return nil, tableFieldUnresolvedPopulatedProjection
 	}
-	return projected, true
+	return projected, tableFieldResolved
 }
 
 // objectField resolves exact or dotted keys through objects only.

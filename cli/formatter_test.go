@@ -582,6 +582,57 @@ func TestDefaultFormatterValidatesArrayElementColumnsAcrossRows(t *testing.T) {
 	)
 }
 
+func TestDefaultFormatterRejectsMisspelledProjectionDespiteEmptyRow(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	viper.Set("columns", "settings.tools[].nmae")
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"settings": map[string]interface{}{
+				"tools": []interface{}{},
+			},
+		},
+		map[string]interface{}{
+			"settings": map[string]interface{}{
+				"tools": []interface{}{map[string]interface{}{"key": "lookup-order"}},
+			},
+		},
+	})
+
+	assert.ErrorContains(t, err, `--columns: "settings.tools[].nmae" is not a field of the returned items`)
+	assert.Empty(t, out.String())
+}
+
+func TestDefaultFormatterAllowsProjectedColumnWhenAllArraysAreEmpty(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	viper.Set("columns", "settings.tools[].key")
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"settings": map[string]interface{}{
+				"tools": []interface{}{},
+			},
+		},
+	})
+
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "SETTINGS . TOOLS[] . KEY")
+}
+
 func TestTableHeaderPreservesWholeHeaderFormattingForNonProjections(t *testing.T) {
 	headers := []string{
 		"settings.tools[0].key",

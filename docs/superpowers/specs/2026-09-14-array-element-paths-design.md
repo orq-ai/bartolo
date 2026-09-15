@@ -90,10 +90,11 @@ For each array element:
 - An element missing the suffix path is omitted.
 - A suffix that resolves to `null` is omitted.
 
-An empty source array is a successful projection whose value is an empty list.
-A non-empty source array for which no element resolves a non-null value is an
-unresolved selector for that row. A projection with at least one surviving
-value is successful even if other elements were omitted.
+An empty source array is renderable as an empty list, but is indeterminate when
+validating whether the suffix exists. A non-empty source array for which no
+element resolves a non-null value is an unresolved selector for that row. A
+projection with at least one surviving value is successful even if other
+elements were omitted.
 
 The projected value is an ordinary `[]interface{}`. Existing cell formatting
 therefore remains authoritative: strings are unquoted, other scalars use JSON
@@ -112,8 +113,11 @@ returns the existing source-specific error:
 declared column: "settings.tools[].nmae" is not a field of the returned items
 ```
 
-An empty array counts as resolved even though it renders an empty cell. This is
-consistent with Bartolo accepting declared columns for an empty result set.
+When every resolved source array is empty, the selector is accepted and renders
+an empty cell. An empty array is not affirmative evidence for the suffix when a
+populated source array is available: if no populated row resolves the suffix,
+validation returns the normal unknown-field error. This preserves useful output
+for all-empty results without allowing an empty row to mask a misspelled path.
 
 Recognized but unsupported projection shapes do not resolve as paths. Unless an
 exact top-level key wins first, existing any-row validation rejects them with
@@ -175,7 +179,7 @@ lookup, refund, policy, …
 The equivalent per-invocation override is:
 
 ```sh
-orq agents list --columns key,settings.tools[].key
+orq agents list --columns 'key,settings.tools[].key'
 ```
 
 For transformations outside the selector grammar, callers continue to use
@@ -200,9 +204,11 @@ The feature belongs in the runtime table-field resolver:
 `tableField`. It will retain the initial complete-key lookup, distinguish a
 plain dotted path from a single valid projection, traverse normalized
 `map[string]interface{}` and `[]interface{}` values, and return the projected
-slice through the same `(interface{}, bool)` contract. Unsupported projection
-shapes return `found == false`, allowing `checkColumns` to keep applying the
-current declared-versus-user diagnostic prefix.
+slice through the same `(interface{}, bool)` contract. Validation additionally
+distinguishes an empty projection from a populated projection with no matching
+suffix so an empty row cannot mask a typo. Unsupported projection shapes return
+`found == false`, allowing `checkColumns` to keep applying the current
+declared-versus-user diagnostic prefix.
 
 The implementation will not translate selectors to JMESPath. The table-column
 contract intentionally differs from general JMESPath in exact literal-key
@@ -301,9 +307,9 @@ available through `--jmespath` and is excluded from this feature.
 
 ## Acceptance criteria
 
-- `x-cli-list-fields: [key, settings.tools[].key]` generates a list command and
+- `x-cli-list-fields: [key, "settings.tools[].key"]` generates a list command and
   renders tool keys as a normal abbreviated list cell.
-- `--columns key,settings.tools[].key` produces the same table values and order.
+- `--columns 'key,settings.tools[].key'` produces the same table values and order.
 - Empty, sparse, null-containing, and mixed-type arrays follow the resolution
   rules above without panics.
 - Misspelled projected paths retain Bartolo's unknown-column protection.

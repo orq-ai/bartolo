@@ -149,7 +149,9 @@ non-object elements are omitted, and the surviving values use the same
 three-entry list abbreviation. A selector supports one `[]` and requires a
 field after it. Array indexes and multiple projections are not column syntax;
 use `--jmespath` when a response needs indexing, filtering, aggregation, or
-other restructuring.
+other restructuring. Because `[]` contains shell metacharacters, quote the
+complete argument when selecting a projected column, for example
+`--columns 'key,settings.tools[].key'`.
 
 Bartolo also groups operations automatically from:
 
