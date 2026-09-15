@@ -21,6 +21,10 @@ func resetCLI(t *testing.T) {
 	t.Helper()
 
 	viper.Reset()
+	// cli.AuthHandlers is a package global that viper.Reset does not touch,
+	// and resolution branches on how many handlers are registered.
+	cli.AuthHandlers = map[string]cli.AuthHandler{}
+	t.Cleanup(func() { cli.AuthHandlers = map[string]cli.AuthHandler{} })
 	t.Setenv("HOME", t.TempDir())
 }
 
@@ -365,4 +369,26 @@ func TestOnRequestLogsTheDotEnvFileOnlyForADotEnvKey(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The bundled helpers register anonymously, so a credentials.json written by
+// an older build carrying `"type": "apikey"` names a handler that is not in
+// the registry. Every other test here leaves `type` unset and so takes the
+// empty-label path; this is the one that reproduces what is actually on a
+// user's disk.
+func TestHeaderAuthResolvesAStoredTypeLabel(t *testing.T) {
+	resetCLI(t)
+	cli.Init(&cli.Config{
+		AppName:   "test",
+		EnvPrefix: "TEST",
+	})
+	Init("x-auth", LocationHeader)
+	cli.Creds.Set("profiles.default.type", "apikey")
+	cli.Creds.Set("profiles.default.api_key", "test")
+	cli.SelectProfile("default")
+
+	r := cli.Client.Get()
+	r.Do()
+
+	assert.Equal(t, "test", r.Context.Request.Header.Get("x-auth"))
 }

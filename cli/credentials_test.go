@@ -3,7 +3,9 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,6 +84,9 @@ func resetAuthState(t *testing.T) string {
 	t.Helper()
 
 	resetAuthSingletons()
+	// Resolution branches on len(AuthHandlers), so a leaked registration
+	// changes what the next test resolves instead of failing it loudly.
+	t.Cleanup(resetAuthSingletons)
 
 	home := t.TempDir()
 	oldHome := os.Getenv("HOME")
@@ -1155,4 +1160,293 @@ func TestProfilePromptValidatorRunsOnlyForRequiredKeys(t *testing.T) {
 		assert.Error(t, validator(""), "a required key must reject an empty answer")
 		assert.NoError(t, validator("secret"))
 	}
+}
+
+func TestAuthHandlerFor(t *testing.T) {
+	type registration struct {
+		name    string
+		handler AuthHandler
+	}
+	tests := []struct {
+		name        string
+		registered  []registration
+		storedType  string
+		wantHandler AuthHandler
+	}{
+		{
+			name:        "exact match wins among several",
+			registered:  []registration{{"apikey", stubAuthHandler{}}, {"oauth", stubOptionalKeyHandler{}}},
+			storedType:  "oauth",
+			wantHandler: stubOptionalKeyHandler{},
+		},
+		{
+			name:        "stored label resolves through the sole anonymous handler",
+			registered:  []registration{{"", stubAuthHandler{}}},
+			storedType:  "apikey",
+			wantHandler: stubAuthHandler{},
+		},
+		{
+			name:       "a named handler does not answer to another label",
+			registered: []registration{{"bearer", stubAuthHandler{}}},
+			storedType: "apikey",
+		},
+		{
+			name:       "an anonymous handler does not claim a label alongside a named one",
+			registered: []registration{{"", stubAuthHandler{}}, {"oauth", stubOptionalKeyHandler{}}},
+			storedType: "apikey",
+		},
+		{
+			name:        "empty type resolves to the sole named handler",
+			registered:  []registration{{"bearer", stubAuthHandler{}}},
+			storedType:  "",
+			wantHandler: stubAuthHandler{},
+		},
+		{
+			name:       "empty type with several handlers resolves to none",
+			registered: []registration{{"apikey", stubAuthHandler{}}, {"oauth", stubOptionalKeyHandler{}}},
+			storedType: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAuthState(t)
+			Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+			for _, r := range tc.registered {
+				UseAuth(r.name, r.handler)
+			}
+
+			assert.Equal(t, tc.wantHandler, authHandlerFor(tc.storedType))
+		})
+	}
+}
+
+// A named handler answering only to its own name is the half of the contract
+// that must keep refusing, so assert it end to end and not just in the table:
+// a request must fail rather than be signed by a handler the profile does not
+// name, and the error must say which label failed and which would not have.
+func TestRequestRefusesAStoredLabelNoHandlerAnswersTo(t *testing.T) {
+	initTestCLI(t, "", headerAuthHandler{})
+	UseAuth("oauth", stubOptionalKeyHandler{})
+	Creds.Set("profiles.acme.type", "legacy")
+	Creds.Set("profiles.acme.api_key", "secret")
+	viper.Set("profile", "acme")
+
+	reached := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	_, err := Client.URL(server.URL).Get().Do()
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), `"legacy"`, "the message must name the label that failed")
+		assert.Contains(t, err.Error(), "oauth", "the message must name a label that would resolve")
+	}
+	assert.False(t, reached, "an unauthenticated request must not go out on the wire")
+}
+
+// Saving a profile used to write nested keys ("profiles.<name>.<field>"),
+// which places a viper override covering only part of the profiles map and
+// hides every sibling from any later read of "profiles". Listing in the same
+// process then showed only the profile just saved, while the others sat
+// untouched on disk. This is the second symptom RES-1463 reports.
+func TestSavingAProfileKeepsTheOthersListable(t *testing.T) {
+	home := resetAuthState(t)
+	// The profiles have to arrive from the file rather than from an earlier
+	// Set in the same process: the override only hides what a lower layer
+	// supplies, so seeding them in memory would not reproduce the defect.
+	writeCredentials(t, home, `{"profiles":{"prod":{"type":"","api_key":"secret-prod"},"scratch":{"type":"","api_key":"secret-scratch"}}}`)
+	bootCLI(t, home)
+
+	execute("auth profile add third secret-third")
+
+	decoded := executeJSON(t, "auth profile list -o json")
+	profiles, _ := decoded["profiles"].([]interface{})
+	names := make([]string, 0, len(profiles))
+	for _, entry := range profiles {
+		if profile, ok := entry.(map[string]interface{}); ok {
+			names = append(names, fmt.Sprintf("%v", profile["name"]))
+		}
+	}
+
+	assert.ElementsMatch(t, []string{"prod", "scratch", "third"}, names, "a save must not mask the profiles it did not write")
+	assert.Equal(t, "secret-prod", Creds.GetStringMapString("profiles.prod")["api_key"])
+}
+
+// SetProfile merges over what a profile already holds, so rotating one field
+// does not drop the rest.
+func TestSetProfileMergesOverStoredFields(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+	Creds.Set("profiles.acme.type", "apikey")
+	Creds.Set("profiles.acme.api_key", "first")
+	Creds.Set("profiles.acme.server", "https://orq.acme.internal")
+
+	Creds.SetProfile("acme", map[string]string{"api_key": "second"})
+
+	stored := Creds.GetStringMapString("profiles.acme")
+	assert.Equal(t, "second", stored["api_key"])
+	assert.Equal(t, "apikey", stored["type"], "an untouched field must survive a merge")
+	assert.Equal(t, "https://orq.acme.internal", stored["server"])
+}
+
+// saveAuthProfile deliberately omits an empty optional field, so a correctly
+// saved profile for a handler with optional keys holds only the required ones.
+// Without the requiredProfileKeys narrowing, doctor calls that profile
+// unconfigured and offers to reconfigure a profile that is already fine.
+func TestAuthStatusReportsAProfileMissingOnlyAnOptionalKeyAsConfigured(t *testing.T) {
+	initTestCLI(t, "", stubOptionalKeyHandler{})
+	Creds.Set("profiles.acme.api_key", "secret")
+	viper.Set("profile", "acme")
+
+	status := GetAuthStatus()
+	assert.Equal(t, true, status["configured"], "an absent optional key must not read as unconfigured")
+	assert.Equal(t, "profile", status["source"])
+}
+
+// The read path went lenient while `auth setup --type` stayed strict, because
+// one is a label read back from a file and the other is something the user
+// typed. Pin the asymmetry, or a later change that "makes setup consistent"
+// reopens RES-1463 from the other side.
+func TestSetupRejectsALabelTheReadPathWouldResolve(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	assert.Equal(t, stubAuthHandler{}, authHandlerFor("apikey"), "the read path resolves a stored label")
+
+	_, _, err := pickAuthHandler("apikey")
+	if assert.Error(t, err, "an explicitly typed --type must not") {
+		assert.Contains(t, err.Error(), `unknown auth type "apikey"`)
+	}
+}
+
+// headerAuthHandler marks each request it authenticates, so a test can tell
+// the request middleware used it.
+type headerAuthHandler struct{}
+
+func (headerAuthHandler) ProfileKeys() []string { return []string{"api-key"} }
+func (headerAuthHandler) OnRequest(_ *zerolog.Logger, r *http.Request) error {
+	r.Header.Set("X-Test-Auth", "anonymous")
+	return nil
+}
+
+func TestRequestAuthenticatesAStoredLabelThroughTheAnonymousHandler(t *testing.T) {
+	initTestCLI(t, "", headerAuthHandler{})
+	Creds.Set("profiles.acme.type", "apikey")
+	Creds.Set("profiles.acme.api_key", "secret")
+	viper.Set("profile", "acme")
+
+	var got string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("X-Test-Auth")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	_, err := Client.URL(server.URL).Get().Do()
+	assert.NoError(t, err)
+	assert.Equal(t, "anonymous", got)
+}
+
+func TestAuthStatusReportsTheStoredTypeResolvedByTheAnonymousHandler(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+	Creds.Set("profiles.acme.type", "apikey")
+	Creds.Set("profiles.acme.api_key", "secret")
+	viper.Set("profile", "acme")
+
+	status := GetAuthStatus()
+	assert.Equal(t, "apikey", status["type"])
+	assert.Equal(t, true, status["configured"])
+}
+
+type clientIDAuthHandler struct{}
+
+func (clientIDAuthHandler) ProfileKeys() []string                              { return []string{"client-id"} }
+func (clientIDAuthHandler) OnRequest(_ *zerolog.Logger, _ *http.Request) error { return nil }
+
+func TestAuthStatusReportsAProfileWithoutTheHandlerKeysAsUnconfigured(t *testing.T) {
+	initTestCLI(t, "", clientIDAuthHandler{})
+	Creds.Set("profiles.acme.type", "apikey")
+	Creds.Set("profiles.acme.api_key", "secret")
+	viper.Set("profile", "acme")
+
+	status := GetAuthStatus()
+	assert.Equal(t, false, status["configured"])
+	assert.Equal(t, "missing", status["source"])
+}
+
+// onlyListedProfile runs `auth profile list` and returns its single entry.
+func onlyListedProfile(t *testing.T) map[string]interface{} {
+	t.Helper()
+	decoded := executeJSON(t, "auth profile list -o json")
+	profiles, _ := decoded["profiles"].([]interface{})
+	if !assert.Len(t, profiles, 1) {
+		t.FailNow()
+	}
+	entry, ok := profiles[0].(map[string]interface{})
+	if !assert.True(t, ok) {
+		t.FailNow()
+	}
+	return entry
+}
+
+// What the listing shows must not depend on which handler would authenticate
+// the profile. A stored label is stale rather than wrong, so the handler's
+// fields and the stored ones usually coincide; when the anonymous handler
+// changed scheme between builds they do not, and the credential the listing
+// would have omitted is the one the user is looking for.
+func TestListProfilesShowsEveryStoredFieldWhateverResolves(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T)
+	}{
+		{"a stored label resolves through the sole anonymous handler", func(t *testing.T) {
+			initTestCLI(t, "", stubAuthHandler{})
+		}},
+		{"no handler resolves the stored label", func(t *testing.T) {
+			initTestCLI(t, "apikey", stubAuthHandler{})
+			UseAuth("oauth", stubOptionalKeyHandler{})
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup(t)
+			Creds.Set("profiles.acme.type", "legacy")
+			Creds.Set("profiles.acme.api_key", "sk-orq-abcdefghijklmnop")
+			Creds.Set("profiles.acme.stray_field", "not a declared key")
+
+			entry := onlyListedProfile(t)
+			assert.Equal(t, "legacy", entry["type"])
+			assert.Contains(t, entry, "api_key")
+			assert.Contains(t, entry, "stray_field")
+		})
+	}
+}
+
+// A field written by hand under its dashed spelling is a field on disk, and
+// the listing is what someone reads to find it.
+func TestListProfilesShowsAFieldStoredUnderItsDashedSpelling(t *testing.T) {
+	home := resetAuthState(t)
+	writeCredentials(t, home, `{"profiles":{"acme":{"type":"","api-key":"sk-orq-abcdefghijklmnop"}}}`)
+	bootCLI(t, home)
+
+	entry := onlyListedProfile(t)
+	assert.Contains(t, entry, "api_key")
+}
+
+// SetProfile canonicalizes the name it is handed. Viper lower-cases map keys,
+// so an uncanonicalized name misses the profile already stored and then
+// collides with it, dropping one of the two at random.
+func TestSetProfileCanonicalizesTheProfileName(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+	Creds.Set("profiles.acme.type", "apikey")
+	Creds.Set("profiles.acme.server", "https://orq.acme.internal")
+
+	Creds.SetProfile("ACME", map[string]string{"api_key": "secret"})
+
+	stored := Creds.GetStringMapString("profiles.acme")
+	assert.Equal(t, "secret", stored["api_key"])
+	assert.Equal(t, "https://orq.acme.internal", stored["server"], "the stored profile must not be replaced by a differently-cased name")
+	assert.Len(t, Creds.GetStringMap("profiles"), 1, "a differently-cased name must not create a second profile")
 }
