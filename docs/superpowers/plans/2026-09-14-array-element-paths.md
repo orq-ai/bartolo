@@ -8,13 +8,26 @@
 
 **Tech Stack:** Go 1.25+, Cobra/Viper, tablewriter, testify, Bartolo's OpenAPI generator and generated-CLI integration harness.
 
+> **Status:** implemented. Review rounds after this plan was written changed
+> four behaviors; the design spec is authoritative wherever the two differ.
+> 1. A present-but-null projected value proves the path exists (the column
+>    validates and renders blank) instead of being dropped like a missing key.
+> 2. A `null` array behaves exactly like an empty one.
+> 3. An unsupported selector still resolves as an ordinary property name at any
+>    depth, and when nothing resolves the error additionally names the grammar
+>    rule. A non-array prefix is reported as such.
+> 4. Header rendering moved into `tableHeader` with
+>    `tablewriter.WithHeaderAutoFormat(tw.Off)`, which this plan does not
+>    describe. The embedded resolver code in Task 1 Step 3 is superseded by
+>    `cli/formatter.go`.
+
 ## Global Constraints
 
 - Both `x-cli-list-fields` and `--columns` accept `settings.tools[].key` with identical resolution and rendering.
 - A selector supports exactly one `[]`, appended to a non-empty object-path segment, and requires a non-empty dotted object path after it.
 - Object paths may have arbitrary depth before and after `[]`; source array order is preserved.
-- Missing or null projected children and non-object array elements are omitted.
-- An empty source array renders as an empty list and is indeterminate for suffix validation; a non-empty array with no surviving projected values is unresolved and prevents an empty row from masking a typo.
+- Non-object array elements and elements lacking the projected child are omitted; a present-but-null child renders nothing but proves the path.
+- An empty or null source array renders as an empty list and is indeterminate for suffix validation; a non-empty array in which no element has the projected path is unresolved and prevents an empty row from masking a typo.
 - The complete literal top-level key wins before path syntax is interpreted.
 - `[0]`, `[1]`, `[*]`, and `[ ]` are ordinary property-name text, not selectors.
 - Projected values reuse the existing three-entry limit, `…` fourth marker, and 40-rune cell truncation.
@@ -35,7 +48,7 @@
 - Consumes: normalized table rows containing `map[string]interface{}` objects and `[]interface{}` arrays; existing `checkColumns(requestedColumns, rows, userColumns)` and `tableValue(interface{})` behavior.
 - Produces: `tableField(row map[string]interface{}, column string) (interface{}, bool)` resolves a plain dotted path or one `[]` projection and returns projected values as `[]interface{}`; `objectField(row map[string]interface{}, column string) (interface{}, bool)` owns exact and dotted object traversal.
 
-- [ ] **Step 1: Write failing resolver and rendering tests**
+- [x] **Step 1: Write failing resolver and rendering tests**
 
 Add these tests beside the current nested-column tests in `cli/formatter_test.go`:
 
@@ -236,7 +249,7 @@ func TestDefaultFormatterValidatesArrayElementColumnsAcrossRows(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run the focused tests to verify RED**
+- [x] **Step 2: Run the focused tests to verify RED**
 
 Run:
 
@@ -246,7 +259,7 @@ go test ./cli -run 'Test(TableField|DefaultFormatter).*(ArrayElement|ArrayElemen
 
 Expected: FAIL because the current resolver treats `tools[]` as an object key and cannot project through the array; the rendering tests report the declared/explicit column as missing.
 
-- [ ] **Step 3: Implement the narrow projection resolver**
+- [x] **Step 3: Implement the narrow projection resolver**
 
 Replace the current `tableField` function in `cli/formatter.go` with these two functions:
 
@@ -345,7 +358,7 @@ func objectField(row map[string]interface{}, column string) (interface{}, bool) 
 }
 ```
 
-- [ ] **Step 4: Run focused and package tests to verify GREEN**
+- [x] **Step 4: Run focused and package tests to verify GREEN**
 
 Run:
 
@@ -357,7 +370,7 @@ go test ./cli
 
 Expected: every command exits 0; the focused tests prove projection, sparse/mixed handling, empty arrays, exact-key precedence, header preservation, YAML normalization, and error ownership; all existing formatter tests remain green.
 
-- [ ] **Step 5: Commit Task 1**
+- [x] **Step 5: Commit Task 1**
 
 ```sh
 git add cli/formatter.go cli/formatter_test.go
@@ -375,7 +388,7 @@ git commit -m "feat(cli): project table columns through arrays"
 - Consumes: Task 1's `tableField` projection behavior through the public `bartolocli.FormatList` call emitted by generated commands.
 - Produces: golden evidence that `x-cli-list-fields` preserves `tools[].key` verbatim and an integration test that builds and runs a generated CLI with table mode forced through its supported custom registration hook.
 
-- [ ] **Step 1: Write the generated-CLI regression test and update the golden input**
+- [x] **Step 1: Write the generated-CLI regression test and update the golden input**
 
 In `templates_golden_test.go`, change the search declaration and row schema to:
 
@@ -525,7 +538,7 @@ func Register(root *cobra.Command) {
 }
 ```
 
-- [ ] **Step 2: Run the generated tests to verify RED**
+- [x] **Step 2: Run the generated tests to verify RED**
 
 Run:
 
@@ -535,7 +548,7 @@ go test . -run 'TestGenerated(ListCommandRendersArrayElementPath|OutputMatchesGo
 
 Expected: FAIL before updating the golden file because the intentionally changed render differs. The integration test already consumes Task 1 and may pass independently.
 
-- [ ] **Step 3: Regenerate and inspect the golden output**
+- [x] **Step 3: Regenerate and inspect the golden output**
 
 Run:
 
@@ -546,7 +559,7 @@ rg -n -F 'FormatList(decoded, "name", "tools[].key")' testdata/golden/group_widg
 
 Expected: the update command exits 0, and `rg` prints the generated `FormatList` call with the selector unchanged.
 
-- [ ] **Step 4: Run root and full tests**
+- [x] **Step 4: Run root and full tests**
 
 Run:
 
@@ -558,7 +571,7 @@ go test ./...
 
 Expected: all commands exit 0; the generated binary prints a table containing the selector header and the abbreviated projected values.
 
-- [ ] **Step 5: Commit Task 2**
+- [x] **Step 5: Commit Task 2**
 
 ```sh
 git add main_internal_test.go templates_golden_test.go testdata/golden/group_widgets_commands.go
@@ -575,7 +588,7 @@ git commit -m "test: cover generated array element columns"
 - Consumes: the Task 1 selector contract and unchanged `--jmespath` escape hatch.
 - Produces: matching root and generated-CLI documentation for `object.field`, `array[].field`, sparse-element behavior, unsupported indexes/multiple projections, and JMESPath's role.
 
-- [ ] **Step 1: Update the root README**
+- [x] **Step 1: Update the root README**
 
 Replace the final paragraph of the collection-output section beginning `Without x-cli-list-fields` with:
 
@@ -595,7 +608,7 @@ complete argument when selecting a projected column, for example
 `--columns 'key,settings.tools[].key'`.
 ```
 
-- [ ] **Step 2: Update the generated README template**
+- [x] **Step 2: Update the generated README template**
 
 Replace the corresponding collection clause in `templates/readme.tmpl` with this exact text:
 
@@ -603,13 +616,13 @@ Replace the corresponding collection clause in `templates/readme.tmpl` with this
 - GET collections are inferred automatically, as is any method whose 2xx JSON response is a conventional page of rows: an array of objects under `data`, `items`, `results`, `records`, `entries` or `servers`, next to a field that describes the collection — `has_more`, `next_page_token`, a cursor, `total_count`, `count`. An echoed `limit` or `offset` is hidden from the table footer but does not classify an operation. Only immediate properties are read, so an envelope or a row schema composed with `allOf`/`oneOf` is not inferred. Anything else can opt in with `x-cli-list: true`, and `x-cli-list: false` disables inference. A non-empty `x-cli-list-fields` list both marks the operation as a collection and sets the table's ordered default columns (an empty `x-cli-list-fields: []` marks nothing on its own); otherwise columns are inferred from the response (nested objects skipped, lists abbreviated to their first three entries) and trimmed to fit the terminal. Use `--columns id,name` to pick and order them for one invocation. Declared or explicit columns can reach through nested objects with `model.id` and can project a field from one nested array with `settings.tools[].key`; missing, null, and non-object elements are omitted before the usual three-entry list abbreviation. A selector supports one `[]` and requires a field after it. Because `[]` contains shell metacharacters, quote the complete argument when selecting a projected column, for example `--columns 'key,settings.tools[].key'`. Use `--jmespath` for indexing, filtering, aggregation, multiple projections, or another one-off restructuring (its result is tabled with columns inferred from the projected rows), and `-o json` for the complete response.
 ```
 
-- [ ] **Step 3: Verify documentation parity and repository health**
+- [x] **Step 3: Verify documentation parity and repository health**
 
 Run:
 
 ```sh
 rg -n -F 'settings.tools[].key' README.md templates/readme.tmpl
-rg -n -F 'Array indexes and multiple projections are not column syntax' README.md
+rg -n -F 'a bracket the grammar does not accept' README.md
 rg -n -F 'Use `--jmespath` for indexing, filtering, aggregation, multiple projections' templates/readme.tmpl
 git diff --check
 make verify
@@ -619,7 +632,7 @@ go vet ./...
 
 Expected: each `rg` finds the documented contract, `git diff --check` emits no output, and every verification command exits 0 with no failures.
 
-- [ ] **Step 4: Commit Task 3**
+- [x] **Step 4: Commit Task 3**
 
 ```sh
 git add README.md templates/readme.tmpl

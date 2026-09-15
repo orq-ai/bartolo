@@ -79,22 +79,27 @@ wins. For example, a literal top-level key named `settings.tools[].key` takes
 precedence over interpreting the text as a path.
 
 Otherwise Bartolo resolves the object prefix using the current dotted-path
-behavior. The property bearing `[]` must contain an array. Bartolo then visits
-its elements in source order and resolves the suffix path against each object
-element.
+behavior. The property bearing `[]` must contain an array, or `null`, which is
+treated exactly like an empty array — the same absence, not a missing field. A
+prefix of any other type is a distinct failure, reported as such rather than as
+an absent field. Bartolo then visits the elements in source order and resolves
+the suffix path against each object element.
 
-For each array element:
+Path existence and rendered value are separate questions. For each array
+element:
 
 - A successfully resolved, non-null value is appended to the projected list.
-- A non-object element is omitted.
-- An element missing the suffix path is omitted.
-- A suffix that resolves to `null` is omitted.
+- A non-object element is omitted and proves nothing about the path.
+- An element missing the suffix path is omitted and proves nothing about the path.
+- A suffix present but `null` proves the path exists and contributes no
+  rendered value.
 
-An empty source array is renderable as an empty list, but is indeterminate when
-validating whether the suffix exists. A non-empty source array for which no
-element resolves a non-null value is an unresolved selector for that row. A
-projection with at least one surviving value is successful even if other
-elements were omitted.
+An empty or null source array is renderable as an empty list, but is
+indeterminate when validating whether the suffix exists. A non-empty source
+array in which no element *has* the suffix path is an unresolved selector for
+that row. A projection where at least one element carried the path is
+successful even if other elements were omitted and even if every value was
+null.
 
 The projected value is an ordinary `[]interface{}`. Existing cell formatting
 therefore remains authoritative: strings are unquoted, other scalars use JSON
@@ -119,16 +124,37 @@ populated source array is available: if no populated row resolves the suffix,
 validation returns the normal unknown-field error. This preserves useful output
 for all-empty results without allowing an empty row to mask a misspelled path.
 
-Recognized but unsupported projection shapes do not resolve as paths. Unless an
-exact top-level key wins first, existing any-row validation rejects them with
-the normal `--columns` or `declared column` unknown-field error. For example:
+Recognized but unsupported projection shapes are not projections, but they are
+still ordinary property names: they continue through dotted-path lookup at any
+depth, so a literal key spelled with brackets keeps resolving. For example:
 
 - `settings.tools[]` has no element path.
 - `groups[].tools[].key` contains more than one projection.
 
-This feature adds no separate syntax-error category. Other bracketed text has
-no special grammar and continues through ordinary property lookup and
-unknown-field validation.
+When such a column resolves nowhere, the unknown-field error additionally names
+the grammar rule, because a bracket is far more often a mistyped selector than
+a literal key:
+
+```text
+--columns: "settings.tools[]" is not a field of the returned items; a selector
+supports one [] and needs a field after it, such as settings.tools[].key — use
+--jmespath for indexing or filtering
+```
+
+The rule is quoted for any unresolvable column containing a bracket, including
+an array index such as `settings.tools[0].key`, since indexing is precisely
+what `--jmespath` exists for. A bracket-free name has no rule to quote and gets
+the plain message. This is a hint appended to the existing error, not a
+separate syntax-error category: bracketed text is still resolved by ordinary
+property lookup first.
+
+A prefix that resolves to something other than an array or null is reported for
+what it is, rather than as an absent field:
+
+```text
+--columns: "settings.name[].key" projects "settings.name", which is not an
+array in the returned items
+```
 
 ### Headers and output modes
 
@@ -241,13 +267,16 @@ Focused formatter tests will cover both declared columns and `--columns`:
 - Projecting one, three, and four scalar values from arrays of objects.
 - Preserving source order and applying the existing ellipsis and truncation.
 - Traversing multiple object segments before and after `[]`.
-- Omitting missing, null, and non-object elements.
-- Treating an empty array as a resolved empty value.
-- Treating a non-empty array with no surviving values as unresolved.
+- Omitting missing and non-object elements, and rendering nothing for a
+  present-but-null value while still proving the path.
+- Treating an empty or null array as a resolved empty value.
+- Treating a non-empty array in which no element has the suffix as unresolved.
+- Reporting a non-array prefix as such rather than as an absent field.
 - Keeping a valid column across mixed rows and rendering unresolved rows blank.
 - Rejecting a selector that no row resolves with the correct ownership prefix.
 - Rejecting terminal and multiple projections through existing unknown-column
-  diagnostics.
+  diagnostics, extended with the grammar rule for any bracketed column.
+- Leaving a bracket-free misspelling's plain error unchanged.
 - Treating `[0]`, `[1]`, `[*]`, and `[ ]` as ordinary property-name text.
 - Preferring a literal top-level key equal to the complete projected selector.
 - Preserving plain nested paths, whole-array columns, and YAML normalization.
@@ -313,10 +342,13 @@ available through `--jmespath` and is excluded from this feature.
 - Empty, sparse, null-containing, and mixed-type arrays follow the resolution
   rules above without panics.
 - Misspelled projected paths retain Bartolo's unknown-column protection.
+- A `null` array behaves exactly like an empty one, and a present-but-null
+  projected value validates the column and renders blank.
 - Exact literal keys and all existing dotted-object selectors remain backward
   compatible.
-- Unsupported projection shapes fail with the existing source-specific
-  unknown-column errors.
+- Unsupported projection shapes still resolve as ordinary property names, and
+  when they resolve nowhere they fail with the existing source-specific
+  unknown-column error extended with the grammar rule.
 - All output modes other than interactive tables remain byte-for-byte governed
   by their existing formatting paths.
 - Root and generated README documentation explain the syntax, behavior, and
