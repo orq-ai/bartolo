@@ -303,8 +303,9 @@ func (f *DefaultFormatter) shouldRenderTable() bool {
 
 // checkColumns rejects a column no row has. A misspelled name would otherwise
 // render as a blank column, which reads as missing data rather than a typo.
-// Empty projected arrays are indeterminate: they validate an all-empty result,
-// but cannot outweigh a populated array whose elements do not contain the path.
+// Empty and null projected arrays are indeterminate: they validate a result
+// with nothing to project, but cannot outweigh a populated array whose
+// elements do not contain the path.
 func checkColumns(requestedColumns []string, rows []map[string]interface{}, userColumns bool) error {
 	if len(requestedColumns) == 0 || len(rows) == 0 {
 		return nil
@@ -314,6 +315,7 @@ func checkColumns(requestedColumns []string, rows []map[string]interface{}, user
 		found := false
 		emptyProjection := false
 		unresolvedPopulatedProjection := false
+		notAnArray := ""
 		for _, row := range rows {
 			_, resolution := resolveTableField(row, column)
 			switch resolution {
@@ -323,16 +325,37 @@ func checkColumns(requestedColumns []string, rows []map[string]interface{}, user
 				emptyProjection = true
 			case tableFieldUnresolvedPopulatedProjection:
 				unresolvedPopulatedProjection = true
+			case tableFieldPrefixNotAnArray:
+				notAnArray = column
+			}
+			if found {
+				// One row carrying the column settles it; the indeterminate
+				// states cannot overturn a hit.
+				break
 			}
 		}
 		found = found || (emptyProjection && !unresolvedPopulatedProjection)
 
 		if !found {
-			prefix := "declared column"
+			label := "declared column"
 			if userColumns {
-				prefix = "--columns"
+				label = "--columns"
 			}
-			return NewValueError(fmt.Errorf("%s: %q is not a field of the returned items", prefix, column))
+			if notAnArray != "" {
+				prefix, _, _ := parseTableProjection(notAnArray)
+				return NewValueError(fmt.Errorf(
+					"%s: %q projects %q, which is not an array in the returned items", label, column, prefix))
+			}
+			// A bracket is far more often a mistyped selector than a literal
+			// key, so name the rule rather than send the reader off to inspect
+			// the response for a field they did not ask for. A bracket-free
+			// name has no rule to quote and gets the plain message.
+			if strings.Contains(column, "[") {
+				return NewValueError(fmt.Errorf(
+					"%s: %q is not a field of the returned items; a selector supports one [] and needs a field after it, such as settings.tools[].key — use --jmespath for indexing or filtering",
+					label, column))
+			}
+			return NewValueError(fmt.Errorf("%s: %q is not a field of the returned items", label, column))
 		}
 	}
 
@@ -354,10 +377,14 @@ const (
 	tableFieldResolved
 	tableFieldEmptyProjection
 	tableFieldUnresolvedPopulatedProjection
+	tableFieldPrefixNotAnArray
 )
 
-// parseTableProjection recognizes the formatter's narrow one-[] grammar.
-func parseTableProjection(column string) (string, string, tableProjectionState) {
+// parseTableProjection splits "settings.tools[].key" into the arrayPath
+// "settings.tools" and the elementPath "key". Exactly one segment may carry a
+// trailing [], it may not be the last segment, and no segment may be empty;
+// anything else is invalid and is not a projection.
+func parseTableProjection(column string) (arrayPath, elementPath string, state tableProjectionState) {
 	parts := strings.Split(column, ".")
 	projection := -1
 	for i, part := range parts {
@@ -383,55 +410,63 @@ func parseTableProjection(column string) (string, string, tableProjectionState) 
 	return strings.Join(parts[:projection+1], "."), strings.Join(parts[projection+1:], "."), tableProjectionValid
 }
 
-// tableField resolves dotted object paths and one array projection while
-// preserving literal top-level keys.
-func tableField(row map[string]interface{}, column string) (interface{}, bool) {
-	value, resolution := resolveTableField(row, column)
-	return value, resolution == tableFieldResolved || resolution == tableFieldEmptyProjection
-}
-
+// resolveTableField resolves dotted object paths and one array projection
+// while preserving literal keys. An empty projection resolves to an empty
+// list, not to a missing field, so the row renders a blank cell.
 func resolveTableField(row map[string]interface{}, column string) (interface{}, tableFieldResolution) {
 	if value, ok := row[column]; ok {
 		return value, tableFieldResolved
 	}
 
 	prefix, suffix, projection := parseTableProjection(column)
-	switch projection {
-	case tableProjectionAbsent:
+	if projection != tableProjectionValid {
+		// Every column without a valid projection — plain and dotted names, and
+		// selectors outside the grammar — resolves as an ordinary property
+		// path, so a literal key spelled with brackets keeps working.
 		value, ok := objectField(row, column)
 		if !ok {
 			return nil, tableFieldMissing
 		}
 		return value, tableFieldResolved
-	case tableProjectionInvalid:
-		return nil, tableFieldMissing
 	}
 
 	value, ok := objectField(row, prefix)
 	if !ok {
 		return nil, tableFieldMissing
 	}
+	if value == nil {
+		// A null list is the same absence as an empty one, not a missing field.
+		return []interface{}{}, tableFieldEmptyProjection
+	}
 	items, ok := value.([]interface{})
 	if !ok {
-		return nil, tableFieldMissing
+		// The prefix is there, it is just the wrong shape. Saying so beats
+		// claiming the field is absent when the reader can see it in -o json.
+		return nil, tableFieldPrefixNotAnArray
 	}
 	if len(items) == 0 {
 		return []interface{}{}, tableFieldEmptyProjection
 	}
 
 	projected := make([]interface{}, 0, len(items))
+	resolved := false
 	for _, item := range items {
 		object, ok := item.(map[string]interface{})
 		if !ok {
 			continue
 		}
 		child, ok := objectField(object, suffix)
-		if !ok || child == nil {
+		if !ok {
 			continue
 		}
-		projected = append(projected, child)
+		// A present null carries the path, so it proves the column exists even
+		// though it contributes no value to render.
+		resolved = true
+		if child != nil {
+			projected = append(projected, child)
+		}
 	}
-	if len(projected) == 0 {
+	if !resolved {
 		return nil, tableFieldUnresolvedPopulatedProjection
 	}
 	return projected, tableFieldResolved
@@ -494,7 +529,7 @@ func renderTable(data interface{}, requestedColumns []string, userColumns bool) 
 	for _, row := range rows {
 		cells := make([]string, len(headers))
 		for i, key := range headers {
-			rawValue, _ := tableField(row, key)
+			rawValue, _ := resolveTableField(row, key)
 			value, err := tableValue(rawValue)
 			if err != nil {
 				return false, err
@@ -539,7 +574,11 @@ func renderTable(data interface{}, requestedColumns []string, userColumns bool) 
 }
 
 // tableHeader preserves tablewriter's whole-header formatting except for one
-// valid array projection, whose [] marker stays joined to the projected field.
+// valid array projection, whose [] marker stays joined to the array path it
+// belongs to, ahead of the projected field: settings.tools[].key renders as
+// SETTINGS . TOOLS[] . KEY. The format closure is tablewriter's own AutoFormat
+// expression (tablewriter.go:987), reproduced here because turning AutoFormat
+// off is what keeps the marker attached.
 func tableHeader(header string) string {
 	format := func(value string) string {
 		return tw.Title(strings.Join(tw.SplitCamelCase(value), tw.Space))
