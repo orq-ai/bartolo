@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"testing"
@@ -737,14 +739,14 @@ func TestGenerateFromJSONFixtureBuildsCLI(t *testing.T) {
 	}
 }
 
-func TestGeneratedListCommandRendersNestedResponse(t *testing.T) {
+func TestGeneratedListCommandRendersArrayElementPath(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/files" {
 			http.NotFound(w, r)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"id":"file_1","model":{"id":"model_1"}}]`))
+		_, _ = w.Write([]byte(`[{"id":"file_1","model":{"id":"model_1"},"settings":{"tools":[{"key":"lookup"},{"key":"refund"},{"key":"policy"},{"key":"escalate"}]}}]`))
 	}))
 	defer server.Close()
 
@@ -784,7 +786,9 @@ paths:
     get:
       operationId: listFiles
       x-cli-list-fields:
+        - id
         - model.id
+        - settings.tools[].key
       responses:
         "200":
           description: ok
@@ -812,6 +816,23 @@ paths:
 		t.Fatalf("generateFromSpec: %v", err)
 	}
 
+	customRegister := `package custom
+
+import (
+	bartolocli "github.com/orq-ai/bartolo/cli"
+	"github.com/spf13/cobra"
+)
+
+func Register(root *cobra.Command) {
+	_ = root
+	bartolocli.Formatter = bartolocli.NewDefaultFormatter(true, true)
+}
+`
+	customPath := filepath.Join(tmp, "cli", "custom", "register.go")
+	if err := os.WriteFile(customPath, []byte(customRegister), 0o644); err != nil {
+		t.Fatalf("write custom table hook: %v", err)
+	}
+
 	tidy := exec.Command("go", "mod", "tidy")
 	tidy.Dir = tmp
 	if out, err := tidy.CombinedOutput(); err != nil {
@@ -825,15 +846,50 @@ paths:
 		t.Fatalf("build generated CLI: %v\n%s", err, string(out))
 	}
 
-	args := append(strings.Fields(commandPath), "-o", "json")
+	args := strings.Fields(commandPath)
 	run := exec.Command(cliPath, args...)
 	run.Dir = tmp
 	out, err := run.CombinedOutput()
 	if err != nil {
 		t.Fatalf("run generated list command: %v\n%s", err, string(out))
 	}
-	if !strings.Contains(string(out), `"id": "model_1"`) {
-		t.Fatalf("generated list command returned unexpected response: %s", out)
+	if !strings.Contains(string(out), "SETTINGS . TOOLS[] . KEY") ||
+		!strings.Contains(string(out), "lookup, refund, policy, …") ||
+		!strings.Contains(string(out), "model_1") {
+		t.Fatalf("generated list command returned unexpected table: %s", out)
+	}
+
+	// The same binary under -o json must still hand back the untouched
+	// payload: column projection is a table concern only. Decoding it rather
+	// than matching substrings is what catches a projection that flattened
+	// the rows, which would still carry every value the table shows.
+	runJSON := exec.Command(cliPath, append(args, "-o", "json")...)
+	runJSON.Dir = tmp
+	jsonOut, err := runJSON.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run generated list command with -o json: %v\n%s", err, string(jsonOut))
+	}
+
+	// The hook above forces a colorized formatter onto this pipe.
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAll(jsonOut, nil)
+	var rows []map[string]interface{}
+	if err := json.Unmarshal(plain, &rows); err != nil {
+		t.Fatalf("decode -o json output: %v\n%s", err, plain)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected one row, got %d: %s", len(rows), plain)
+	}
+	model, ok := rows[0]["model"].(map[string]interface{})
+	if !ok || model["id"] != "model_1" {
+		t.Fatalf("nested model object did not survive -o json: %s", plain)
+	}
+	settings, ok := rows[0]["settings"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("nested settings object did not survive -o json: %s", plain)
+	}
+	tools, ok := settings["tools"].([]interface{})
+	if !ok || len(tools) != 4 {
+		t.Fatalf("expected four unprojected tools, got %v: %s", settings["tools"], plain)
 	}
 }
 

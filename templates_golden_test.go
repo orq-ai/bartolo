@@ -77,7 +77,7 @@ paths:
     post:
       operationId: SearchWidgets
       summary: Search widgets
-      x-cli-list-fields: [name, id]
+      x-cli-list-fields: [name, "tools[].key"]
       responses:
         "200":
           description: ok
@@ -91,8 +91,13 @@ paths:
                     items:
                       type: object
                       properties:
-                        id: {type: string}
                         name: {type: string}
+                        tools:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              key: {type: string}
   /widgets/query:
     post:
       operationId: QueryWidgets
