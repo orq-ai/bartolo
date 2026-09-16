@@ -99,6 +99,7 @@ func initAuth() {
 	profileCommand.AddCommand(newProfileListCommand())
 	profileCommand.AddCommand(newProfileCurrentCommand())
 	profileCommand.AddCommand(newProfileUseCommand("use"))
+	profileCommand.AddCommand(newProfileRemoveCommand())
 	profileCommand.AddCommand(newProfileClearCommand())
 
 	authCommand.AddCommand(newAuthSetupCommand())
@@ -228,6 +229,42 @@ func newProfileCurrentCommand() *cobra.Command {
 				"exists":         ProfileExists(name),
 				"profile_server": ProfileServer(),
 			})
+		},
+	}
+}
+
+// newProfileRemoveCommand deletes a stored profile. It does not confirm: the
+// alternative was hand-editing credentials.json, which is the one file holding
+// live API keys, and a removed key is regenerable.
+func newProfileRemoveCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:     "remove <name>",
+		Aliases: []string{"rm", "delete"},
+		Short:   "Delete an authentication profile",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := sanitizeProfileName(args[0])
+			if !ProfileExists(name) {
+				return fmt.Errorf("unknown profile %q", args[0])
+			}
+
+			Creds.RemoveProfile(name)
+			filename := filepath.Join(viper.GetString("config-directory"), "credentials.json")
+			if err := Creds.Save(filename); err != nil {
+				return err
+			}
+
+			// Only the persisted selection is ours to clear; a --profile flag
+			// or an env var naming the removed profile belongs to the caller.
+			cleared := false
+			if sanitizeProfileName(viper.GetString("profile-selected")) == name {
+				if err := persistProfileSelection(""); err != nil {
+					return fmt.Errorf("profile %q was removed but is still selected: %w; run `auth profile clear`", name, err)
+				}
+				cleared = true
+			}
+
+			return Formatter.Format(map[string]interface{}{"removed_profile": name, "selection_cleared": cleared})
 		},
 	}
 }
@@ -1146,6 +1183,17 @@ func (c *CredentialsFile) SetProfile(name string, fields map[string]string) {
 	profiles[name] = merged
 	c.viper.Set("profiles", profiles)
 }
+// RemoveProfile drops one profile by rewriting the whole "profiles" map, for
+// the same reason SetProfile does: viper has no delete, and an override on a
+// nested key would hide the map's other entries rather than shrink it.
+func (c *CredentialsFile) RemoveProfile(name string) {
+	name = sanitizeProfileName(name)
+
+	profiles := c.viper.GetStringMap("profiles")
+	delete(profiles, name)
+	c.viper.Set("profiles", profiles)
+}
+
 func (c *CredentialsFile) GetString(key string) string { return c.viper.GetString(key) }
 func (c *CredentialsFile) GetStringMap(key string) map[string]interface{} {
 	return c.viper.GetStringMap(key)
