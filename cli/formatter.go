@@ -329,8 +329,7 @@ func checkColumns(requestedColumns []string, rows []map[string]interface{}, user
 				notAnArray = column
 			}
 			if found {
-				// One row carrying the column settles it; the indeterminate
-				// states cannot overturn a hit.
+				// One row carrying the column settles it; nothing later overturns a hit.
 				break
 			}
 		}
@@ -346,10 +345,8 @@ func checkColumns(requestedColumns []string, rows []map[string]interface{}, user
 				return NewValueError(fmt.Errorf(
 					"%s: %q projects %q, which is not an array in the returned items", label, column, prefix))
 			}
-			// A bracket is far more often a mistyped selector than a literal
-			// key, so name the rule rather than send the reader off to inspect
-			// the response for a field they did not ask for. A bracket-free
-			// name has no rule to quote and gets the plain message.
+			// A bracket is more often a mistyped selector than a literal key,
+			// so name the rule instead of sending the reader to the response.
 			if strings.Contains(column, "[") {
 				return NewValueError(fmt.Errorf(
 					"%s: %q is not a field of the returned items; a selector supports one [] and needs a field after it, such as settings.tools[].key — use --jmespath for indexing or filtering",
@@ -420,9 +417,8 @@ func resolveTableField(row map[string]interface{}, column string) (interface{}, 
 
 	prefix, suffix, projection := parseTableProjection(column)
 	if projection != tableProjectionValid {
-		// Every column without a valid projection — plain and dotted names, and
-		// selectors outside the grammar — resolves as an ordinary property
-		// path, so a literal key spelled with brackets keeps working.
+		// Anything but a valid projection is an ordinary property name, so a
+		// literal key spelled with brackets keeps working.
 		value, ok := objectField(row, column)
 		if !ok {
 			return nil, tableFieldMissing
@@ -440,8 +436,8 @@ func resolveTableField(row map[string]interface{}, column string) (interface{}, 
 	}
 	items, ok := value.([]interface{})
 	if !ok {
-		// The prefix is there, it is just the wrong shape. Saying so beats
-		// claiming the field is absent when the reader can see it in -o json.
+		// The prefix is there, just the wrong shape; saying so beats claiming
+		// it is absent when the reader can see it in -o json.
 		return nil, tableFieldPrefixNotAnArray
 	}
 	if len(items) == 0 {
@@ -459,8 +455,7 @@ func resolveTableField(row map[string]interface{}, column string) (interface{}, 
 		if !ok {
 			continue
 		}
-		// A present null carries the path, so it proves the column exists even
-		// though it contributes no value to render.
+		// A present null proves the column exists even though it renders nothing.
 		resolved = true
 		if child != nil {
 			projected = append(projected, child)

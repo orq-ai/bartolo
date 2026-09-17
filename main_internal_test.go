@@ -859,10 +859,8 @@ func Register(root *cobra.Command) {
 		t.Fatalf("generated list command returned unexpected table: %s", out)
 	}
 
-	// The same binary under -o json must still hand back the untouched
-	// payload: column projection is a table concern only. Decoding it rather
-	// than matching substrings is what catches a projection that flattened
-	// the rows, which would still carry every value the table shows.
+	// Decoding rather than substring-matching is what catches a projection
+	// that flattened the rows, which still carries every value the table shows.
 	runJSON := exec.Command(cliPath, append(args, "-o", "json")...)
 	runJSON.Dir = tmp
 	jsonOut, err := runJSON.CombinedOutput()

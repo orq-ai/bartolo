@@ -445,68 +445,6 @@ func TestTableFieldPrefersLiteralArrayElementPath(t *testing.T) {
 	assert.Equal(t, "literal", got)
 }
 
-func TestDefaultFormatterRendersDeclaredArrayElementColumn(t *testing.T) {
-	viper.Reset()
-	viper.Set("output-format", tableFormat)
-	viper.Set("jmespath", "")
-	viper.Set("raw", false)
-	out := new(bytes.Buffer)
-	original := Stdout
-	Stdout = out
-	t.Cleanup(func() { Stdout = original })
-
-	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
-		map[string]interface{}{
-			"settings": map[string]interface{}{
-				"tools": []interface{}{
-					map[string]interface{}{"key": "lookup"},
-					map[string]interface{}{"key": "refund"},
-					map[string]interface{}{"key": "policy"},
-					map[string]interface{}{"key": "escalate"},
-				},
-			},
-		},
-	}, "settings.tools[].key")
-
-	assert.NoError(t, err)
-	assert.Contains(t, out.String(), "SETTINGS . TOOLS[] . KEY")
-	assert.Contains(t, out.String(), "lookup, refund, policy, …")
-}
-
-func TestDefaultFormatterRendersBlankProjectedCellForUnresolvedRow(t *testing.T) {
-	viper.Reset()
-	viper.Set("output-format", tableFormat)
-	viper.Set("jmespath", "")
-	viper.Set("raw", false)
-	out := new(bytes.Buffer)
-	original := Stdout
-	Stdout = out
-	t.Cleanup(func() { Stdout = original })
-
-	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
-		map[string]interface{}{
-			"settings": map[string]interface{}{
-				"tools": []interface{}{map[string]interface{}{"id": "missing-key"}},
-			},
-		},
-		map[string]interface{}{
-			"settings": map[string]interface{}{
-				"tools": []interface{}{map[string]interface{}{"key": "lookup-order"}},
-			},
-		},
-	}, "settings.tools[].key")
-
-	assert.NoError(t, err)
-	assert.Contains(t, out.String(), "lookup-order")
-	blankCells := 0
-	for _, line := range strings.Split(out.String(), "\n") {
-		if strings.HasPrefix(line, "│") && strings.HasSuffix(line, "│") && strings.TrimSpace(strings.Trim(line, "│")) == "" {
-			blankCells++
-		}
-	}
-	assert.Equal(t, 1, blankCells)
-}
-
 func TestDefaultFormatterRendersExplicitArrayElementColumn(t *testing.T) {
 	viper.Reset()
 	viper.Set("output-format", tableFormat)
@@ -532,162 +470,82 @@ func TestDefaultFormatterRendersExplicitArrayElementColumn(t *testing.T) {
 	assert.Contains(t, out.String(), "lookup-order")
 }
 
-func TestDefaultFormatterValidatesArrayElementColumnsAcrossRows(t *testing.T) {
-	rows := []map[string]interface{}{
-		{
-			"settings": map[string]interface{}{
-				"tools": []interface{}{map[string]interface{}{"id": "missing-key"}},
-			},
-		},
-		{
-			"settings": map[string]interface{}{
-				"tools": []interface{}{map[string]interface{}{"key": "lookup-order"}},
-			},
-		},
-	}
-
-	assert.NoError(t, checkColumns([]string{"settings.tools[].key"}, rows, true))
-	assert.ErrorContains(t,
-		checkColumns([]string{"settings.tools[].nmae"}, rows, true),
-		`--columns: "settings.tools[].nmae" is not a field of the returned items`,
-	)
-	assert.ErrorContains(t,
-		checkColumns([]string{"settings.tools[]"}, rows, false),
-		`declared column: "settings.tools[]" is not a field of the returned items`,
-	)
-}
-
-func TestDefaultFormatterRejectsMisspelledProjectionDespiteEmptyRow(t *testing.T) {
-	viper.Reset()
-	viper.Set("output-format", tableFormat)
-	viper.Set("jmespath", "")
-	viper.Set("raw", false)
-	viper.Set("columns", "settings.tools[].nmae")
-	out := new(bytes.Buffer)
-	original := Stdout
-	Stdout = out
-	t.Cleanup(func() { Stdout = original })
-
-	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
-		map[string]interface{}{
-			"settings": map[string]interface{}{
-				"tools": []interface{}{},
-			},
-		},
-		map[string]interface{}{
-			"settings": map[string]interface{}{
-				"tools": []interface{}{map[string]interface{}{"key": "lookup-order"}},
-			},
-		},
-	})
-
-	assert.ErrorContains(t, err, `--columns: "settings.tools[].nmae" is not a field of the returned items`)
-	assert.Empty(t, out.String())
-}
-
-func TestDefaultFormatterAllowsProjectedColumnWhenEveryValueIsNull(t *testing.T) {
-	viper.Reset()
-	viper.Set("output-format", tableFormat)
-	viper.Set("jmespath", "")
-	viper.Set("raw", false)
-	viper.Set("columns", "settings.tools[].key")
-	out := new(bytes.Buffer)
-	original := Stdout
-	Stdout = out
-	t.Cleanup(func() { Stdout = original })
-
-	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
-		map[string]interface{}{
-			"settings": map[string]interface{}{
-				"tools": []interface{}{map[string]interface{}{"key": nil}},
-			},
-		},
-	})
-
-	assert.NoError(t, err)
-	assert.Contains(t, out.String(), "SETTINGS . TOOLS[] . KEY")
-}
-
-func TestDefaultFormatterReportsTheGrammarForAnUnsupportedSelector(t *testing.T) {
-	viper.Reset()
-	viper.Set("output-format", tableFormat)
-	viper.Set("jmespath", "")
-	viper.Set("raw", false)
-	viper.Set("columns", "groups[].tools[].key")
-	out := new(bytes.Buffer)
-	original := Stdout
-	Stdout = out
-	t.Cleanup(func() { Stdout = original })
-
-	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
-		map[string]interface{}{"id": "agent_1"},
-	})
-
-	assert.ErrorContains(t, err, `--columns: "groups[].tools[].key" is not a field of the returned items`)
-	assert.ErrorContains(t, err, "a selector supports one [] and needs a field after it")
-	assert.Empty(t, out.String())
-}
-
 func TestCheckColumnsExplainsWhyAColumnIsMissing(t *testing.T) {
-	rows := []map[string]interface{}{
-		{
-			"id":   "agent_1",
-			"name": "not-an-array",
-			"settings": map[string]interface{}{
-				"tools": []interface{}{map[string]interface{}{"key": "lookup"}},
-			},
-		},
+	populated := map[string]interface{}{
+		"id":       "agent_1",
+		"name":     "not-an-array",
+		"settings": map[string]interface{}{"tools": []interface{}{map[string]interface{}{"key": "lookup"}}},
 	}
+	empty := map[string]interface{}{"settings": map[string]interface{}{"tools": []interface{}{}}}
 
-	grammar := "a selector supports one [] and needs a field after it"
+	const grammar = "a selector supports one [] and needs a field after it"
 
 	tests := []struct {
 		name          string
 		column        string
+		rows          []map[string]interface{}
+		declared      bool
 		contains      string
 		quotesGrammar bool
 	}{
 		{
 			name:          "a second projection names the rule",
 			column:        "groups[].tools[].key",
-			contains:      `"groups[].tools[].key" is not a field of the returned items`,
+			contains:      `--columns: "groups[].tools[].key" is not a field of the returned items`,
 			quotesGrammar: true,
 		},
 		{
 			name:          "a terminal projection names the rule",
 			column:        "settings.tools[]",
-			contains:      `"settings.tools[]" is not a field of the returned items`,
+			contains:      `--columns: "settings.tools[]" is not a field of the returned items`,
 			quotesGrammar: true,
 		},
 		{
 			name:          "an index names the rule, since it is the documented --jmespath case",
 			column:        "settings.tools[0].key",
-			contains:      `"settings.tools[0].key" is not a field of the returned items`,
+			contains:      `--columns: "settings.tools[0].key" is not a field of the returned items`,
 			quotesGrammar: true,
 		},
 		{
-			name:          "a bracket-free typo has no rule to quote",
-			column:        "settings..tools",
-			contains:      `"settings..tools" is not a field of the returned items`,
-			quotesGrammar: false,
+			name:     "a bracket-free typo has no rule to quote",
+			column:   "settings..tools",
+			contains: `--columns: "settings..tools" is not a field of the returned items`,
 		},
 		{
-			name:          "a plain misspelling has no rule to quote",
-			column:        "naem",
-			contains:      `"naem" is not a field of the returned items`,
-			quotesGrammar: false,
+			name:     "a plain misspelling has no rule to quote",
+			column:   "naem",
+			contains: `--columns: "naem" is not a field of the returned items`,
 		},
 		{
-			name:          "a non-array prefix says so rather than claiming the field is absent",
-			column:        "name[].key",
-			contains:      `"name[].key" projects "name", which is not an array in the returned items`,
-			quotesGrammar: false,
+			name:     "a non-array prefix says so rather than claiming the field is absent",
+			column:   "name[].key",
+			contains: `--columns: "name[].key" projects "name", which is not an array in the returned items`,
+		},
+		{
+			name:          "an empty array cannot mask a misspelling on a populated row",
+			column:        "settings.tools[].nmae",
+			rows:          []map[string]interface{}{empty, populated},
+			contains:      `--columns: "settings.tools[].nmae" is not a field of the returned items`,
+			quotesGrammar: true,
+		},
+		{
+			name:          "a declared column names its own source",
+			column:        "settings.tools[].nmae",
+			declared:      true,
+			contains:      `declared column: "settings.tools[].nmae" is not a field of the returned items`,
+			quotesGrammar: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := checkColumns([]string{tt.column}, rows, true)
+			rows := tt.rows
+			if rows == nil {
+				rows = []map[string]interface{}{populated}
+			}
+
+			err := checkColumns([]string{tt.column}, rows, !tt.declared)
+
 			assert.ErrorContains(t, err, tt.contains)
 			if tt.quotesGrammar {
 				assert.ErrorContains(t, err, grammar)
@@ -698,46 +556,68 @@ func TestCheckColumnsExplainsWhyAColumnIsMissing(t *testing.T) {
 	}
 }
 
-func TestTableHeaderSplitsCamelCaseAndUnderscores(t *testing.T) {
-	// Pinned as literal strings, never recomputed from tw, so a tablewriter
-	// upgrade that changes auto-format fails here instead of silently
-	// reshaping every header in the CLI.
-	assert.Equal(t, "DISPLAY NAME", tableHeader("displayName"))
-	assert.Equal(t, "CREATED AT", tableHeader("created_at"))
-	assert.Equal(t, "MODEL . ID", tableHeader("model.id"))
+func TestCheckColumnsAcceptsIndeterminateProjections(t *testing.T) {
+	empty := map[string]interface{}{"settings": map[string]interface{}{"tools": []interface{}{}}}
+	null := map[string]interface{}{"settings": map[string]interface{}{"tools": nil}}
+	allNull := map[string]interface{}{"settings": map[string]interface{}{"tools": []interface{}{map[string]interface{}{"key": nil}}}}
+	populated := map[string]interface{}{"settings": map[string]interface{}{"tools": []interface{}{map[string]interface{}{"key": "lookup"}}}}
+
+	for name, rows := range map[string][]map[string]interface{}{
+		"every array empty":            {empty},
+		"every array null":             {null},
+		"every value null":             {allNull},
+		"one empty beside a populated": {empty, populated},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.NoError(t, checkColumns([]string{"settings.tools[].key"}, rows, true))
+		})
+	}
 }
 
-func TestDefaultFormatterAllowsProjectedColumnWhenAllArraysAreEmpty(t *testing.T) {
+func TestDefaultFormatterRendersProjectedColumn(t *testing.T) {
 	viper.Reset()
 	viper.Set("output-format", tableFormat)
 	viper.Set("jmespath", "")
 	viper.Set("raw", false)
-	viper.Set("columns", "settings.tools[].key")
 	out := new(bytes.Buffer)
 	original := Stdout
 	Stdout = out
 	t.Cleanup(func() { Stdout = original })
 
+	tools := func(items ...interface{}) map[string]interface{} {
+		return map[string]interface{}{"settings": map[string]interface{}{"tools": items}}
+	}
 	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
-		map[string]interface{}{
-			"settings": map[string]interface{}{
-				"tools": []interface{}{},
-			},
-		},
-	})
-
+		tools(
+			map[string]interface{}{"key": "lookup"},
+			map[string]interface{}{"key": "refund"},
+			map[string]interface{}{"key": "policy"},
+			map[string]interface{}{"key": "escalate"},
+		),
+		tools(map[string]interface{}{"id": "no-key"}),
+		tools(),
+		tools(map[string]interface{}{"key": nil}),
+		map[string]interface{}{"settings": map[string]interface{}{"tools": nil}},
+	}, "settings.tools[].key")
 	assert.NoError(t, err)
-	assert.Contains(t, out.String(), "SETTINGS . TOOLS[] . KEY")
+
+	// Whole lines, so a blank cell is asserted as rendered output rather than
+	// inferred by counting box-drawing characters.
+	lines := strings.Split(out.String(), "\n")
+	assert.Contains(t, lines, "│ SETTINGS . TOOLS[] . KEY  │")
+	assert.Contains(t, lines, "│ lookup, refund, policy, … │")
+	assert.Equal(t, 4, strings.Count(out.String(), "│                           │"))
 }
 
-func TestTableHeaderPreservesValidArrayProjection(t *testing.T) {
+func TestTableHeaderFormatsHeaders(t *testing.T) {
+	// Literal strings, never recomputed from tw, so a tablewriter upgrade
+	// that changes auto-format fails here instead of reshaping every header.
 	assert.Equal(t, "SETTINGS . TOOLS[] . KEY", tableHeader("settings.tools[].key"))
+	assert.Equal(t, "DISPLAY NAME", tableHeader("displayName"))
+	assert.Equal(t, "CREATED AT", tableHeader("created_at"))
+	assert.Equal(t, "MODEL . ID", tableHeader("model.id"))
 }
 
-// Every envelope shape the table extractor classifies, in one place. A
-// reviewer's A/B run against main caught a regression here that reading the
-// diff did not, so the shapes are pinned as a table rather than as a test each
-// time one is found.
 func TestDefaultFormatterClassifiesEnvelopeShapes(t *testing.T) {
 	const (
 		table      = "table"
