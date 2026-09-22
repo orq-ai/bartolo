@@ -99,6 +99,7 @@ func initAuth() {
 	profileCommand.AddCommand(newProfileListCommand())
 	profileCommand.AddCommand(newProfileCurrentCommand())
 	profileCommand.AddCommand(newProfileUseCommand("use"))
+	profileCommand.AddCommand(newProfileRemoveCommand())
 	profileCommand.AddCommand(newProfileClearCommand())
 
 	authCommand.AddCommand(newAuthSetupCommand())
@@ -228,6 +229,45 @@ func newProfileCurrentCommand() *cobra.Command {
 				"exists":         ProfileExists(name),
 				"profile_server": ProfileServer(),
 			})
+		},
+	}
+}
+
+// newProfileRemoveCommand deletes a stored profile. It deliberately skips
+// ConfirmDestructive, unlike the generated DELETE commands: a profile is local
+// state whose only alternative was hand-editing credentials.json, and nothing
+// server-side is destroyed.
+func newProfileRemoveCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:     "remove <name>",
+		Aliases: []string{"rm", "delete"},
+		Short:   "Delete an authentication profile",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := sanitizeProfileName(args[0])
+			if !ProfileExists(name) {
+				return fmt.Errorf("unknown profile %q", args[0])
+			}
+
+			Creds.RemoveProfile(name)
+			if err := Creds.Save(credentialsFile()); err != nil {
+				return err
+			}
+
+			// Only the stored choice is ours to clear; a --profile flag or a
+			// <PREFIX>_PROFILE env var naming the removed profile belongs to
+			// the caller, and outranks this key anyway. Note AutomaticEnv
+			// makes profile-selected itself readable as
+			// <PREFIX>_PROFILE_SELECTED, which this cannot unset either.
+			cleared := false
+			if sanitizeProfileName(viper.GetString("profile-selected")) == name {
+				if err := persistProfileSelection(""); err != nil {
+					return fmt.Errorf("profile %q was removed but is still selected: %w; run `auth profile clear`", name, err)
+				}
+				cleared = true
+			}
+
+			return Formatter.Format(map[string]interface{}{"removed_profile": name, "selection_cleared": cleared})
 		},
 	}
 }
@@ -1017,8 +1057,7 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 	}
 	Creds.SetProfile(profileName, fields)
 
-	filename := filepath.Join(viper.GetString("config-directory"), "credentials.json")
-	if err := Creds.Save(filename); err != nil {
+	if err := Creds.Save(credentialsFile()); err != nil {
 		return err
 	}
 
@@ -1146,6 +1185,17 @@ func (c *CredentialsFile) SetProfile(name string, fields map[string]string) {
 	profiles[name] = merged
 	c.viper.Set("profiles", profiles)
 }
+
+// RemoveProfile drops one profile; see SetProfile for why the whole map is
+// rewritten rather than the entry deleted in place.
+func (c *CredentialsFile) RemoveProfile(name string) {
+	name = sanitizeProfileName(name)
+
+	profiles := c.viper.GetStringMap("profiles")
+	delete(profiles, name)
+	c.viper.Set("profiles", profiles)
+}
+
 func (c *CredentialsFile) GetString(key string) string { return c.viper.GetString(key) }
 func (c *CredentialsFile) GetStringMap(key string) map[string]interface{} {
 	return c.viper.GetStringMap(key)
@@ -1179,6 +1229,13 @@ func NewCredentialsFile(dir string) (*CredentialsFile, error) {
 // Creds represents a configuration file storing credential-related
 // information. Use this only after `InitCredentialsFile` has been called.
 var Creds *CredentialsFile
+
+// credentialsFile is the one place that knows where Creds lives on disk, so a
+// change to the name or the directory key cannot reach one writer and miss
+// another. saveJSONConfig plays the same role for config.json.
+func credentialsFile() string {
+	return filepath.Join(viper.GetString("config-directory"), "credentials.json")
+}
 
 // GetProfile returns the current profile's configuration.
 func GetProfile() map[string]string {

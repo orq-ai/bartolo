@@ -1450,3 +1450,142 @@ func TestSetProfileCanonicalizesTheProfileName(t *testing.T) {
 	assert.Equal(t, "https://orq.acme.internal", stored["server"], "the stored profile must not be replaced by a differently-cased name")
 	assert.Len(t, Creds.GetStringMap("profiles"), 1, "a differently-cased name must not create a second profile")
 }
+
+func TestAuthProfileRemoveDeletesOnlyThatProfile(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+	execute("auth profile add prod secret-prod")
+	execute("auth profile add scratch secret-scratch")
+
+	out := executeJSON(t, "auth profile remove scratch -o json")
+
+	assert.Equal(t, "scratch", out["removed_profile"])
+	assert.Equal(t, false, out["selection_cleared"])
+	assert.True(t, ProfileExists("prod"), "removing one profile must not drop its siblings")
+	listing := executeJSON(t, "auth profile list -o json")
+	assert.NotContains(t, fmt.Sprint(listing["profiles"]), "scratch")
+	assert.Contains(t, fmt.Sprint(listing["profiles"]), "prod")
+	assert.Equal(t, "prod", ActiveProfileName(), "removing an inactive profile must not touch the selection")
+
+	credentials, err := os.ReadFile(filepath.Join(viper.GetString("config-directory"), "credentials.json"))
+	assert.NoError(t, err)
+	assert.NotContains(t, string(credentials), "secret-scratch", "the removed profile's key must be gone from disk")
+	assert.Contains(t, string(credentials), "secret-prod")
+}
+
+// Removing the profile in force must not leave `auth profile current` pointing
+// at a name `auth profile list` no longer shows. A surviving sibling keeps the
+// assertion honest: with only one profile stored, "the selection was cleared"
+// and "nothing is left to select" are the same observation.
+func TestAuthProfileRemoveClearsActiveSelection(t *testing.T) {
+	home := initTestCLI(t, "", stubAuthHandler{})
+	execute("auth profile add prod secret-prod")
+	execute("auth profile add scratch secret-scratch")
+	execute("auth profile use scratch")
+
+	out := executeJSON(t, "auth profile remove scratch -o json")
+	assert.Equal(t, true, out["selection_cleared"])
+
+	current := executeJSON(t, "auth profile current -o json")
+	assert.Equal(t, "", current["active_profile"])
+	assert.Equal(t, "none", current["source"])
+	assert.Equal(t, false, current["exists"])
+	assert.True(t, ProfileExists("prod"), "the surviving profile must not have been promoted or dropped")
+
+	// The cleared selection must survive a restart: persistProfileSelection
+	// pairs the empty selection with profile-decided precisely so the next
+	// process cannot read it as "never chose one" and adopt something.
+	bootCLI(t, home)
+	assert.Equal(t, "", ActiveProfileName())
+	assert.True(t, ProfileExists("prod"))
+}
+
+// Removal owns the stored choice only. A profile in force through --profile or
+// <PREFIX>_PROFILE outranks that key and is the caller's to stop passing, so
+// `auth profile current` reporting it with exists:false afterwards is the
+// documented outcome, not a regression.
+func TestAuthProfileRemoveLeavesFlagAndEnvSelectionToTheCaller(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		inForce func(t *testing.T)
+	}{
+		{
+			name:   "flag",
+			source: "flag",
+			inForce: func(t *testing.T) {
+				assert.NoError(t, Root.PersistentFlags().Set("profile", "scratch"))
+			},
+		},
+		{
+			name:    "env",
+			source:  "env",
+			inForce: func(t *testing.T) { t.Setenv("TEST_AUTH_PROFILE", "scratch") },
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			initTestCLI(t, "", stubAuthHandler{})
+			execute("auth profile add scratch secret-scratch")
+			execute("auth profile clear")
+			tc.inForce(t)
+
+			out := executeJSON(t, "auth profile remove scratch -o json")
+			assert.Equal(t, false, out["selection_cleared"], "there was no stored choice to clear")
+
+			current := executeJSON(t, "auth profile current -o json")
+			assert.Equal(t, "scratch", current["active_profile"])
+			assert.Equal(t, tc.source, current["source"])
+			assert.Equal(t, false, current["exists"], "current must report the profile is gone rather than hide it")
+		})
+	}
+}
+
+func TestAuthProfileRemoveRejectsUnknownProfile(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+	execute("auth profile add prod secret-prod")
+
+	path := filepath.Join(viper.GetString("config-directory"), "credentials.json")
+	before, err := os.ReadFile(path)
+	assert.NoError(t, err)
+
+	// executeForExit, not executeStreams: the acceptance criterion is the exit
+	// code, and executeStreams discards it by design.
+	_, stderr, code := executeForExit("auth profile remove nope")
+
+	assert.Equal(t, ExitError, code)
+	assert.Contains(t, stderr, `unknown profile "nope"`)
+	after, err := os.ReadFile(path)
+	assert.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "a rejected removal must not rewrite credentials.json")
+	assert.Equal(t, "prod", ActiveProfileName())
+}
+
+// Cleaning up after a broken selection is exactly when remove is needed, so it
+// must not depend on the selected profile resolving to anything.
+func TestAuthProfileRemoveWorksWhileSelectedProfileIsMissing(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+	execute("auth profile add prod secret-prod")
+	execute("auth profile add scratch secret-scratch")
+	execute("auth profile use scratch")
+	Creds.RemoveProfile("scratch")
+	assert.False(t, ProfileExists("scratch"), "the broken-selection premise must hold before the act")
+
+	out := executeJSON(t, "auth profile remove prod -o json")
+
+	assert.Equal(t, "prod", out["removed_profile"])
+	assert.Equal(t, false, out["selection_cleared"], "the dangling selection names scratch, not prod")
+	assert.False(t, ProfileExists("prod"))
+}
+
+func TestAuthProfileRemoveAliases(t *testing.T) {
+	for _, alias := range []string{"rm", "delete"} {
+		t.Run(alias, func(t *testing.T) {
+			initTestCLI(t, "", stubAuthHandler{})
+			execute("auth profile add scratch secret-scratch")
+
+			assert.Equal(t, "scratch", executeJSON(t, "auth profile "+alias+" scratch -o json")["removed_profile"])
+			assert.False(t, ProfileExists("scratch"))
+		})
+	}
+}
