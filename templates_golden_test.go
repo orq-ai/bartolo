@@ -23,14 +23,18 @@ info:
   version: "1"
 servers:
   - url: https://api.example.com
+tags:
+  - name: widgets
+    x-cli-beta: true
 paths:
   /{id}:
     get:
       operationId: GetThing
       summary: Get a thing
+      x-cli-beta: true
       parameters:
         - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
-        - {name: detailed, in: query, schema: {type: boolean}}
+        - {name: detailed, in: query, x-cli-beta: true, schema: {type: boolean}}
         - {name: limit, in: query, schema: {type: integer}}
         - {name: ratio, in: query, schema: {type: number}}
         - {name: kind, in: query, schema: {type: string, enum: [internal, a2a]}}
@@ -53,6 +57,7 @@ paths:
     post:
       operationId: CreateWidget
       summary: Create a widget
+      tags: [widgets]
       x-cli-help-section: Writes
       requestBody:
         content:
@@ -77,6 +82,7 @@ paths:
     post:
       operationId: SearchWidgets
       summary: Search widgets
+      tags: [widgets]
       x-cli-list-fields: [name, "tools[].key"]
       responses:
         "200":
@@ -102,6 +108,7 @@ paths:
     post:
       operationId: QueryWidgets
       summary: Query widgets
+      tags: [widgets]
       responses:
         "200":
           description: ok
@@ -123,6 +130,7 @@ paths:
     delete:
       operationId: DeleteWidget
       summary: Delete a widget
+      tags: [widgets]
       parameters:
         - {name: id, in: path, required: true, schema: {type: string}}
       responses:

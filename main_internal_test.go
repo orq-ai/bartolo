@@ -2484,3 +2484,107 @@ paths:
 		t.Fatal("x-cli-list: false should suppress paginated inference")
 	}
 }
+
+// TestBetaMarker pins that x-cli-beta renders a "(beta)" marker at each level it
+// is read: a tagged group, an operation, and a flag; and that an untagged
+// sibling stays unmarked (ENG-2958).
+func TestBetaMarker(t *testing.T) {
+	const spec = `
+openapi: 3.0.3
+info:
+  title: Beta API
+  version: "1"
+tags:
+  - name: things
+    x-cli-beta: true
+paths:
+  /things:
+    get:
+      operationId: ListThings
+      summary: List things
+      tags: [things]
+      responses:
+        "200": {description: ok}
+  /plain:
+    get:
+      operationId: GetPlain
+      summary: Get plain
+      x-cli-beta: true
+      parameters:
+        - {name: extraflag, in: query, x-cli-beta: true, schema: {type: boolean}}
+        - {name: plainflag, in: query, schema: {type: boolean}}
+      responses:
+        "200": {description: ok}
+  /described:
+    get:
+      operationId: GetDescribed
+      summary: Get described
+      description: A longer help body for the described operation.
+      x-cli-beta: true
+      responses:
+        "200": {description: ok}
+`
+	api := ProcessAPI("beta", loadTestSpec(t, spec))
+
+	var group *CommandGroup
+	for _, g := range api.Groups {
+		if g.CLIName == "things" {
+			group = g
+		}
+	}
+	if group == nil {
+		t.Fatal("things group not found")
+	}
+	if !strings.Contains(group.Short, "(beta)") {
+		t.Errorf("beta group short missing marker: %q", group.Short)
+	}
+
+	allOps := append([]*Operation{}, api.Operations...)
+	for _, g := range api.Groups {
+		allOps = append(allOps, g.Operations...)
+	}
+	var op *Operation
+	for _, o := range allOps {
+		if o.Path == "/plain" {
+			op = o
+		}
+	}
+	if op == nil {
+		t.Fatal("GetPlain operation not found")
+	}
+	if !strings.Contains(op.Short, "(beta)") {
+		t.Errorf("beta operation short missing marker: %q", op.Short)
+	}
+
+	var betaFlag, plainFlag *Param
+	for _, p := range op.AllParams {
+		switch p.CLIName {
+		case "extraflag":
+			betaFlag = p
+		case "plainflag":
+			plainFlag = p
+		}
+	}
+	if betaFlag == nil || !strings.Contains(betaFlag.Description, "(beta)") {
+		t.Errorf("beta flag missing marker: %+v", betaFlag)
+	}
+	if plainFlag == nil || strings.Contains(plainFlag.Description, "(beta)") {
+		t.Errorf("non-beta flag should have no marker: %+v", plainFlag)
+	}
+
+	// An operation with its own description renders that as cobra's Long; the
+	// marker must reach it too, since cobra shows Long instead of Short on the
+	// command's own --help page.
+	var described *Operation
+	for _, o := range allOps {
+		if o.Path == "/described" {
+			described = o
+		}
+	}
+	if described == nil {
+		t.Fatal("GetDescribed operation not found")
+	}
+	if !strings.Contains(described.Long, "(beta)") {
+		t.Errorf("beta operation Long (help body) missing marker: %q", described.Long)
+	}
+}
