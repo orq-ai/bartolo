@@ -173,8 +173,8 @@ func TestDefaultFormatterRendersDeclaredNestedColumns(t *testing.T) {
 		},
 	}, "model.id")
 	assert.NoError(t, err)
-	assert.Contains(t, out.String(), "│ MODEL . ID │")
-	assert.Contains(t, out.String(), "│ model_1    │")
+	assert.Contains(t, out.String(), "│   ID    │")
+	assert.Contains(t, out.String(), "│ model_1 │")
 }
 
 func TestDefaultFormatterRendersExplicitNestedColumns(t *testing.T) {
@@ -195,8 +195,8 @@ func TestDefaultFormatterRendersExplicitNestedColumns(t *testing.T) {
 		},
 	})
 	assert.NoError(t, err)
-	assert.Contains(t, out.String(), "│ MODEL . ID │")
-	assert.Contains(t, out.String(), "│ model_1    │")
+	assert.Contains(t, out.String(), "│   ID    │")
+	assert.Contains(t, out.String(), "│ model_1 │")
 }
 
 func TestDefaultFormatterPrefersLiteralDottedColumn(t *testing.T) {
@@ -216,7 +216,7 @@ func TestDefaultFormatterPrefersLiteralDottedColumn(t *testing.T) {
 		},
 	}, "model.id")
 	assert.NoError(t, err)
-	assert.Contains(t, out.String(), "│ literal    │")
+	assert.Contains(t, out.String(), "│ literal │")
 	assert.NotContains(t, out.String(), "nested")
 }
 
@@ -258,7 +258,7 @@ func TestDefaultFormatterRendersYAMLNestedMaps(t *testing.T) {
 		},
 	}, "model.id")
 	assert.NoError(t, err)
-	assert.Contains(t, out.String(), "│ model_1    │")
+	assert.Contains(t, out.String(), "│ model_1 │")
 }
 
 func TestDefaultFormatterRejectsUnknownNestedColumn(t *testing.T) {
@@ -604,7 +604,7 @@ func TestDefaultFormatterRendersProjectedColumn(t *testing.T) {
 	// Whole lines, so a blank cell is asserted as rendered output rather than
 	// inferred by counting box-drawing characters.
 	lines := strings.Split(out.String(), "\n")
-	assert.Contains(t, lines, "│ SETTINGS . TOOLS[] . KEY  │")
+	assert.Contains(t, lines, "│            KEY            │")
 	assert.Contains(t, lines, "│ lookup, refund, policy, … │")
 	assert.Equal(t, 4, strings.Count(out.String(), "│                           │"))
 }
@@ -616,6 +616,33 @@ func TestTableHeaderFormatsHeaders(t *testing.T) {
 	assert.Equal(t, "DISPLAY NAME", tableHeader("displayName"))
 	assert.Equal(t, "CREATED AT", tableHeader("created_at"))
 	assert.Equal(t, "MODEL . ID", tableHeader("model.id"))
+}
+
+func TestTableHeadersUseLeafUnlessItCollides(t *testing.T) {
+	cases := []struct {
+		name    string
+		columns []string
+		want    []string
+	}{
+		{"single nested leaf", []string{"metadata.context_window"}, []string{"CONTEXT WINDOW"}},
+		{"projection leaf", []string{"settings.tools[].key"}, []string{"KEY"}},
+		{
+			"colliding leaves keep full path",
+			[]string{"pricing.input.cost", "pricing.output.cost"},
+			[]string{"PRICING . INPUT . COST", "PRICING . OUTPUT . COST"},
+		},
+		{
+			"mix of colliding and non-colliding",
+			[]string{"id", "model.id", "metadata.context_window", "settings.tools[].key"},
+			[]string{"ID", "MODEL . ID", "CONTEXT WINDOW", "KEY"},
+		},
+		{"top-level unchanged", []string{"displayName", "created_at"}, []string{"DISPLAY NAME", "CREATED AT"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, tableHeaders(tc.columns))
+		})
+	}
 }
 
 func TestDefaultFormatterClassifiesEnvelopeShapes(t *testing.T) {

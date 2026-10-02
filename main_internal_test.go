@@ -853,7 +853,7 @@ func Register(root *cobra.Command) {
 	if err != nil {
 		t.Fatalf("run generated list command: %v\n%s", err, string(out))
 	}
-	if !strings.Contains(string(out), "SETTINGS . TOOLS[] . KEY") ||
+	if !strings.Contains(string(out), "│   ID   │ MODEL . ID │            KEY            │") ||
 		!strings.Contains(string(out), "lookup, refund, policy, …") ||
 		!strings.Contains(string(out), "model_1") {
 		t.Fatalf("generated list command returned unexpected table: %s", out)

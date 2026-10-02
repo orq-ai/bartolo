@@ -544,11 +544,7 @@ func renderTable(data interface{}, requestedColumns []string, userColumns bool) 
 		tablewriter.WithHeaderAutoWrap(tw.WrapNone),
 		tablewriter.WithRowAutoWrap(tw.WrapNone),
 	)
-	renderedHeaders := make([]string, len(headers))
-	for i, header := range headers {
-		renderedHeaders[i] = tableHeader(header)
-	}
-	table.Header(renderedHeaders)
+	table.Header(tableHeaders(headers))
 	for _, cells := range values {
 		if err := table.Append(cells); err != nil {
 			return false, err
@@ -566,6 +562,25 @@ func renderTable(data interface{}, requestedColumns []string, userColumns bool) 
 		fmt.Fprintln(Stdout, footer)
 	}
 	return true, nil
+}
+
+// tableHeaders labels each column by its leaf: metadata.context_window renders
+// as CONTEXT WINDOW and settings.tools[].key as KEY. A column whose leaf label
+// would match another column's keeps its full path, so pricing.input.cost and
+// pricing.output.cost stay distinguishable.
+func tableHeaders(columns []string) []string {
+	leaves := make([]string, len(columns))
+	counts := make(map[string]int, len(columns))
+	for i, column := range columns {
+		leaves[i] = tableHeader(column[strings.LastIndex(column, ".")+1:])
+		counts[leaves[i]]++
+	}
+	for i, column := range columns {
+		if counts[leaves[i]] > 1 {
+			leaves[i] = tableHeader(column)
+		}
+	}
+	return leaves
 }
 
 // tableHeader preserves tablewriter's whole-header formatting except for one
