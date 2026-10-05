@@ -96,6 +96,7 @@ func buildRevision(settings []debug.BuildSetting) string {
 // OpenAPI Extensions
 const (
 	ExtAliases     = "x-cli-aliases"
+	ExtBeta        = "x-cli-beta"
 	ExtDescription = "x-cli-description"
 	ExtGroup       = "x-cli-group"
 	ExtIgnore      = "x-cli-ignore"
@@ -516,6 +517,17 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				}
 			}
 
+			betaSfx := betaSuffix(operation.Extensions)
+			short += betaSfx
+			// Cobra prints Long or Short, never both, so a beta operation that has
+			// its own description (its Long) needs the marker there too, or its own
+			// --help page would omit it while the parent's command list shows it.
+			// The empty-description case is covered below, where Long falls back to
+			// the already-marked short.
+			if betaSfx != "" && description != "" {
+				description += betaSfx
+			}
+
 			if args := requiredArgsHelp(requiredParams); args != "" {
 				// Cobra prints Long or Short, never both, so a Long that exists
 				// only for this section still has to carry the summary.
@@ -717,6 +729,23 @@ func extStr(i interface{}) (decoded string) {
 	return
 }
 
+// betaSuffix returns " (beta)" when x-cli-beta is set truthy on the given
+// extensions, else "". Appended to the Short/description text so the marker
+// shows wherever that text is rendered: command list, command help, flag help,
+// and the generated README. Readable at group, operation, and flag level, the
+// same levels as the other x-cli-* extensions.
+func betaSuffix(exts map[string]interface{}) string {
+	if exts == nil || exts[ExtBeta] == nil {
+		return ""
+	}
+	var beta bool
+	mustDecodeExt(exts[ExtBeta], &beta)
+	if beta {
+		return " (beta)"
+	}
+	return ""
+}
+
 func mustDecodeExt(input interface{}, target interface{}) {
 	switch value := input.(type) {
 	case json.RawMessage:
@@ -900,6 +929,7 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		if tagDef.Extensions[ExtHidden] != nil {
 			mustDecodeExt(tagDef.Extensions[ExtHidden], &hidden)
 		}
+		short += betaSuffix(tagDef.Extensions)
 		section = getPreferredStringExt(tagDef.Extensions, ExtHelpSection)
 	}
 
@@ -1372,6 +1402,7 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 			// usage or one bullet of the Arguments section, so a spec's
 			// paragraph breaks would split the line or start a second bullet.
 			description = strings.Join(strings.Fields(description), " ")
+			description = strings.TrimSpace(description + betaSuffix(p.Value.Extensions))
 
 			allParams = append(allParams, &Param{
 				Name:        p.Value.Name,

@@ -96,6 +96,7 @@ Bartolo will synthesize a decent CLI from a plain schema, but it gets significan
 | Extension | Purpose |
 | --- | --- |
 | `x-cli-aliases` | Add command aliases for operations. |
+| `x-cli-beta` | Set to `true` on a group, operation, or flag to append a `(beta)` marker in help output and the README, so an unstable surface is discoverable but clearly flagged. |
 | `x-cli-description` | Override CLI-facing help text. |
 | `x-cli-group` | Force an operation into a higher-level noun. |
 | `x-cli-hidden` | Hide a path or operation from normal help. |
