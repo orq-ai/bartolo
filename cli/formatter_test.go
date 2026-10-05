@@ -173,8 +173,8 @@ func TestDefaultFormatterRendersDeclaredNestedColumns(t *testing.T) {
 		},
 	}, "model.id")
 	assert.NoError(t, err)
-	assert.Contains(t, out.String(), "│ MODEL . ID │")
-	assert.Contains(t, out.String(), "│ model_1    │")
+	assert.Contains(t, out.String(), "│   ID    │")
+	assert.Contains(t, out.String(), "│ model_1 │")
 }
 
 func TestDefaultFormatterRendersExplicitNestedColumns(t *testing.T) {
@@ -195,8 +195,8 @@ func TestDefaultFormatterRendersExplicitNestedColumns(t *testing.T) {
 		},
 	})
 	assert.NoError(t, err)
-	assert.Contains(t, out.String(), "│ MODEL . ID │")
-	assert.Contains(t, out.String(), "│ model_1    │")
+	assert.Contains(t, out.String(), "│   ID    │")
+	assert.Contains(t, out.String(), "│ model_1 │")
 }
 
 func TestDefaultFormatterPrefersLiteralDottedColumn(t *testing.T) {
@@ -216,6 +216,7 @@ func TestDefaultFormatterPrefersLiteralDottedColumn(t *testing.T) {
 		},
 	}, "model.id")
 	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "│ MODEL . ID │")
 	assert.Contains(t, out.String(), "│ literal    │")
 	assert.NotContains(t, out.String(), "nested")
 }
@@ -258,7 +259,7 @@ func TestDefaultFormatterRendersYAMLNestedMaps(t *testing.T) {
 		},
 	}, "model.id")
 	assert.NoError(t, err)
-	assert.Contains(t, out.String(), "│ model_1    │")
+	assert.Contains(t, out.String(), "│ model_1 │")
 }
 
 func TestDefaultFormatterRejectsUnknownNestedColumn(t *testing.T) {
@@ -441,7 +442,7 @@ func TestTableFieldPrefersLiteralArrayElementPath(t *testing.T) {
 
 	got, resolution := resolveTableField(row, "settings.tools[].key")
 
-	assert.Equal(t, tableFieldResolved, resolution)
+	assert.Equal(t, tableFieldLiteral, resolution)
 	assert.Equal(t, "literal", got)
 }
 
@@ -604,18 +605,61 @@ func TestDefaultFormatterRendersProjectedColumn(t *testing.T) {
 	// Whole lines, so a blank cell is asserted as rendered output rather than
 	// inferred by counting box-drawing characters.
 	lines := strings.Split(out.String(), "\n")
-	assert.Contains(t, lines, "│ SETTINGS . TOOLS[] . KEY  │")
+	assert.Contains(t, lines, "│            KEY            │")
 	assert.Contains(t, lines, "│ lookup, refund, policy, … │")
 	assert.Equal(t, 4, strings.Count(out.String(), "│                           │"))
 }
 
-func TestTableHeaderFormatsHeaders(t *testing.T) {
+func TestTableHeadersUseShortestUniqueSuffix(t *testing.T) {
 	// Literal strings, never recomputed from tw, so a tablewriter upgrade
 	// that changes auto-format fails here instead of reshaping every header.
-	assert.Equal(t, "SETTINGS . TOOLS[] . KEY", tableHeader("settings.tools[].key"))
-	assert.Equal(t, "DISPLAY NAME", tableHeader("displayName"))
-	assert.Equal(t, "CREATED AT", tableHeader("created_at"))
-	assert.Equal(t, "MODEL . ID", tableHeader("model.id"))
+	cases := []struct {
+		name    string
+		columns []string
+		literal []bool
+		want    []string
+	}{
+		{"top-level unchanged", []string{"displayName", "created_at"}, nil, []string{"DISPLAY NAME", "CREATED AT"}},
+		{"single nested leaf", []string{"metadata.context_window"}, nil, []string{"CONTEXT WINDOW"}},
+		{
+			"colliding leaves extend by one parent",
+			[]string{"pricing.input.cost", "pricing.output.cost"},
+			nil,
+			[]string{"INPUT . COST", "OUTPUT . COST"},
+		},
+		{"top-level and nested leaf", []string{"id", "model.id"}, nil, []string{"ID", "MODEL . ID"}},
+		{"extends until distinct", []string{"a.x.id", "b.x.id"}, nil, []string{"A . X . ID", "B . X . ID"}},
+		{
+			"leaves equal after formatting collide",
+			[]string{"model.contextWindow", "metadata.context_window"},
+			nil,
+			[]string{"MODEL . CONTEXT WINDOW", "METADATA . CONTEXT WINDOW"},
+		},
+		{
+			"each member extends only as far as its group needs",
+			[]string{"pricing.cost", "pricing.input.cost", "pricing.output.cost"},
+			nil,
+			[]string{"PRICING . COST", "INPUT . COST", "OUTPUT . COST"},
+		},
+		{"literal dotted key keeps whole name", []string{"model.id"}, []bool{true}, []string{"MODEL . ID"}},
+		{"projection leaf", []string{"settings.tools[].key"}, nil, []string{"KEY"}},
+		{
+			"projection collision drops the marker",
+			[]string{"settings.tools[].key", "settings.key"},
+			nil,
+			[]string{"TOOLS . KEY", "SETTINGS . KEY"},
+		},
+		{"identical columns stay identical", []string{"id", "id"}, nil, []string{"ID", "ID"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			literal := tc.literal
+			if literal == nil {
+				literal = make([]bool, len(tc.columns))
+			}
+			assert.Equal(t, tc.want, tableHeaders(tc.columns, literal))
+		})
+	}
 }
 
 func TestDefaultFormatterClassifiesEnvelopeShapes(t *testing.T) {
