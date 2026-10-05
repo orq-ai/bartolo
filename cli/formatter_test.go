@@ -216,7 +216,8 @@ func TestDefaultFormatterPrefersLiteralDottedColumn(t *testing.T) {
 		},
 	}, "model.id")
 	assert.NoError(t, err)
-	assert.Contains(t, out.String(), "│ literal │")
+	assert.Contains(t, out.String(), "│ MODEL . ID │")
+	assert.Contains(t, out.String(), "│ literal    │")
 	assert.NotContains(t, out.String(), "nested")
 }
 
@@ -441,7 +442,7 @@ func TestTableFieldPrefersLiteralArrayElementPath(t *testing.T) {
 
 	got, resolution := resolveTableField(row, "settings.tools[].key")
 
-	assert.Equal(t, tableFieldResolved, resolution)
+	assert.Equal(t, tableFieldLiteral, resolution)
 	assert.Equal(t, "literal", got)
 }
 
@@ -609,38 +610,54 @@ func TestDefaultFormatterRendersProjectedColumn(t *testing.T) {
 	assert.Equal(t, 4, strings.Count(out.String(), "│                           │"))
 }
 
-func TestTableHeaderFormatsHeaders(t *testing.T) {
+func TestTableHeadersUseShortestUniqueSuffix(t *testing.T) {
 	// Literal strings, never recomputed from tw, so a tablewriter upgrade
 	// that changes auto-format fails here instead of reshaping every header.
-	assert.Equal(t, "SETTINGS . TOOLS[] . KEY", tableHeader("settings.tools[].key"))
-	assert.Equal(t, "DISPLAY NAME", tableHeader("displayName"))
-	assert.Equal(t, "CREATED AT", tableHeader("created_at"))
-	assert.Equal(t, "MODEL . ID", tableHeader("model.id"))
-}
-
-func TestTableHeadersUseLeafUnlessItCollides(t *testing.T) {
 	cases := []struct {
 		name    string
 		columns []string
+		literal []bool
 		want    []string
 	}{
-		{"single nested leaf", []string{"metadata.context_window"}, []string{"CONTEXT WINDOW"}},
-		{"projection leaf", []string{"settings.tools[].key"}, []string{"KEY"}},
+		{"top-level unchanged", []string{"displayName", "created_at"}, nil, []string{"DISPLAY NAME", "CREATED AT"}},
+		{"single nested leaf", []string{"metadata.context_window"}, nil, []string{"CONTEXT WINDOW"}},
 		{
-			"colliding leaves keep full path",
+			"colliding leaves extend by one parent",
 			[]string{"pricing.input.cost", "pricing.output.cost"},
-			[]string{"PRICING . INPUT . COST", "PRICING . OUTPUT . COST"},
+			nil,
+			[]string{"INPUT . COST", "OUTPUT . COST"},
+		},
+		{"top-level and nested leaf", []string{"id", "model.id"}, nil, []string{"ID", "MODEL . ID"}},
+		{"extends until distinct", []string{"a.x.id", "b.x.id"}, nil, []string{"A . X . ID", "B . X . ID"}},
+		{
+			"leaves equal after formatting collide",
+			[]string{"model.contextWindow", "metadata.context_window"},
+			nil,
+			[]string{"MODEL . CONTEXT WINDOW", "METADATA . CONTEXT WINDOW"},
 		},
 		{
-			"mix of colliding and non-colliding",
-			[]string{"id", "model.id", "metadata.context_window", "settings.tools[].key"},
-			[]string{"ID", "MODEL . ID", "CONTEXT WINDOW", "KEY"},
+			"each member extends only as far as its group needs",
+			[]string{"pricing.cost", "pricing.input.cost", "pricing.output.cost"},
+			nil,
+			[]string{"PRICING . COST", "INPUT . COST", "OUTPUT . COST"},
 		},
-		{"top-level unchanged", []string{"displayName", "created_at"}, []string{"DISPLAY NAME", "CREATED AT"}},
+		{"literal dotted key keeps whole name", []string{"model.id"}, []bool{true}, []string{"MODEL . ID"}},
+		{"projection leaf", []string{"settings.tools[].key"}, nil, []string{"KEY"}},
+		{
+			"projection collision drops the marker",
+			[]string{"settings.tools[].key", "settings.key"},
+			nil,
+			[]string{"TOOLS . KEY", "SETTINGS . KEY"},
+		},
+		{"identical columns stay identical", []string{"id", "id"}, nil, []string{"ID", "ID"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, tableHeaders(tc.columns))
+			literal := tc.literal
+			if literal == nil {
+				literal = make([]bool, len(tc.columns))
+			}
+			assert.Equal(t, tc.want, tableHeaders(tc.columns, literal))
 		})
 	}
 }
