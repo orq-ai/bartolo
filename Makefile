@@ -47,6 +47,28 @@ smoke:
 		test -x "$$SMOKE_DIR/scripts/install-local.sh"; \
 		test -x "$$SMOKE_DIR/bin/example"; \
 		test -x "$$INSTALL_DIR/example"; \
+		printf '==> smoke: generated delete refuses without --force\n'; \
+		set +e; "$$SMOKE_DIR/bin/example" widgets delete abc </dev/null >/dev/null 2>&1; \
+		code=$$?; set -e; \
+		test "$$code" -eq 2 || { echo "delete without --force exited $$code, want 2"; exit 1; }; \
+		printf '==> smoke: generated CLI refuses a value the schema rules out\n'; \
+		set +e; out=$$("$$SMOKE_DIR/bin/example" echo echo 24h --status bogus </dev/null 2>&1); \
+		code=$$?; set -e; \
+		test "$$code" -eq 2 || { echo "a bad --status exited $$code, want 2"; exit 1; }; \
+		case "$$out" in *"is not one of"*) ;; *) echo "the error should name the rejected value, got: $$out"; exit 1;; esac; \
+		case "$$out" in *Usage:*) echo "a rejected value should not print the usage block, got: $$out"; exit 1;; esac; \
+		printf '==> smoke: generated CLI refuses an unparseable timestamp\n'; \
+		set +e; out=$$("$$SMOKE_DIR/bin/example" echo echo banana </dev/null 2>&1); \
+		code=$$?; set -e; \
+		test "$$code" -eq 2 || { echo "a bad timestamp exited $$code, want 2"; exit 1; }; \
+		case "$$out" in *"is not a timestamp"*) ;; *) echo "the error should name the rejected value, got: $$out"; exit 1;; esac; \
+		case "$$out" in *24h*) ;; *) echo "the error should name the accepted forms, got: $$out"; exit 1;; esac; \
+		printf '==> smoke: a marked POST collection renders a table\n'; \
+		grep -q 'FormatList(decoded, "id", "name")' "$$SMOKE_DIR/cli/generated/"*.go || { echo "a POST with x-cli-list-fields should generate a FormatList call with its declared columns"; exit 1; }; \
+		printf '==> smoke: generated CLI sends relative timestamps as RFC 3339\n'; \
+		set +e; out=$$("$$SMOKE_DIR/bin/example" echo echo 24h --until 2w </dev/null 2>&1); set -e; \
+		case "$$out" in *"since=20"*"%3A"*"Z"*) ;; *) echo "a required date-time should reach the URL as RFC 3339, got: $$out"; exit 1;; esac; \
+		case "$$out" in *"until=20"*"%3A"*"Z"*) ;; *) echo "an optional date-time should reach the URL as RFC 3339, got: $$out"; exit 1;; esac; \
 		test -f "$$SMOKE_DIR/cli/generated/mcp_tools.go"; \
 		"$$SMOKE_DIR/bin/example" mcp list | grep -q '"inputSchema"'; \
 		{ printf '%s\n' \

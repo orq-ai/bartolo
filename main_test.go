@@ -102,7 +102,8 @@ func TestEchoSuccess(t *testing.T) {
 		t.Fatalf("build example-cli: %v\n%s", err, string(out))
 	}
 
-	// Call the compiled executable CLI to hit our test server.
+	// Call the compiled executable CLI to hit our test server. No -o: this is
+	// also the end-to-end check that a piped run serializes rather than tabulates.
 	out, err := exec.Command(cliPath, "echo", "hello:", "world", "--echo-query=foo", "--x-request-id", "bar").CombinedOutput()
 	if err != nil {
 		fmt.Println(string(out))
@@ -110,4 +111,34 @@ func TestEchoSuccess(t *testing.T) {
 	}
 
 	assert.JSONEq(t, "{\"hello\": \"world\", \"q\": \"foo\", \"request-id\": \"bar\"}", string(out))
+}
+
+func TestEchoExamplePrintsAndExitsZero(t *testing.T) {
+	cliPath := filepath.Join(os.TempDir(), "bartolo-example-cli")
+	build := exec.Command("go", "build", "-o", cliPath, "./example-cli")
+	build.Dir = "."
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build example-cli: %v\n%s", err, string(out))
+	}
+
+	out, err := exec.Command(cliPath, "echo", "--example").CombinedOutput()
+	if err != nil {
+		t.Fatalf("echo --example: %v\n%s", err, string(out))
+	}
+
+	// The example body is printed verbatim — not the echo server's response,
+	// which would include q/request-id keys — proving no request was sent.
+	assert.JSONEq(t, "{\"hello\": \"world\"}", string(out))
+
+	// The printed body round-trips through --from-file.
+	bodyFile := filepath.Join(t.TempDir(), "body.json")
+	if err := os.WriteFile(bodyFile, out, 0600); err != nil {
+		t.Fatalf("write body file: %v", err)
+	}
+
+	out, err = exec.Command(cliPath, "echo", "--from-file", bodyFile).CombinedOutput()
+	if err != nil {
+		t.Fatalf("echo --from-file: %v\n%s", err, string(out))
+	}
+	assert.JSONEq(t, "{\"hello\": \"world\"}", string(out))
 }

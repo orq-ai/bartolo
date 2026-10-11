@@ -9,7 +9,9 @@ import (
 	"github.com/spf13/viper"
 )
 
-func resetCLI(t *testing.T) {
+// resetTypedCLI is resetCLI plus a fresh cli.Init and cleared runtime globals,
+// for tests that register several typed handlers.
+func resetTypedCLI(t *testing.T) {
 	t.Helper()
 
 	viper.Reset()
@@ -33,7 +35,7 @@ func resetCLI(t *testing.T) {
 }
 
 func TestInitWithTypeRegistersTypedHandlers(t *testing.T) {
-	resetCLI(t)
+	resetTypedCLI(t)
 
 	InitWithType("apiKeyHeader", "X-API-Key", LocationHeader)
 	InitBearerWithType("bearer", "Authorization")
@@ -50,7 +52,7 @@ func TestInitWithTypeRegistersTypedHandlers(t *testing.T) {
 }
 
 func TestOAuthInitWithTypeRegistersTypedHandlers(t *testing.T) {
-	resetCLI(t)
+	resetTypedCLI(t)
 
 	oauth.InitClientCredentialsWithType("cc", "https://example.com/token", oauth.Scopes("read", "write"))
 	oauth.InitAuthCodeWithType("ac", "", "https://example.com/authorize", "https://example.com/token")

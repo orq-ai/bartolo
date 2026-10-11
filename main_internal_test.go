@@ -1,14 +1,38 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"regexp"
+	"runtime/debug"
+	"strings"
 	"testing"
+
+	bartolocli "github.com/orq-ai/bartolo/cli"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/spf13/cobra"
 )
+
+func operationsByRoute(api *OpenAPI) map[string]*Operation {
+	byRoute := map[string]*Operation{}
+	collect := func(operations []*Operation) {
+		for _, op := range operations {
+			byRoute[strings.ToUpper(op.Method)+" "+op.Path] = op
+		}
+	}
+	collect(api.Operations)
+	for _, group := range api.Groups {
+		collect(group.Operations)
+	}
+	return byRoute
+}
 
 func loadTestSpec(t *testing.T, spec string) *openapi3.T {
 	t.Helper()
@@ -16,6 +40,21 @@ func loadTestSpec(t *testing.T, spec string) *openapi3.T {
 	doc, err := loadOpenAPIDocument([]byte(spec))
 	if err != nil {
 		t.Fatalf("load spec: %v", err)
+	}
+
+	return doc
+}
+
+func loadOrqSpec(t *testing.T) *openapi3.T {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join("testdata", "orq", "openapi.json"))
+	if err != nil {
+		t.Fatalf("read orq spec: %v", err)
+	}
+	doc, err := loadOpenAPIDocument(data)
+	if err != nil {
+		t.Fatalf("load orq spec: %v", err)
 	}
 
 	return doc
@@ -151,6 +190,366 @@ paths:
 	op := api.Groups[0].Operations[0]
 	if op.Use != "list" {
 		t.Fatalf("expected grouped operation use %q, got %q", "list", op.Use)
+	}
+	if !op.IsList {
+		t.Fatal("collection GET operation should use list formatting")
+	}
+}
+
+func TestProcessAPIReadsListFieldsExtension(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: List fields API
+  version: "1"
+paths:
+  /files/search:
+    post:
+      operationId: searchFiles
+      x-cli-list-fields:
+        - name
+        - id
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+                    name:
+                      type: string
+`)
+
+	api := ProcessAPI("example", doc)
+	var op *Operation
+	if len(api.Operations) > 0 {
+		op = api.Operations[0]
+	} else if len(api.Groups) > 0 && len(api.Groups[0].Operations) > 0 {
+		op = api.Groups[0].Operations[0]
+	}
+	if op == nil {
+		t.Fatal("expected generated list operation")
+	}
+	if got := strings.Join(op.ListFields, ","); got != "name,id" {
+		t.Fatalf("unexpected list fields %q", got)
+	}
+	if !op.IsList {
+		t.Fatal("POST operation with list fields should use list formatting")
+	}
+}
+
+func TestProcessAPIListExtensionControlsClassification(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		extensions string
+		wantList   bool
+	}{
+		{
+			name:       "explicit true marks a non-GET operation",
+			method:     "patch",
+			path:       "/files/{file_id}",
+			extensions: "      x-cli-list: true\n",
+			wantList:   true,
+		},
+		{
+			name:       "explicit false suppresses GET inference",
+			method:     "get",
+			path:       "/files",
+			extensions: "      x-cli-list: false\n",
+			wantList:   false,
+		},
+		{
+			name:       "empty list fields do not mark a POST operation",
+			method:     "post",
+			path:       "/files/search",
+			extensions: "      x-cli-list-fields: []\n",
+			wantList:   false,
+		},
+		{
+			name:   "explicit true marks an operation with empty list fields",
+			method: "post",
+			path:   "/files/search",
+			extensions: "      x-cli-list: true\n" +
+				"      x-cli-list-fields: []\n",
+			wantList: true,
+		},
+		{
+			name:     "unmarked POST array response is not inferred",
+			method:   "post",
+			path:     "/files/search",
+			wantList: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := loadTestSpec(t, fmt.Sprintf(`
+openapi: 3.0.3
+info:
+  title: Explicit list API
+  version: "1"
+paths:
+  %s:
+    %s:
+      operationId: testListClassification
+%s      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  matches:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: {type: string}
+                        name: {type: string}
+`, tt.path, tt.method, tt.extensions))
+
+			byRoute := operationsByRoute(ProcessAPI("example", doc))
+			if len(byRoute) != 1 {
+				t.Fatalf("expected one generated operation, got %d", len(byRoute))
+			}
+			op, ok := byRoute[strings.ToUpper(tt.method)+" "+tt.path]
+			if !ok {
+				t.Fatalf("%s %s is missing from the generated CLI", tt.method, tt.path)
+			}
+			if got := op.IsList; got != tt.wantList {
+				t.Fatalf("IsList = %t, want %t", got, tt.wantList)
+			}
+		})
+	}
+}
+
+func TestProcessAPIRejectsNonBooleanNoValidateExtension(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Malformed no-validate API
+  version: "1"
+paths:
+  /files:
+    get:
+      operationId: listFiles
+      parameters:
+        - name: kind
+          in: query
+          x-cli-no-validate: "yes"
+          schema:
+            type: string
+            enum: [a, b]
+      responses:
+        "200":
+          description: ok
+`)
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("a non-boolean x-cli-no-validate should fail generation instead of being ignored")
+		}
+		err, ok := recovered.(error)
+		if !ok || !strings.Contains(err.Error(), "cannot unmarshal") {
+			t.Fatalf("expected a decode failure, got %v", recovered)
+		}
+	}()
+
+	ProcessAPI("example", doc)
+}
+
+func TestProcessAPIRejectsContradictoryListMetadata(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Contradictory list API
+  version: "1"
+paths:
+  /files/search:
+    post:
+      operationId: searchFiles
+      x-cli-list: false
+      x-cli-list-fields: [name, id]
+      responses:
+        "200":
+          description: ok
+`)
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("x-cli-list: false alongside declared columns should fail generation")
+		}
+		err, ok := recovered.(error)
+		if !ok || !strings.Contains(err.Error(), "declares columns") {
+			t.Fatalf("expected a contradiction failure, got %v", recovered)
+		}
+	}()
+
+	ProcessAPI("example", doc)
+}
+
+func TestProcessAPIRejectsNonBooleanListExtension(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Malformed list API
+  version: "1"
+paths:
+  /files:
+    get:
+      operationId: listFiles
+      x-cli-list: "yes"
+      responses:
+        "200":
+          description: ok
+`)
+
+	defer func() {
+		recovered := recover()
+		if recovered == nil {
+			t.Fatal("a non-boolean x-cli-list should fail generation instead of being ignored")
+		}
+		err, ok := recovered.(error)
+		if !ok || !strings.Contains(err.Error(), "cannot unmarshal") {
+			t.Fatalf("expected a decode failure, got %v", recovered)
+		}
+	}()
+
+	ProcessAPI("example", doc)
+}
+
+// The two routes below are annotated in the vendored fixture so the classifier
+// runs against a real Speakeasy document rather than only synthetic specs. The
+// shipped orq CLI is generated elsewhere, so this pins generator behaviour and
+// guards the annotations against a re-vendor, not the customer-facing bug.
+func TestProcessAPIMarksOrqPostCollections(t *testing.T) {
+	doc := loadOrqSpec(t)
+
+	byRoute := operationsByRoute(ProcessAPI("orq", doc))
+	marked := map[string][]string{
+		"POST /v2/knowledge/{knowledge_id}/search":                                  {"id", "text"},
+		"POST /v2/knowledge/{knowledge_id}/datasources/{datasource_id}/chunks/list": {"_id", "text", "status"},
+	}
+	for route, wantFields := range marked {
+		op, ok := byRoute[route]
+		if !ok {
+			t.Fatalf("%s is missing from the generated CLI", route)
+		}
+		if !op.IsList {
+			t.Errorf("%s should render as a list", route)
+		}
+		if got := strings.Join(op.ListFields, ","); got != strings.Join(wantFields, ",") {
+			t.Errorf("%s columns = %q, want %q", route, got, strings.Join(wantFields, ","))
+		}
+	}
+}
+
+// The regression that matters is a route nobody looked at starting to render as a table, so assert the whole set.
+func TestProcessAPIClassifiesOrqNonGetListsExactly(t *testing.T) {
+	const chunksRoute = "POST /v2/knowledge/{knowledge_id}/datasources/{datasource_id}/chunks/list"
+
+	t.Run("inference alone classifies the paginated route", func(t *testing.T) {
+		doc := loadOrqSpec(t)
+		item := doc.Paths.Find("/v2/knowledge/{knowledge_id}/datasources/{datasource_id}/chunks/list")
+		if item == nil || item.Post == nil {
+			t.Fatal("the chunks route is missing from the fixture")
+		}
+		delete(item.Post.Extensions, "x-cli-list")
+		delete(item.Post.Extensions, "x-cli-list-fields")
+
+		op, ok := operationsByRoute(ProcessAPI("orq", doc))[chunksRoute]
+		if !ok {
+			t.Fatalf("%s is missing from the generated CLI", chunksRoute)
+		}
+		if !op.IsList {
+			t.Error("a data + has_more envelope should be inferred as a list without annotation")
+		}
+		if len(op.ListFields) != 0 {
+			t.Errorf("inferred list should declare no columns, got %v", op.ListFields)
+		}
+	})
+
+	t.Run("no other non-GET operation classifies", func(t *testing.T) {
+		want := map[string]bool{
+			// Inferred: data + has_more.
+			chunksRoute: true,
+			// Annotated by ENG-2942, not inferred: `matches` is not a conventional collection key.
+			"POST /v2/knowledge/{knowledge_id}/search": true,
+		}
+
+		got := map[string]bool{}
+		for route, op := range operationsByRoute(ProcessAPI("orq", loadOrqSpec(t))) {
+			if !op.IsList || strings.HasPrefix(route, "GET ") {
+				continue
+			}
+			got[route] = true
+		}
+
+		for route := range got {
+			if !want[route] {
+				t.Errorf("%s newly renders as a list; add it to the expected set only if that is intended", route)
+			}
+		}
+		for route := range want {
+			if !got[route] {
+				t.Errorf("%s should render as a list but does not", route)
+			}
+		}
+	})
+}
+
+func TestProcessAPIRecognizesNestedCollectionResponse(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Nested collection API
+  version: "1"
+paths:
+  /folders/{folder_id}/files:
+    get:
+      operationId: listFolderFiles
+      parameters:
+        - name: folder_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id:
+                      type: string
+`)
+
+	api := ProcessAPI("example", doc)
+	var op *Operation
+	if len(api.Operations) > 0 {
+		op = api.Operations[0]
+	} else if len(api.Groups) > 0 && len(api.Groups[0].Operations) > 0 {
+		op = api.Groups[0].Operations[0]
+	}
+	if op == nil {
+		t.Fatal("expected generated nested collection operation")
+	}
+	if !op.IsList {
+		t.Fatal("nested collection GET operation should use list formatting")
 	}
 }
 
@@ -462,7 +861,7 @@ func TestResolveInitConfigUsesFlagsWithoutPrompting(t *testing.T) {
 	cmd.Flags().Bool("interactive", false, "")
 	cmd.Flags().String("module-path", "github.com/acme/demo-cli", "")
 	cmd.Flags().String("api-key-env-var", "MY_TEAM_TOKEN", "")
-	cmd.Flags().String("default-format", "yaml", "")
+	cmd.Flags().String("serialization-format", "yaml", "")
 
 	config, err := resolveInitConfig(cmd, []string{"demo-cli"})
 	if err != nil {
@@ -478,8 +877,8 @@ func TestResolveInitConfigUsesFlagsWithoutPrompting(t *testing.T) {
 	if config.ModulePath != "github.com/acme/demo-cli" {
 		t.Fatalf("expected module path github.com/acme/demo-cli, got %q", config.ModulePath)
 	}
-	if config.DefaultOutputFormat != "yaml" {
-		t.Fatalf("expected default output format yaml, got %q", config.DefaultOutputFormat)
+	if config.SerializationFormat != "yaml" {
+		t.Fatalf("expected serialization format yaml, got %q", config.SerializationFormat)
 	}
 	if config.APIKeyEnvVar != "MY_TEAM_TOKEN" {
 		t.Fatalf("expected api key env var MY_TEAM_TOKEN, got %q", config.APIKeyEnvVar)
@@ -491,7 +890,7 @@ func TestResolveInitConfigRejectsInvalidAPIKeyEnvVar(t *testing.T) {
 	cmd.Flags().Bool("interactive", false, "")
 	cmd.Flags().String("module-path", "", "")
 	cmd.Flags().String("api-key-env-var", "123_BAD", "")
-	cmd.Flags().String("default-format", "json", "")
+	cmd.Flags().String("serialization-format", "json", "")
 
 	if _, err := resolveInitConfig(cmd, []string{"demo-cli"}); err == nil {
 		t.Fatal("expected invalid api key env var error")
@@ -503,10 +902,26 @@ func TestResolveInitConfigRejectsInvalidModulePath(t *testing.T) {
 	cmd.Flags().Bool("interactive", false, "")
 	cmd.Flags().String("module-path", "github.com/acme/demo cli", "")
 	cmd.Flags().String("api-key-env-var", "", "")
-	cmd.Flags().String("default-format", "json", "")
+	cmd.Flags().String("serialization-format", "json", "")
 
 	if _, err := resolveInitConfig(cmd, []string{"demo-cli"}); err == nil {
 		t.Fatal("expected invalid module path error")
+	}
+}
+
+func TestResolveInitConfigRejectsUnknownSerializationFormat(t *testing.T) {
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("interactive", false, "")
+	cmd.Flags().String("module-path", "", "")
+	cmd.Flags().String("api-key-env-var", "", "")
+	cmd.Flags().String("serialization-format", "not-a-format", "")
+
+	_, err := resolveInitConfig(cmd, []string{"demo-cli"})
+	if err == nil {
+		t.Fatal("expected unknown default format error")
+	}
+	if !strings.Contains(err.Error(), "is not one of [json, yaml, toon]") {
+		t.Fatalf("expected the error to name the allowed formats, got %q", err)
 	}
 }
 
@@ -530,7 +945,7 @@ func TestGenerateFromJSONFixtureBuildsCLI(t *testing.T) {
 		BartoloReplacePath:  repoRoot,
 		BartoloVersion:      bartoloVersion,
 		EnvPrefix:           "ORQ",
-		DefaultOutputFormat: "json",
+		SerializationFormat: "json",
 		APIKeyEnvVar:        "ORQ_API_KEY",
 		Targets:             []string{"cli", "mcp"},
 	}
@@ -567,6 +982,170 @@ func TestGenerateFromJSONFixtureBuildsCLI(t *testing.T) {
 	}
 }
 
+func TestGeneratedListCommandRendersArrayElementPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/files" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`[{"id":"file_1","model":{"id":"model_1"},"settings":{"tools":[{"key":"lookup"},{"key":"refund"},{"key":"policy"},{"key":"escalate"}]}}]`))
+	}))
+	defer server.Close()
+
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	tmp := t.TempDir()
+	oldWD := repoRoot
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatalf("chdir tempdir: %v", err)
+	}
+	defer os.Chdir(oldWD)
+
+	config := &ProjectConfig{
+		AppName:             "nested-cli",
+		AppVersion:          "0.1.0",
+		ModulePath:          "github.com/acme/nested-cli",
+		BartoloReplacePath:  repoRoot,
+		BartoloVersion:      bartoloVersion,
+		EnvPrefix:           "NESTED",
+		SerializationFormat: "json",
+		Targets:             []string{targetCLI},
+	}
+	if err := writeProjectScaffold(config, false); err != nil {
+		t.Fatalf("writeProjectScaffold: %v", err)
+	}
+
+	specPath := filepath.Join(tmp, "openapi.yaml")
+	spec := fmt.Sprintf(`openapi: 3.0.3
+info:
+  title: Nested API
+  version: "1"
+servers:
+  - url: %s
+paths:
+  /files:
+    get:
+      operationId: listFiles
+      x-cli-list-fields:
+        - id
+        - model.id
+        - settings.tools[].key
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+`, server.URL)
+	if err := os.WriteFile(specPath, []byte(spec), 0o644); err != nil {
+		t.Fatalf("write spec: %v", err)
+	}
+
+	api := ProcessAPI("nested", loadTestSpec(t, spec))
+	var commandPath string
+	if len(api.Operations) == 1 {
+		commandPath = api.Operations[0].CommandPath
+	} else if len(api.Groups) == 1 && len(api.Groups[0].Operations) == 1 {
+		commandPath = api.Groups[0].Operations[0].CommandPath
+	} else {
+		t.Fatalf("expected one generated operation, got %d root operations and %d groups", len(api.Operations), len(api.Groups))
+	}
+	if err := generateFromSpec(specPath); err != nil {
+		t.Fatalf("generateFromSpec: %v", err)
+	}
+
+	customRegister := `package custom
+
+import (
+	bartolocli "github.com/orq-ai/bartolo/cli"
+	"github.com/spf13/cobra"
+)
+
+func Register(root *cobra.Command) {
+	_ = root
+	bartolocli.Formatter = bartolocli.NewDefaultFormatter(true, true)
+}
+`
+	customPath := filepath.Join(tmp, "cli", "custom", "register.go")
+	if err := os.WriteFile(customPath, []byte(customRegister), 0o644); err != nil {
+		t.Fatalf("write custom table hook: %v", err)
+	}
+
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = tmp
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy: %v\n%s", err, string(out))
+	}
+
+	cliPath := filepath.Join(tmp, "nested-cli")
+	build := exec.Command("go", "build", "-o", cliPath, "./cmd/nested-cli")
+	build.Dir = tmp
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build generated CLI: %v\n%s", err, string(out))
+	}
+
+	args := strings.Fields(commandPath)
+	run := exec.Command(cliPath, args...)
+	run.Dir = tmp
+	out, err := run.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run generated list command: %v\n%s", err, string(out))
+	}
+	// The first bordered row is the header; compare cells, not padding.
+	var header []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.HasPrefix(line, "│") {
+			continue
+		}
+		for _, cell := range strings.Split(strings.Trim(line, "│"), "│") {
+			header = append(header, strings.TrimSpace(cell))
+		}
+		break
+	}
+	if !reflect.DeepEqual(header, []string{"ID", "MODEL . ID", "KEY"}) ||
+		!strings.Contains(string(out), "lookup, refund, policy, …") ||
+		!strings.Contains(string(out), "model_1") {
+		t.Fatalf("generated list command returned unexpected table (header %q): %s", header, out)
+	}
+
+	// Decoding rather than substring-matching is what catches a projection
+	// that flattened the rows, which still carries every value the table shows.
+	runJSON := exec.Command(cliPath, append(args, "-o", "json")...)
+	runJSON.Dir = tmp
+	jsonOut, err := runJSON.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run generated list command with -o json: %v\n%s", err, string(jsonOut))
+	}
+
+	// The hook above forces a colorized formatter onto this pipe.
+	plain := regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAll(jsonOut, nil)
+	var rows []map[string]interface{}
+	if err := json.Unmarshal(plain, &rows); err != nil {
+		t.Fatalf("decode -o json output: %v\n%s", err, plain)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected one row, got %d: %s", len(rows), plain)
+	}
+	model, ok := rows[0]["model"].(map[string]interface{})
+	if !ok || model["id"] != "model_1" {
+		t.Fatalf("nested model object did not survive -o json: %s", plain)
+	}
+	settings, ok := rows[0]["settings"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("nested settings object did not survive -o json: %s", plain)
+	}
+	tools, ok := settings["tools"].([]interface{})
+	if !ok || len(tools) != 4 {
+		t.Fatalf("expected four unprojected tools, got %v: %s", settings["tools"], plain)
+	}
+}
+
 func TestBodyFieldTypeCoversCommonShapes(t *testing.T) {
 	doc, err := loadOpenAPIDocument([]byte(`{
   "openapi": "3.1.0",
@@ -591,6 +1170,9 @@ func TestBodyFieldTypeCoversCommonShapes(t *testing.T) {
                   "metadata": {"type": "object", "additionalProperties": {"type": "string"}},
                   "metadata_any": {"type": "object", "additionalProperties": true},
                   "color": {"type": "string", "enum": ["red", "green", "blue"]},
+                  "from": {"type": "string", "format": "date-time"},
+                  "expires_at": {"anyOf": [{"type": "string", "format": "date-time"}, {"type": "null"}]},
+                  "email": {"type": "string", "format": "email"},
                   "nested": {"type": "object", "properties": {"k": {"type": "string"}}}
                 }
               }
@@ -627,6 +1209,10 @@ func TestBodyFieldTypeCoversCommonShapes(t *testing.T) {
 		"metadata":     "string-map",
 		"metadata_any": "string-map",
 		"color":        "enum-string",
+		"from":         "datetime",
+		// Nullable date-time keeps both behaviours; any other format stays plain.
+		"expires_at": "datetime-nullable",
+		"email":      "string",
 	}
 	for name, typ := range want {
 		if got[name] != typ {
@@ -740,6 +1326,223 @@ func TestGetBodyFieldsUnionsOneOfBranches(t *testing.T) {
 			t.Errorf("field %q: type = %q, want %q", name, got[name], typ)
 		}
 	}
+
+	for _, f := range fields {
+		if f.Name == "strategy" {
+			if !reflect.DeepEqual(f.Enum, []string{"token", "semantic"}) {
+				t.Errorf("strategy enum = %v, want the union of both branches [token semantic]", f.Enum)
+			}
+		}
+	}
+}
+
+func TestGetBodyFieldsUnionsDiscriminatorEnums(t *testing.T) {
+	doc, err := loadOpenAPIDocument([]byte(`{
+  "openapi": "3.1.0",
+  "info": {"title": "Discriminator union", "version": "1"},
+  "paths": {
+    "/tools": {
+      "post": {
+        "operationId": "CreateTool",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {"type": "object", "required": ["type"], "properties": {"type": {"type": "string", "enum": ["function"]}, "status": {"type": "string", "enum": ["live", "draft"]}}},
+                  {"type": "object", "required": ["type"], "properties": {"type": {"type": "string", "enum": ["http"]}, "status": {"type": "string", "enum": ["live", "draft"]}}},
+                  {"type": "object", "required": ["type"], "properties": {"type": {"type": "string", "enum": ["mcp"]}, "status": {"type": "string", "enum": ["live", "draft"]}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("loadOpenAPIDocument: %v", err)
+	}
+
+	schema := doc.Paths.Value("/tools").Post.RequestBody.Value.Content.Get("application/json").Schema.Value
+	fields := getBodyFields(schema)
+
+	byName := map[string]*BodyField{}
+	for _, f := range fields {
+		byName[f.Name] = f
+	}
+
+	typeField := byName["type"]
+	if typeField == nil {
+		t.Fatal("missing field \"type\"")
+	}
+	if typeField.Type != "enum-string" {
+		t.Errorf("type field: type = %q, want enum-string", typeField.Type)
+	}
+	if !reflect.DeepEqual(typeField.Enum, []string{"function", "http", "mcp"}) {
+		t.Errorf("type enum = %v, want [function http mcp] (union across all branches, in branch order)", typeField.Enum)
+	}
+
+	statusField := byName["status"]
+	if statusField == nil {
+		t.Fatal("missing field \"status\"")
+	}
+	if !reflect.DeepEqual(statusField.Enum, []string{"live", "draft"}) {
+		t.Errorf("status enum = %v, want [live draft] (identical branch enums must not duplicate)", statusField.Enum)
+	}
+
+	// The union must be built on a copy: the source branch schemas are shared
+	// $ref components in real specs and must never be widened in place.
+	firstBranch := schema.OneOf[0].Value.Properties["type"].Value
+	if len(firstBranch.Enum) != 1 {
+		t.Errorf("source branch enum was mutated: %v, want [function]", firstBranch.Enum)
+	}
+}
+
+func TestGetBodyFieldsDropsEnumWhenUnionBranchAllowsAnyString(t *testing.T) {
+	doc, err := loadOpenAPIDocument([]byte(`{
+  "openapi": "3.1.0",
+  "info": {"title": "Enum vs plain string", "version": "1"},
+  "paths": {
+    "/things": {
+      "post": {
+        "operationId": "CreateThing",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {"type": "object", "properties": {"mode": {"type": "string", "enum": ["auto"]}}},
+                  {"type": "object", "properties": {"mode": {"type": "string"}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("loadOpenAPIDocument: %v", err)
+	}
+
+	schema := doc.Paths.Value("/things").Post.RequestBody.Value.Content.Get("application/json").Schema.Value
+	fields := getBodyFields(schema)
+
+	for _, f := range fields {
+		if f.Name != "mode" {
+			continue
+		}
+		if f.Type != "string" {
+			t.Errorf("mode field: type = %q, want plain string (one branch accepts any string, so no enum validation)", f.Type)
+		}
+		if len(f.Enum) != 0 {
+			t.Errorf("mode enum = %v, want empty", f.Enum)
+		}
+		return
+	}
+	t.Fatal("missing field \"mode\"")
+}
+
+func TestGetBodyFieldsKeepsFirstBranchOnTypeConflict(t *testing.T) {
+	doc, err := loadOpenAPIDocument([]byte(`{
+  "openapi": "3.1.0",
+  "info": {"title": "Type conflict", "version": "1"},
+  "paths": {
+    "/things": {
+      "post": {
+        "operationId": "CreateThing",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {"type": "object", "properties": {"config": {"type": "string", "enum": ["default"]}}},
+                  {"type": "object", "properties": {"config": {"type": "object", "properties": {"url": {"type": "string"}}}}}
+                ]
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("loadOpenAPIDocument: %v", err)
+	}
+
+	schema := doc.Paths.Value("/things").Post.RequestBody.Value.Content.Get("application/json").Schema.Value
+	fields := getBodyFields(schema)
+
+	for _, f := range fields {
+		if f.Name != "config" {
+			continue
+		}
+		if f.Type != "enum-string" || !reflect.DeepEqual(f.Enum, []string{"default"}) {
+			t.Errorf("config field = (%q, %v), want first-wins (enum-string, [default]) when branch types conflict", f.Type, f.Enum)
+		}
+		return
+	}
+	t.Fatal("missing field \"config\"")
+}
+
+func TestBodyFieldTypeStringUnionUsesJSONOrString(t *testing.T) {
+	doc, err := loadOpenAPIDocument([]byte(`{
+  "openapi": "3.1.0",
+  "info": {"title": "String unions", "version": "1"},
+  "paths": {
+    "/agents": {
+      "post": {
+        "operationId": "CreateAgent",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "model": {"anyOf": [{"type": "string"}, {"type": "object", "properties": {"id": {"type": "string"}}}]},
+                  "input": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "object"}}]},
+                  "config": {"oneOf": [{"type": "object", "properties": {"a": {"type": "string"}}}, {"type": "array", "items": {"type": "object"}}]}
+                }
+              }
+            }
+          }
+        },
+        "responses": {"200": {"description": "ok"}}
+      }
+    }
+  }
+}`))
+	if err != nil {
+		t.Fatalf("loadOpenAPIDocument: %v", err)
+	}
+
+	schema := doc.Paths.Value("/agents").Post.RequestBody.Value.Content.Get("application/json").Schema.Value
+	got := map[string]string{}
+	for _, f := range getBodyFields(schema) {
+		got[f.Name] = f.Type
+	}
+
+	// Unions with a string branch accept a bare string; unions without one stay strict JSON.
+	if got["model"] != "json-or-string" {
+		t.Errorf("model: type = %q, want json-or-string", got["model"])
+	}
+	if got["input"] != "json-or-string" {
+		t.Errorf("input: type = %q, want json-or-string", got["input"])
+	}
+	if got["config"] != "json" {
+		t.Errorf("config (object|array, no string branch): type = %q, want json", got["config"])
+	}
 }
 
 func TestLoadOpenAPIDocumentSupportsNumericExclusiveBounds(t *testing.T) {
@@ -789,7 +1592,1150 @@ func TestLoadOpenAPIDocumentSupportsNumericExclusiveBounds(t *testing.T) {
 	if schema.Min == nil || *schema.Min != 0 {
 		t.Fatalf("expected minimum 0 after normalization, got %#v", schema.Min)
 	}
-	if !schema.ExclusiveMin {
+	if !schema.ExclusiveMin.IsTrue() {
 		t.Fatal("expected exclusiveMinimum=true after normalization")
+	}
+}
+
+func TestProcessAPIRenamesFlagsThatShadowGlobals(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Traces API
+  version: "1"
+tags:
+  - name: Traces
+paths:
+  /v2/traces/search:
+    post:
+      operationId: TracesSearch
+      summary: Search traces
+      tags:
+        - Traces
+      parameters:
+        - in: query
+          name: profile
+          schema:
+            type: string
+        - in: query
+          name: page_token
+          schema:
+            type: string
+        - in: query
+          name: query
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                query:
+                  type: string
+                raw:
+                  type: boolean
+                limit:
+                  type: integer
+      responses:
+        "200":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+	if len(api.Groups) != 1 || len(api.Groups[0].Operations) != 1 {
+		t.Fatalf("expected a single grouped operation, got %+v", api.Groups)
+	}
+	op := api.Groups[0].Operations[0]
+
+	bodyFlags := map[string]string{}
+	for _, field := range op.BodyFields {
+		bodyFlags[field.Name] = field.CLIName
+	}
+	expectedBody := map[string]string{
+		// `query` is not reserved — the global JMESPath flag is `--jmespath`.
+		"query": "query",
+		"raw":   "body-raw",
+		"limit": "limit",
+	}
+	if !reflect.DeepEqual(bodyFlags, expectedBody) {
+		t.Fatalf("body flag names: got %+v, want %+v", bodyFlags, expectedBody)
+	}
+
+	paramFlags := map[string]string{}
+	for _, param := range op.OptionalParams {
+		paramFlags[param.Name] = param.CLIName
+	}
+	expectedParams := map[string]string{
+		"profile":    "param-profile",
+		"page_token": "page-token",
+		// A param and a body field both named `query`: the body field claims
+		// the name first, so the param has to move — registering both would
+		// make pflag panic.
+		"query": "param-query",
+	}
+	if !reflect.DeepEqual(paramFlags, expectedParams) {
+		t.Fatalf("param flag names: got %+v, want %+v", paramFlags, expectedParams)
+	}
+
+	// The renamed param must still be looked up under its new name and sent
+	// under the original wire name.
+	for _, param := range op.OptionalParams {
+		if param.Name == "profile" && param.GoName != "paramParamProfile" {
+			t.Fatalf("renamed param Go name: got %q", param.GoName)
+		}
+	}
+
+	if !strings.Contains(op.Long, "--body-raw") {
+		t.Fatalf("expected the renamed flags to be documented in help, got:\n%s", op.Long)
+	}
+}
+
+func TestReserveGeneratedFlagNamesResolvesParamBodyCollision(t *testing.T) {
+	bodyFields := []*BodyField{{Name: "limit", CLIName: "limit"}}
+	optionalParams := []*Param{{Name: "limit", CLIName: "limit"}}
+
+	renamed := reserveGeneratedFlagNames(bodyFields, optionalParams)
+
+	if bodyFields[0].CLIName != "limit" {
+		t.Fatalf("body field should keep the name it claimed first, got %q", bodyFields[0].CLIName)
+	}
+	if optionalParams[0].CLIName != "param-limit" {
+		t.Fatalf("colliding param should be renamed, got %q", optionalParams[0].CLIName)
+	}
+	if len(renamed) != 1 || renamed[0].To != "param-limit" {
+		t.Fatalf("unexpected rename record: %+v", renamed)
+	}
+}
+
+func TestGeneratedClientURLEscapesPathParamsAndRejectsEmpty(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Path Param API
+  version: "1"
+paths:
+  /v2/agents/{agent_id}:
+    get:
+      operationId: GetAgent
+      summary: Get agent
+      parameters:
+        - in: path
+          name: agent_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+    delete:
+      operationId: DeleteAgent
+      summary: Delete agent
+      parameters:
+        - in: path
+          name: agent_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "204":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+
+	if !api.Imports.Url {
+		t.Fatal("expected Imports.Url to be true when path params are present")
+	}
+
+	rendered := renderCommandTemplate("templates/generated_client.tmpl", api)
+
+	if !strings.Contains(rendered, "neturl \"net/url\"") {
+		t.Fatal("generated client should import net/url when path params are present")
+	}
+
+	// Every path-param substitution must go through neturl.PathEscape so that
+	// crafted IDs like "../../v2/projects" cannot traverse to other endpoints.
+	if !strings.Contains(rendered, "neturl.PathEscape(") {
+		t.Fatal("generated client must URL-escape path parameters with neturl.PathEscape")
+	}
+
+	// Empty path-param values must be rejected client-side so a missing ID
+	// cannot collapse the URL into a collection-level DELETE/GET.
+	if !strings.Contains(rendered, `== ""`) {
+		t.Fatal("generated client must reject empty path parameters")
+	}
+}
+
+func TestProcessAPIRecognizesResourceNamedCollectionWrapper(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Wrapper API
+  version: "1"
+paths:
+  /agents/{agent_key}/schedules:
+    get:
+      operationId: listSchedules
+      parameters:
+        - name: agent_key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  schedules:
+                    type: array
+                    items:
+                      type: object
+`)
+
+	api := ProcessAPI("example", doc)
+	var op *Operation
+	if len(api.Operations) > 0 {
+		op = api.Operations[0]
+	} else if len(api.Groups) > 0 && len(api.Groups[0].Operations) > 0 {
+		op = api.Groups[0].Operations[0]
+	}
+	if op == nil {
+		t.Fatal("expected generated operation")
+	}
+	if !op.IsList {
+		t.Fatal("collection wrapped in a resource-named key should use list formatting")
+	}
+}
+
+func TestProcessAPIDeduplicatesGoNames(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Duplicate operation id API
+  version: "1"
+paths:
+  /evaluators/invoke:
+    post:
+      operationId: InvokeEval
+      responses:
+        "200":
+          description: ok
+  /evals/invoke:
+    post:
+      operationId: InvokeEval
+      responses:
+        "200":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+	seen := map[string]bool{}
+	count := 0
+	for _, op := range api.Operations {
+		if seen[op.GoName] {
+			t.Fatalf("duplicate Go name %q", op.GoName)
+		}
+		seen[op.GoName] = true
+		count++
+	}
+	for _, group := range api.Groups {
+		for _, op := range group.Operations {
+			if seen[op.GoName] {
+				t.Fatalf("duplicate Go name %q", op.GoName)
+			}
+			seen[op.GoName] = true
+			count++
+		}
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 operations, got %d", count)
+	}
+}
+
+func TestProcessAPIReadsCLIHelpSectionFromTagAndOperation(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Sectioned API
+  version: "1"
+tags:
+  - name: Files
+    x-cli-help-section: Storage
+paths:
+  /files:
+    get:
+      operationId: ListFiles
+      summary: List files
+      tags:
+        - Files
+      responses:
+        "200":
+          description: ok
+  /agents:
+    get:
+      operationId: ListAgents
+      summary: List agents
+      tags:
+        - Agents
+      x-cli-help-section: Managed agents
+      responses:
+        "200":
+          description: ok
+  /ping:
+    get:
+      operationId: Ping
+      summary: Ping
+      x-cli-group: ""
+      x-cli-help-section: Utilities
+      responses:
+        "200":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+
+	sections := map[string]string{}
+	for _, group := range api.Groups {
+		sections[group.CLIName] = group.HelpSection
+	}
+	if sections["files"] != "Storage" {
+		t.Fatalf("expected tag section Storage, got %q", sections["files"])
+	}
+	if sections["agents"] != "Managed agents" {
+		t.Fatalf("expected operation override section, got %q", sections["agents"])
+	}
+	if sections["ping"] != "Utilities" {
+		t.Fatalf("expected path-inferred group to carry section, got %q", sections["ping"])
+	}
+}
+
+// TestBuildRevision covers the suffix a dev build carries. Go omits the VCS
+// stamp entirely in a git worktree and under -buildvcs=false, so the empty case
+// is the one that actually shows up, not a theoretical one.
+func TestBuildRevision(t *testing.T) {
+	cases := []struct {
+		name     string
+		settings []debug.BuildSetting
+		want     string
+	}{
+		{"full sha is shortened", []debug.BuildSetting{{Key: "vcs.revision", Value: "1a2b3c4d5e6f7890"}}, "+1a2b3c4"},
+		{"short sha is left alone", []debug.BuildSetting{{Key: "vcs.revision", Value: "1a2b3c"}}, "+1a2b3c"},
+		{"other settings are skipped", []debug.BuildSetting{{Key: "vcs", Value: "git"}, {Key: "vcs.revision", Value: "abcdefgh"}}, "+abcdefg"},
+		{"no stamp", []debug.BuildSetting{{Key: "vcs.modified", Value: "false"}}, ""},
+		{"empty revision", []debug.BuildSetting{{Key: "vcs.revision", Value: ""}}, ""},
+		{"no settings", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := buildRevision(tc.settings); got != tc.want {
+				t.Errorf("buildRevision() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeVersion(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"tagged version loses its v", "v0.4.7", "0.4.7"},
+		{"prerelease is kept whole", "v1.2.3-rc.1", "1.2.3-rc.1"},
+		{"version without a v is left alone", "0.4.7", "0.4.7"},
+		{"go build reports devel", "(devel)", devel},
+		{"no module version at all", "", devel},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeVersion(tc.raw); got != tc.want {
+				t.Errorf("normalizeVersion(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveVersionFrom(t *testing.T) {
+	revision := []debug.BuildSetting{{Key: "vcs.revision", Value: "1a2b3c4d5e6f"}}
+	cases := []struct {
+		name string
+		info *debug.BuildInfo
+		ok   bool
+		want string
+	}{
+		{"no build info", nil, false, devel},
+		{
+			"installed version wins over the revision",
+			&debug.BuildInfo{Main: debug.Module{Version: "v0.5.0"}, Settings: revision},
+			true,
+			"0.5.0",
+		},
+		{
+			"dev build carries the revision",
+			&debug.BuildInfo{Main: debug.Module{Version: "(devel)"}, Settings: revision},
+			true,
+			"devel+1a2b3c4",
+		},
+		{
+			"dev build without a stamp is bare devel",
+			&debug.BuildInfo{Main: debug.Module{Version: "(devel)"}},
+			true,
+			devel,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveVersionFrom(tc.info, tc.ok); got != tc.want {
+				t.Errorf("resolveVersionFrom() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGeneratedClientChecksParamEnumAndFormat(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Param Validation API
+  version: "1"
+paths:
+  /v2/agents/{agent_id}:
+    get:
+      operationId: GetAgent
+      summary: Get agent
+      parameters:
+        - in: path
+          name: agent_id
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: status
+          schema:
+            anyOf:
+              - type: string
+                enum: [active, "archi\"ved"]
+              - type: "null"
+        - in: query
+          name: opaque_cursor
+          x-cli-no-validate: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: ok
+`)
+
+	rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", doc))
+
+	if !strings.Contains(rendered, `bartolocli.NormalizeParam("argument agent-id", paramAgentId, "uuid"`) {
+		t.Errorf("required path param with format: uuid should be checked, got:\n%s", rendered)
+	}
+
+	// The enum sits behind an anyOf/null wrapper, which must be resolved, and
+	// its values are embedded as Go literals so quotes have to be escaped.
+	if !strings.Contains(rendered, `"active", "archi\"ved",`) {
+		t.Errorf("nullable enum values should be carried through escaped, got:\n%s", rendered)
+	}
+
+	// x-cli-no-validate opts a parameter out entirely. Asserting the flag exists
+	// first matters: without it the check below passes for a param that simply
+	// was not rendered.
+	if !strings.Contains(rendered, "opaque-cursor") {
+		t.Fatalf("the opted-out param should still be a flag, got:\n%s", rendered)
+	}
+	if strings.Contains(rendered, `CheckParam("--opaque-cursor"`) {
+		t.Error("x-cli-no-validate should suppress the check")
+	}
+}
+
+func TestGeneratedClientNormalizesDateTimeParams(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Date-time Param API
+  version: "1"
+paths:
+  /v3/traces/facets/{field}:
+    get:
+      operationId: ListFacetValues
+      summary: List facet values
+      parameters:
+        - in: path
+          name: field
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: from
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: to
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: from-time
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: cursor
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+`)
+
+	rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", doc))
+
+	// Required and optional alike.
+	for _, want := range []string{
+		`bartolocli.NormalizeParam("argument from", paramFrom, "date-time"`,
+		`bartolocli.NormalizeParam("--to", paramTo, "date-time"`,
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("date-time param should be normalized, missing %s in:\n%s", want, rendered)
+		}
+	}
+
+	// Each normalization writes back to its own parameter.
+	for _, want := range []string{"paramFrom = normalized", "paramTo = normalized"} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("a normalized value should be written back, missing %q in:\n%s", want, rendered)
+		}
+	}
+
+	// `from` and `from-time` both yield paramFromTime. A temporary by that name
+	// would assign the sibling at function scope — and still compile — sending
+	// from's value under both names. Hence the block.
+	if strings.Contains(rendered, "paramFromTime, err :=") {
+		t.Errorf("the temporary must not take a sibling parameter's name, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, `req = req.AddQuery("from-time", paramFromTime)`) {
+		t.Errorf("a sibling parameter should keep its own value, got:\n%s", rendered)
+	}
+
+	// No format: nothing to normalize, nothing to check.
+	if strings.Contains(rendered, `NormalizeParam("--cursor"`) || strings.Contains(rendered, `CheckParam("--cursor"`) {
+		t.Error("a plain string param should be neither normalized nor checked")
+	}
+}
+
+// Normalization has to beat the URL substitution, or the relative value reaches
+// the server verbatim. The empty check stays ahead of both, for its message.
+func TestPathDateTimeParamNormalizesBeforeTheURLIsBuilt(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Path Date-time API
+  version: "1"
+paths:
+  /events/{at}:
+    get:
+      operationId: GetAt
+      parameters:
+        - {name: at, in: path, required: true, schema: {type: string, format: date-time}}
+      responses:
+        "200":
+          description: ok
+`)
+
+	rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", doc))
+
+	normalize := strings.Index(rendered, `NormalizeParam("argument at"`)
+	substitute := strings.Index(rendered, `strings.Replace(url, "{at}"`)
+	empty := strings.Index(rendered, "cannot be empty")
+
+	if normalize < 0 || substitute < 0 || empty < 0 {
+		t.Fatalf("expected an empty check, a normalization and a substitution, got:\n%s", rendered)
+	}
+	if !(empty < normalize && normalize < substitute) {
+		t.Errorf("want empty check, then normalization, then substitution, got offsets %d/%d/%d in:\n%s", empty, normalize, substitute, rendered)
+	}
+}
+
+func TestDateTimeParamFlagAdvertisesRelativeValues(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Date-time Flag Help API
+  version: "1"
+paths:
+  /v3/logs/facets:
+    get:
+      operationId: ListLogFacets
+      summary: List log facets
+      parameters:
+        - in: query
+          name: to
+          description: Upper bound
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+	if len(api.Groups) != 1 {
+		t.Fatalf("expected the operation to land in one group, got %d", len(api.Groups))
+	}
+	group := api.Groups[0]
+	rendered := renderCommandTemplate("templates/generated_group_commands.tmpl", &CommandsTemplateData{
+		API:        api,
+		Group:      group,
+		Operations: group.Operations,
+		NeedsFmt:   commandFileNeedsFmt(group.Operations),
+	})
+
+	if !strings.Contains(rendered, `bartolocli.WithDateTimeHelp("Upper bound")`) {
+		t.Errorf("date-time flag help should point at the shared suffix, got:\n%s", rendered)
+	}
+}
+
+// The body-flag paragraph advertises relative timestamps, so it must only
+// appear where a field actually normalizes.
+func TestTimestampHelpOnlyWhereAFieldNormalizes(t *testing.T) {
+	const specFmt = `
+openapi: 3.0.3
+info:
+  title: Body Help API
+  version: "1"
+paths:
+  /things:
+    post:
+      operationId: MakeThing
+      summary: Make a thing
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+%s
+      responses:
+        "200":
+          description: ok
+`
+
+	const sentence = "Timestamp fields (`format: date-time`)"
+
+	for _, tc := range []struct {
+		name  string
+		props string
+		want  bool
+	}{
+		{"plain date-time", "                name: {type: string}\n                at: {type: string, format: date-time}", true},
+		{"no timestamp at all", "                name: {type: string}\n                count: {type: integer}", false},
+		{"nullable date-time", "                at: {type: string, format: date-time, nullable: true}", true},
+		// Resolves to a slice flag, which sends elements as typed.
+		{"array of date-times", "                at: {type: array, items: {type: string, format: date-time}}", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(specFmt, tc.props)))
+			if len(api.Groups) != 1 {
+				t.Fatalf("expected one group, got %d", len(api.Groups))
+			}
+			group := api.Groups[0]
+			rendered := renderCommandTemplate("templates/generated_group_commands.tmpl", &CommandsTemplateData{
+				API:        api,
+				Group:      group,
+				Operations: group.Operations,
+				NeedsFmt:   commandFileNeedsFmt(group.Operations),
+			})
+
+			if got := strings.Contains(rendered, sentence); got != tc.want {
+				t.Errorf("advertised relative timestamps = %v, want %v, in:\n%s", got, tc.want, rendered)
+			}
+		})
+	}
+}
+
+// x-cli-no-validate is read as a boolean, not as mere presence, so writing the
+// documented `: true` is what disables the check — and `: false` re-enables it.
+func TestNoValidateExtensionReadsItsValue(t *testing.T) {
+	spec := `
+openapi: 3.0.3
+info:
+  title: Ext API
+  version: "1"
+paths:
+  /things:
+    get:
+      operationId: ListThings
+      parameters:
+        - in: query
+          name: cursor
+          x-cli-no-validate: %s
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: ok
+`
+
+	if rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(spec, "false")))); !strings.Contains(rendered, `NormalizeParam("--cursor"`) {
+		t.Errorf("x-cli-no-validate: false should leave the check in place, got:\n%s", rendered)
+	}
+
+	if rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(spec, "true")))); strings.Contains(rendered, `NormalizeParam("--cursor"`) {
+		t.Errorf("x-cli-no-validate: true should suppress the check, got:\n%s", rendered)
+	}
+}
+
+// date-time is not a stricter-than-API constraint, so it survives the opt-out.
+func TestNoValidateKeepsDateTimeNormalization(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Ext Date-time API
+  version: "1"
+paths:
+  /things:
+    get:
+      operationId: ListThings
+      parameters:
+        - in: query
+          name: from
+          x-cli-no-validate: true
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: kind
+          x-cli-no-validate: true
+          schema:
+            type: string
+            enum: [a, b]
+      responses:
+        "200":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+	rendered := renderCommandTemplate("templates/generated_client.tmpl", api)
+
+	if !strings.Contains(rendered, `NormalizeParam("--from", paramFrom, "date-time"`) {
+		t.Errorf("date-time should still normalize under the opt-out, got:\n%s", rendered)
+	}
+	// The enum it was actually pointed at is still dropped.
+	if strings.Contains(rendered, `NormalizeParam("--kind"`) {
+		t.Errorf("an enum should still be dropped by the opt-out, got:\n%s", rendered)
+	}
+
+	group := api.Groups[0]
+	commands := renderCommandTemplate("templates/generated_group_commands.tmpl", &CommandsTemplateData{
+		API:        api,
+		Group:      group,
+		Operations: group.Operations,
+		NeedsFmt:   commandFileNeedsFmt(group.Operations),
+	})
+	if !strings.Contains(commands, "bartolocli.WithDateTimeHelp") {
+		t.Errorf("the flag help should survive the opt-out too, got:\n%s", commands)
+	}
+}
+
+func TestGeneratedRootCommandsReturnErrors(t *testing.T) {
+	// The path has no group to infer, so the operation stays ungrouped and the
+	// root template actually renders it. `/v2/agents` would not: inferGroupFromPath
+	// skips the version segment and groups it under `agents`, leaving the root
+	// render empty and every assertion below satisfied by the group render.
+	root, group := renderRootAndGroup(t, `
+openapi: 3.0.3
+info:
+  title: Error API
+  version: "1"
+paths:
+  /{id}:
+    get:
+      operationId: GetThing
+      summary: Get a thing
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: detailed
+          in: query
+          schema: {type: boolean}
+      responses:
+        "200":
+          description: ok
+    post:
+      operationId: CreateThing
+      summary: Create a thing
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status:
+                  type: string
+                  enum: [active, archived]
+      responses:
+        "200":
+          description: ok
+  /v2/agents:
+    get:
+      operationId: ListAgents
+      summary: List agents
+      responses:
+        "200":
+          description: ok
+`)
+
+	if !strings.Contains(root, `Use: "get-thing id"`) {
+		t.Fatalf("fixture must render an ungrouped operation into the root template, got:\n%s", root)
+	}
+
+	for name, rendered := range map[string]string{"root": root, "group": group} {
+		// Commands must return their errors so cli/exit.go can tell a usage error
+		// (exit 2) from an operation failure (exit 1). log.Fatal bypasses that.
+		if !strings.Contains(rendered, "RunE: func(cmd *cobra.Command, args []string) error {") {
+			t.Errorf("%s: generated commands should use RunE", name)
+		}
+		if strings.Contains(rendered, "log.Fatal") {
+			t.Errorf("%s: generated commands should not call log.Fatal", name)
+		}
+	}
+
+	// The two blocks below were the copy-paste divergences that motivated
+	// templates/command_partials.tmpl: both were correct in the group template
+	// and silently wrong or missing in the root one.
+	if !strings.Contains(root, `Enum: []string{`) || !strings.Contains(root, `"archived",`) {
+		t.Errorf("root: body-field enums should be wired up, got:\n%s", root)
+	}
+	if !strings.Contains(root, `cmd.Flags().Bool("detailed"`) {
+		t.Errorf("root: an optional boolean parameter should register a Bool flag, got:\n%s", root)
+	}
+}
+
+// renderRootAndGroup renders a spec through both command templates and returns
+// the two outputs separately. Concatenating them lets an assertion meant for one
+// template pass on the other's output, which is exactly the drift these tests
+// exist to catch.
+func renderRootAndGroup(t *testing.T, spec string) (string, string) {
+	t.Helper()
+
+	api := ProcessAPI("example", loadTestSpec(t, spec))
+
+	root := renderCommandTemplate("templates/generated_root_commands.tmpl", &CommandsTemplateData{
+		API:        api,
+		Operations: api.Operations,
+		Waiters:    api.Waiters,
+		NeedsFmt:   commandFileNeedsFmt(api.Operations),
+	})
+
+	var group string
+	for _, g := range api.Groups {
+		group += renderCommandTemplate("templates/generated_group_commands.tmpl", &CommandsTemplateData{
+			API:        api,
+			Group:      g,
+			Operations: g.Operations,
+			NeedsFmt:   commandFileNeedsFmt(g.Operations),
+		})
+	}
+
+	return root, group
+}
+
+func TestRequiredArgsHelp(t *testing.T) {
+	if got := requiredArgsHelp(nil); got != "" {
+		t.Errorf("no params should render nothing, got %q", got)
+	}
+
+	got := requiredArgsHelp([]*Param{
+		{Name: "from", Description: "Lower bound", Format: "date-time"},
+		{Name: "kind", Description: "Which stream", Enum: []string{"traces", "logs"}},
+		{Name: "at", Format: "date-time", Enum: []string{"now", "yesterday"}},
+		{Name: "id", Format: "uuid"},
+	})
+
+	for _, want := range []string{
+		"## Arguments",
+		"- `from` — " + bartolocli.WithDateTimeHelp("Lower bound"),
+		"- `kind` — Which stream (one of: traces, logs)",
+		"- `at` — " + bartolocli.WithDateTimeHelp("(one of: now, yesterday)"),
+		"- `id`",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "`id` —") {
+		t.Errorf("a param with no description should have no dash, got:\n%s", got)
+	}
+}
+
+func TestParamDescriptionIsOneLine(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.0
+info:
+  title: Example
+  version: 1.0.0
+paths:
+  /things/{id}:
+    get:
+      operationId: getThing
+      summary: Get a thing
+      parameters:
+        - in: path
+          name: id
+          required: true
+          description: |-
+            The thing to fetch.
+
+            - a legacy id still works
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+`)
+
+	api := ProcessAPI("example", doc)
+	if len(api.Groups) != 1 || len(api.Groups[0].Operations) != 1 {
+		t.Fatalf("expected 1 grouped operation, got %d groups", len(api.Groups))
+	}
+	op := api.Groups[0].Operations[0]
+	if want := "The thing to fetch. - a legacy id still works"; op.RequiredParams[0].Description != want {
+		t.Errorf("want %q, got %q", want, op.RequiredParams[0].Description)
+	}
+	if strings.Contains(op.Long, "\n- a legacy") {
+		t.Errorf("a paragraph break should not start a second argument, got:\n%s", op.Long)
+	}
+}
+
+// A project written before `table` existed recorded its serialization under the
+// old key; reading it as empty would silently switch the CLI to toon.
+func TestLoadProjectConfigReadsTheLegacyFormatKey(t *testing.T) {
+	oldWD, _ := os.Getwd()
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir tempdir: %v", err)
+	}
+	defer os.Chdir(oldWD)
+
+	if err := os.WriteFile(projectConfigFilename,
+		[]byte(`{"app_name":"demo","env_prefix":"DEMO","default_output_format":"json"}`), 0600); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	config := loadProjectConfig()
+	if config == nil {
+		t.Fatal("expected a project config")
+	}
+	if config.SerializationFormat != "json" {
+		t.Fatalf("expected serialization format json, got %q", config.SerializationFormat)
+	}
+	if config.LegacyDefaultOutputFormat != "" {
+		t.Fatalf("the legacy key must not be written back, got %q", config.LegacyDefaultOutputFormat)
+	}
+}
+
+func TestProcessAPIInfersPaginatedCollectionResponses(t *testing.T) {
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		mediaType  string
+		properties string
+		wantList   bool
+	}{
+		{
+			name:   "POST with a collection key and a pagination sibling",
+			method: "post",
+			path:   "/traces/search",
+			properties: "                  data: {type: array, items: {type: object}}\n" +
+				"                  has_more: {type: boolean}\n",
+			wantList: true,
+		},
+		{
+			name:   "POST with next_page_token instead of has_more",
+			method: "post",
+			path:   "/logs/search",
+			properties: "                  data: {type: array, items: {type: object}}\n" +
+				"                  next_page_token: {type: string}\n",
+			wantList: true,
+		},
+		{
+			name:   "POST with items and count",
+			method: "post",
+			path:   "/webhooks/query",
+			properties: "                  items: {type: array, items: {type: object}}\n" +
+				"                  count: {type: integer}\n",
+			wantList: true,
+		},
+		{
+			name:   "an echoed limit describes the request, not the collection",
+			method: "post",
+			path:   "/widgets/preview",
+			properties: "                  data: {type: array, items: {type: object}}\n" +
+				"                  limit: {type: integer}\n",
+			wantList: false,
+		},
+		{
+			name:       "POST with a collection key but no pagination sibling",
+			method:     "post",
+			path:       "/router/embeddings",
+			properties: "                  data: {type: array, items: {type: object}}\n",
+			wantList:   false,
+		},
+		{
+			name:   "object list marker is not a pagination sibling",
+			method: "post",
+			path:   "/router/rerank",
+			properties: "                  object: {type: string, enum: [list]}\n" +
+				"                  results: {type: array, items: {type: object}}\n",
+			wantList: false,
+		},
+		{
+			name:   "rows the table cannot render do not qualify",
+			method: "post",
+			path:   "/ids/search",
+			properties: "                  data: {type: array, items: {type: string}}\n" +
+				"                  has_more: {type: boolean}\n",
+			wantList: false,
+		},
+		{
+			name:   "pagination without a conventional collection key",
+			method: "post",
+			path:   "/knowledge/search",
+			properties: "                  matches: {type: array, items: {type: object}}\n" +
+				"                  has_more: {type: boolean}\n",
+			wantList: false,
+		},
+		{
+			name:   "a scalar named data does not qualify",
+			method: "post",
+			path:   "/jobs/run",
+			properties: "                  data: {type: string}\n" +
+				"                  has_more: {type: boolean}\n",
+			wantList: false,
+		},
+		{
+			name:       "nested rows stay out of scope",
+			method:     "post",
+			path:       "/traces/query",
+			properties: "                  search: {type: object, properties: {data: {type: array, items: {type: object}}, has_more: {type: boolean}}}\n",
+			wantList:   false,
+		},
+		{
+			name:      "the media type is matched case-insensitively",
+			method:    "post",
+			path:      "/reporting/query",
+			mediaType: "Application/JSON; charset=utf-8",
+			properties: "                  data: {type: array, items: {type: object}}\n" +
+				"                  has_more: {type: boolean}\n",
+			wantList: true,
+		},
+		{
+			name:   "composed row schemas need the annotation",
+			method: "post",
+			path:   "/composed/search",
+			properties: "                  data: {type: array, items: {allOf: [{type: object, properties: {id: {type: string}}}]}}\n" +
+				"                  has_more: {type: boolean}\n",
+			wantList: false,
+		},
+		{
+			name:      "a non-JSON envelope is not inspected",
+			method:    "post",
+			path:      "/exports/search",
+			mediaType: "application/xml",
+			properties: "                  data: {type: array, items: {type: object}}\n" +
+				"                  has_more: {type: boolean}\n",
+			wantList: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mediaType := tt.mediaType
+			if mediaType == "" {
+				mediaType = "application/json"
+			}
+			doc := loadTestSpec(t, fmt.Sprintf(`
+openapi: 3.0.3
+info:
+  title: Paginated API
+  version: "1"
+paths:
+  %s:
+    %s:
+      operationId: testPaginatedInference
+      responses:
+        "200":
+          description: ok
+          content:
+            %s:
+              schema:
+                type: object
+                properties:
+%s`, tt.path, tt.method, mediaType, tt.properties))
+
+			byRoute := operationsByRoute(ProcessAPI("example", doc))
+			op, ok := byRoute[strings.ToUpper(tt.method)+" "+tt.path]
+			if !ok {
+				t.Fatalf("%s %s is missing from the generated CLI", tt.method, tt.path)
+			}
+			if got := op.IsList; got != tt.wantList {
+				t.Fatalf("IsList = %t, want %t", got, tt.wantList)
+			}
+			if op.IsList && len(op.ListFields) != 0 {
+				t.Fatalf("inferred list should declare no columns, got %v", op.ListFields)
+			}
+		})
+	}
+}
+
+func TestProcessAPIExplicitFalseSuppressesPaginatedInference(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Suppressed API
+  version: "1"
+paths:
+  /traces/search:
+    post:
+      operationId: searchTraces
+      x-cli-list: false
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: {type: array, items: {type: object}}
+                  has_more: {type: boolean}
+`)
+
+	op, ok := operationsByRoute(ProcessAPI("example", doc))["POST /traces/search"]
+	if !ok {
+		t.Fatal("POST /traces/search is missing from the generated CLI")
+	}
+	if op.IsList {
+		t.Fatal("x-cli-list: false should suppress paginated inference")
 	}
 }

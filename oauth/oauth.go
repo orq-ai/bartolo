@@ -6,10 +6,10 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/orq-ai/bartolo/cli"
 	"github.com/rs/zerolog"
-	"github.com/spf13/viper"
 	"golang.org/x/oauth2"
 	"gopkg.in/h2non/gentleman.v2/context"
 )
@@ -33,7 +33,8 @@ func GetParams(f func(profile map[string]string) url.Values) func(*config) error
 }
 
 // Extra provides the names of additional parameters to use to store information
-// in user profiles. Use `cli.GetProfile("default")["name"]` to access it.
+// in user profiles. Use `cli.GetProfile()["name"]` to access it, once a
+// profile is in force.
 func Extra(names ...string) func(*config) error {
 	return func(c *config) error {
 		c.extra = names
@@ -53,25 +54,46 @@ func Scopes(scopes ...string) func(*config) error {
 func TokenMiddleware(source oauth2.TokenSource, ctx *context.Context, h context.Handler) {
 	// Setup logger with the current profile.
 	log := ctx.Get("log").(*zerolog.Logger).
-		With().Str("profile", viper.GetString("profile")).Logger()
+		With().Str("profile", cli.ActiveProfileName()).Logger()
 
-	if err := TokenHandler(source, &log, ctx.Request); err != nil {
+	if err := TokenHandler(source, cli.CredentialScope(), &log, ctx.Request); err != nil {
 		h.Error(ctx, err)
 		return
 	}
 }
 
+// endpointParams builds the extra token-endpoint parameters for a request.
+// getParams is the older callback style, kept for internal callers; names are
+// read from the profile.
+func endpointParams(getParams func(map[string]string) url.Values, names []string, profile map[string]string) url.Values {
+	params := url.Values{}
+	if getParams != nil {
+		params = getParams(profile)
+	}
+	for _, name := range names {
+		params.Add(name, profile[name])
+	}
+
+	return params
+}
+
+// credentialScope keys the token cache on everything identifying this
+// credential: with no profile in force, two OAuth configurations behind one
+// server would otherwise share a token bucket.
+func credentialScope(flow, tokenURL, clientID string, scopes []string, params url.Values) string {
+	return cli.CredentialScope(flow, tokenURL, clientID, strings.Join(scopes, " "), params.Encode())
+}
+
 // TokenHandler takes a token source, gets a token, and modifies a request to
-// add the token auth as a header. Uses the CLI cache to store tokens on a per-
-// profile basis between runs.
-func TokenHandler(source oauth2.TokenSource, log *zerolog.Logger, request *http.Request) error {
+// add the token auth as a header. Uses the CLI cache to store tokens under
+// the given scope between runs; build it with credentialScope.
+func TokenHandler(source oauth2.TokenSource, scope string, log *zerolog.Logger, request *http.Request) error {
 	var cached *oauth2.Token
 
-	// Load any existing token from the CLI's cache file.
-	expiresKey := "profiles." + viper.GetString("profile") + ".expires"
-	typeKey := "profiles." + viper.GetString("profile") + ".type"
-	tokenKey := "profiles." + viper.GetString("profile") + ".token"
-	refreshKey := "profiles." + viper.GetString("profile") + ".refresh"
+	expiresKey := "profiles." + scope + ".expires"
+	typeKey := "profiles." + scope + ".type"
+	tokenKey := "profiles." + scope + ".token"
+	refreshKey := "profiles." + scope + ".refresh"
 
 	expiry := cli.Cache.GetTime(expiresKey)
 	if !expiry.IsZero() {

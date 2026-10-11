@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -12,6 +11,8 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"runtime/debug"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	surveycore "github.com/AlecAivazis/survey/v2/core"
 	surveyterminal "github.com/AlecAivazis/survey/v2/terminal"
 	"github.com/getkin/kin-openapi/openapi3"
+	bartolocli "github.com/orq-ai/bartolo/cli"
 	"github.com/orq-ai/bartolo/shorthand"
 	"github.com/spf13/cobra"
 	yamlv3 "gopkg.in/yaml.v3"
@@ -31,7 +33,65 @@ import (
 var templateFS embed.FS
 
 const projectConfigFilename = ".bartolo.json"
-const bartoloVersion = "0.4.3"
+
+// bartoloVersion is the module version this binary was installed with, not a
+// constant anyone has to remember to bump. `go install ...@vX.Y.Z` records the
+// version in the build info, so the git tag is the single source of truth and
+// the reported version cannot drift away from it the way v0.4.4 did (tagged
+// v0.4.4, reported 0.4.3).
+var bartoloVersion = resolveVersion()
+
+// devel is the sentinel for a binary with no recorded module version: `go build`
+// has none to record, so there is no honest number to print. resolveVersionFrom
+// appends the VCS revision when the build carried one.
+const devel = "devel"
+
+func resolveVersion() string {
+	return resolveVersionFrom(debug.ReadBuildInfo())
+}
+
+// resolveVersionFrom is resolveVersion with the one untestable call lifted out,
+// so the branching below is covered by tests rather than by the build method
+// that happens to produce the binary running them.
+func resolveVersionFrom(info *debug.BuildInfo, ok bool) string {
+	if !ok {
+		return devel
+	}
+	version := normalizeVersion(info.Main.Version)
+	if version != devel {
+		return version
+	}
+	// A dev build has no version, but it does have a commit, and this string is
+	// written into every generated .bartolo.json. "devel" alone cannot tell you
+	// which checkout produced a project; "devel+1a2b3c4" can.
+	return devel + buildRevision(info.Settings)
+}
+
+// normalizeVersion turns a module version recorded in the build info into the
+// string bartolo reports. Go writes "(devel)" for a plain `go build`, and an
+// empty string when the binary was not built as a module at all.
+func normalizeVersion(raw string) string {
+	if raw == "" || raw == "(devel)" {
+		return devel
+	}
+	return strings.TrimPrefix(raw, "v")
+}
+
+// buildRevision returns "+<short sha>", or "" when the build carried no VCS
+// stamp — `go build` outside a repository, or with -buildvcs=false.
+func buildRevision(settings []debug.BuildSetting) string {
+	for _, setting := range settings {
+		if setting.Key != "vcs.revision" || setting.Value == "" {
+			continue
+		}
+		revision := setting.Value
+		if len(revision) > 7 {
+			revision = revision[:7]
+		}
+		return "+" + revision
+	}
+	return ""
+}
 
 // OpenAPI vendor extensions are resolved through the helpers in extensions.go,
 // which walk the canonical x-bartolo-* namespace and its legacy x-cli-*/x-mcp-*
@@ -49,12 +109,18 @@ type Param struct {
 	TypeNil     string
 	Style       string
 	Explode     bool
+	Enum        []string
+	Format      string
 }
 
 // Operation describes an OpenAPI operation (GET/POST/PUT/PATCH/DELETE)
 type Operation struct {
-	HandlerName    string
-	GoName         string
+	HandlerName string
+	GoName      string
+	// PublicPrefix is the API-level Go prefix on this operation's generated
+	// function. It lives here so shared template blocks can name the function
+	// without a file-scoped variable, which a `define` cannot see.
+	PublicPrefix   string
 	Use            string
 	Aliases        []string
 	Short          string
@@ -68,11 +134,15 @@ type Operation struct {
 	OptionalParams []*Param
 	MediaType      string
 	Examples       []string
+	BodyExample    string
 	BodyFields     []*BodyField
 	Hidden         bool
 	NeedsResponse  bool
+	IsList         bool
+	ListFields     []string
 	Waiters        []*WaiterParams
 	Group          *CommandGroup
+	HelpSection    string
 	CommandPath    string
 	LeafName       string
 	MCP            *MCPTool
@@ -102,6 +172,7 @@ type CommandGroup struct {
 	Long        string
 	Aliases     []string
 	Hidden      bool
+	HelpSection string
 	Operations  []*Operation
 	Description string
 }
@@ -177,6 +248,7 @@ type Imports struct {
 	Fmt     bool
 	Strings bool
 	Time    bool
+	Url     bool
 }
 
 // ProjectConfig describes local generator metadata written by `init`.
@@ -187,9 +259,13 @@ type ProjectConfig struct {
 	BartoloReplacePath  string `json:"bartolo_replace_path,omitempty"`
 	BartoloVersion      string `json:"bartolo_version,omitempty"`
 	EnvPrefix           string `json:"env_prefix"`
-	DefaultOutputFormat string `json:"default_output_format,omitempty"`
-	APIKeyEnvVar        string `json:"api_key_env_var,omitempty"`
-	LastSpecPath        string `json:"last_spec_path,omitempty"`
+	SerializationFormat string `json:"serialization_format,omitempty"`
+	// LegacyDefaultOutputFormat carries the pre-table meaning of the field so a
+	// project written by an older bartolo does not silently change what it
+	// serializes to. Written back under the current name on the next sync.
+	LegacyDefaultOutputFormat string `json:"default_output_format,omitempty"`
+	APIKeyEnvVar              string `json:"api_key_env_var,omitempty"`
+	LastSpecPath              string `json:"last_spec_path,omitempty"`
 	// Targets records which surfaces the project generates: "cli" and/or "mcp".
 	// When absent (legacy configs), both surfaces are generated. See
 	// defaultTargets / effectiveTargets.
@@ -265,6 +341,7 @@ func (c *ProjectConfig) TargetMCP() bool {
 type AuthDoc struct {
 	Enabled         bool
 	Kind            string
+	EnvPrefix       string
 	EnvVars         []string
 	ProfileCommand  string
 	Summary         string
@@ -389,6 +466,7 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 
 	// Convenience map for operation ID -> operation
 	operationMap := make(map[string]*Operation)
+	usedGoNames := make(map[string]bool)
 	tagDefs := make(map[string]*openapi3.Tag)
 	groupMap := make(map[string]*CommandGroup)
 	groupOrder := make([]string, 0)
@@ -423,7 +501,14 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 		// the path from the CLI, while still allowing MCP tools.
 		pathCLIExcluded := cliIgnored(item.Extensions)
 
-		for method, operation := range item.Operations() {
+		methods := make([]string, 0, len(item.Operations()))
+		for method := range item.Operations() {
+			methods = append(methods, method)
+		}
+		sort.Strings(methods)
+
+		for _, method := range methods {
+			operation := item.Operations()[method]
 			if sharedIgnored(operation.Extensions) {
 				// Ignore this operation everywhere (CLI and MCP).
 				continue
@@ -452,6 +537,20 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				mustDecodeExt(a, &aliases)
 			}
 
+			var listFields []string
+			if fields, ok := extValue(operation.Extensions, extKeyListFields); ok {
+				mustDecodeExt(fields, &listFields)
+			}
+			listExt, hasListOverride := extValue(operation.Extensions, extKeyList)
+			listOverride := extBool(listExt)
+			if hasListOverride && !listOverride && len(listFields) > 0 {
+				panic(fmt.Errorf("%s %s: %s is false but %s declares columns; remove one of them",
+					strings.ToUpper(method), path, "x-bartolo-list", "x-bartolo-list-fields"))
+			}
+			markedList := len(listFields) > 0 || listOverride
+			inferenceDisabled := hasListOverride && !listOverride
+			isList := markedList || (!inferenceDisabled && isInferredList(method, path, operation))
+
 			params := getParams(item, method)
 			requiredParams := getRequiredParams(params)
 			optionalParams := getOptionalParams(params)
@@ -463,7 +562,17 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				description = extStr(d)
 			}
 
-			reqMt, reqSchema, reqExamples, bodyFields := getRequestInfo(operation)
+			reqInfo := getRequestInfo(operation)
+			reqMt, reqSchema, reqExamples, bodyFields := reqInfo.mediaType, reqInfo.summary, reqInfo.examples, reqInfo.bodyFields
+
+			renamedFlags := reserveGeneratedFlagNames(bodyFields, optionalParams)
+			for _, r := range renamedFlags {
+				kind, _ := bartolocli.ReservedFlagName(r.From)
+				if kind == "" {
+					kind = "another flag on this command"
+				}
+				log.Printf("warning: %s %s: --%s collides with %s, exposing it as --%s", method, path, r.From, kind, r.To)
+			}
 
 			var examples []string
 			if len(reqExamples) > 0 {
@@ -506,6 +615,19 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 					"Scalar, nullable scalar (pass `null` for JSON null), enum, repeatable list (`--field a --field b`), " +
 					"and string map (`--field key=value`) fields use typed flags. " +
 					"Nested objects, arrays of objects, and polymorphic unions accept a JSON string (e.g. `--field '{\"k\":1}'`)."
+				// An enum or array date-time keeps its own flag type and is sent
+				// as typed, so the syntax must not be promised there.
+				if slices.ContainsFunc(bodyFields, func(f *BodyField) bool {
+					return f != nil && (f.Type == "datetime" || f.Type == "datetime-nullable")
+				}) {
+					description += " Timestamp fields (`format: date-time`) also accept a bare date or a relative value such as `24h`, `7d` or `now-24h`."
+				}
+			}
+			if len(renamedFlags) > 0 {
+				description += "\n\nRenamed flags (the original names belong to global flags):\n"
+				for _, r := range renamedFlags {
+					description += fmt.Sprintf("- `%s` is `--%s` (not `--%s`)\n", r.Field, r.To, r.From)
+				}
 			}
 
 			method := strings.Title(strings.ToLower(method))
@@ -535,6 +657,15 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				if short == "" {
 					short = leafName
 				}
+			}
+
+			if args := requiredArgsHelp(requiredParams); args != "" {
+				// Cobra prints Long or Short, never both, so a Long that exists
+				// only for this section still has to carry the summary.
+				if description == "" {
+					description = short
+				}
+				description += args
 			}
 
 			use := usage(leafName, requiredParams)
@@ -568,9 +699,17 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				}
 			}
 
+			// Two operations can share an operationId.
+			goName := toGoName(name, true)
+			for suffix := 2; usedGoNames[goName]; suffix++ {
+				goName = toGoName(name, true) + strconv.Itoa(suffix)
+			}
+			usedGoNames[goName] = true
+
 			o := &Operation{
 				HandlerName:    commandPath,
-				GoName:         toGoName(name, true),
+				GoName:         goName,
+				PublicPrefix:   result.PublicGoName,
 				Use:            use,
 				Aliases:        aliases,
 				Short:          short,
@@ -584,9 +723,13 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				OptionalParams: optionalParams,
 				MediaType:      reqMt,
 				Examples:       examples,
+				BodyExample:    reqInfo.exampleBody,
 				BodyFields:     bodyFields,
 				Hidden:         hidden,
+				IsList:         isList,
+				ListFields:     listFields,
 				Group:          group,
+				HelpSection:    extString(operation.Extensions, extKeyHelpSection),
 				CommandPath:    commandPath,
 				LeafName:       leafName,
 				CLIExcluded:    cliExcluded,
@@ -604,6 +747,7 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 			for _, p := range params {
 				if p.In == "path" {
 					result.Imports.Strings = true
+					result.Imports.Url = true
 				}
 			}
 
@@ -696,6 +840,24 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 	return result
 }
 
+// extBool returns the boolean value of an OpenAPI extension. A missing
+// extension is false, so `x-cli-no-validate: false` means what it says rather
+// than being read as mere presence. A present but non-boolean value fails
+// generation like every other malformed extension: a typo that silently
+// disables a flag is the failure mode this generator exists to avoid.
+func extBool(i interface{}) bool {
+	if i == nil {
+		return false
+	}
+	if b, ok := i.(bool); ok {
+		return b
+	}
+
+	var decoded bool
+	mustDecodeExt(i, &decoded)
+	return decoded
+}
+
 // extStr returns the string value of an OpenAPI extension stored as a JSON
 // raw message.
 func extStr(i interface{}) (decoded string) {
@@ -779,6 +941,34 @@ func slug(operationID string) string {
 	return strings.Trim(string(out), "-")
 }
 
+// A required parameter reaches the user as a bare name on the usage line and
+// nowhere else, so its description, format and enum are repeated here. The
+// suffixes compose in the same order the params template applies them.
+func requiredArgsHelp(params []*Param) string {
+	if len(params) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("\n\n## Arguments\n")
+	for _, p := range params {
+		desc := strings.TrimSpace(p.Description)
+		if len(p.Enum) > 0 {
+			desc = strings.TrimSpace(desc + " (one of: " + strings.Join(p.Enum, ", ") + ")")
+		}
+		if p.Format == "date-time" {
+			desc = bartolocli.WithDateTimeHelp(desc)
+		}
+
+		b.WriteString("\n- `" + slug(p.Name) + "`")
+		if desc != "" {
+			b.WriteString(" — " + desc)
+		}
+	}
+
+	return b.String()
+}
+
 func usage(name string, requiredParams []*Param) string {
 	usage := slug(name)
 
@@ -820,6 +1010,7 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 	}
 
 	cliName := slug(groupName)
+	section := ""
 	short := displayNameFromSlug(cliName)
 	long := ""
 	var aliases []string
@@ -846,10 +1037,15 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		if h, ok := extValue(tagDef.Extensions, extKeyHidden); ok {
 			mustDecodeExt(h, &hidden)
 		}
+		section = extString(tagDef.Extensions, extKeyHelpSection)
 	}
 
 	if override := extString(operation.Extensions, extKeyGroup); override != "" {
 		cliName = slug(override)
+	}
+
+	if override := extString(operation.Extensions, extKeyHelpSection); override != "" {
+		section = override
 	}
 
 	return &CommandGroup{
@@ -860,6 +1056,7 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		Long:        escapeString(long),
 		Aliases:     aliases,
 		Hidden:      hidden,
+		HelpSection: section,
 		Description: long,
 	}
 }
@@ -1126,6 +1323,112 @@ func isActionSegment(segment string) bool {
 	}
 }
 
+func isCollectionPath(rawPath string) bool {
+	for _, segment := range strings.Split(strings.Trim(rawPath, "/"), "/") {
+		if strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") {
+			return false
+		}
+	}
+	return true
+}
+
+func forEachSuccessResponseContent(operation *openapi3.Operation, fn func(mediaType string, content *openapi3.MediaType) bool) bool {
+	for code, response := range operation.Responses.Map() {
+		status, err := strconv.Atoi(code)
+		if err != nil || status < 200 || status >= 300 || response == nil || response.Value == nil {
+			continue
+		}
+
+		for mediaType, content := range response.Value.Content {
+			if content == nil {
+				continue
+			}
+			if fn(mediaType, content) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func isCollectionResponse(operation *openapi3.Operation) bool {
+	return forEachSuccessResponseContent(operation, func(_ string, content *openapi3.MediaType) bool {
+		if _, ok := content.Example.([]interface{}); ok {
+			return true
+		}
+		if content.Schema == nil || content.Schema.Value == nil {
+			return false
+		}
+
+		schema := content.Schema.Value
+		if schema.Items != nil {
+			return true
+		}
+		// Any array property counts: wrappers are named after the resource
+		// as often as they are called `data` or `items`.
+		for _, property := range schema.Properties {
+			if property != nil && property.Value != nil && property.Value.Items != nil {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// isPaginatedCollectionResponse reports whether a 2xx JSON response is a page of
+// rows: an array of objects under a conventional collection key, next to a field
+// describing the collection. That last gate separates retrieval from computation,
+// keeping /v2/router/embeddings out. Only immediate properties are read, so an
+// allOf/oneOf envelope needs `x-cli-list` instead.
+func isPaginatedCollectionResponse(operation *openapi3.Operation) bool {
+	return forEachSuccessResponseContent(operation, func(mediaType string, content *openapi3.MediaType) bool {
+		if !isJSONMediaType(mediaType) || content.Schema == nil || content.Schema.Value == nil {
+			return false
+		}
+
+		properties := content.Schema.Value.Properties
+		if !hasObjectArrayProperty(properties, bartolocli.ConventionalCollectionKeys) {
+			return false
+		}
+		for _, key := range bartolocli.PaginationEvidenceKeys {
+			if properties[key] != nil {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+func isJSONMediaType(mediaType string) bool {
+	base, _, _ := strings.Cut(mediaType, ";")
+	// RFC 9110 media type tokens are case-insensitive; specs do write `Application/JSON`.
+	base = strings.ToLower(strings.TrimSpace(base))
+	return base == "application/json" || strings.HasSuffix(base, "+json")
+}
+
+func hasObjectArrayProperty(properties openapi3.Schemas, keys []string) bool {
+	for _, key := range keys {
+		property := properties[key]
+		if property == nil || property.Value == nil || property.Value.Items == nil {
+			continue
+		}
+		// `items: {type: object}` parses with a nil Properties map, so the declared type has to be consulted too.
+		if items := property.Value.Items.Value; items != nil && (items.Type.Is("object") || items.Properties != nil) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func isInferredList(method, path string, operation *openapi3.Operation) bool {
+	if strings.EqualFold(method, "get") && (isCollectionPath(path) || isCollectionResponse(operation)) {
+		return true
+	}
+	return isPaginatedCollectionResponse(operation)
+}
+
 func isVersionToken(segment string) bool {
 	if len(segment) < 2 || segment[0] != 'v' {
 		return false
@@ -1176,6 +1479,23 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 				}
 			}
 
+			// Resolved here, not at render time, so there is nothing to skip further down.
+			var enum []string
+			var format string
+			if t == "string" && p.Value.Schema != nil {
+				noValidate := extBool(extValueOrNil(p.Value.Extensions, extKeyNoValidate))
+				if !noValidate {
+					enum = enumStrings(p.Value.Schema.Value)
+				}
+				if effective, _ := effectiveBodySchema(p.Value.Schema.Value); effective != nil {
+					// date-time is not a stricter-than-API constraint — it only
+					// widens input — so it survives the opt-out.
+					if !noValidate || effective.Format == "date-time" {
+						format = effective.Format
+					}
+				}
+			}
+
 			cliName := slug(p.Value.Name)
 			if name := extString(p.Value.Extensions, extKeyName); name != "" {
 				cliName = name
@@ -1185,6 +1505,10 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 			if d, ok := extValue(p.Value.Extensions, extKeyDescription); ok {
 				description = extStr(d)
 			}
+			// A parameter description reaches the user as one line of flag
+			// usage or one bullet of the Arguments section, so a spec's
+			// paragraph breaks would split the line or start a second bullet.
+			description = strings.Join(strings.Fields(description), " ")
 
 			allParams = append(allParams, &Param{
 				Name:        p.Value.Name,
@@ -1195,6 +1519,8 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 				Required:    p.Value.Required,
 				Type:        t,
 				TypeNil:     tn,
+				Enum:        enum,
+				Format:      format,
 			})
 		}
 	}
@@ -1226,13 +1552,16 @@ func getOptionalParams(allParams []*Param) []*Param {
 	return optional
 }
 
-func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}, []*BodyField) {
-	type requestInfo struct {
-		summary    string
-		examples   []interface{}
-		bodyFields []*BodyField
-	}
+// requestInfo describes the request body of an operation for one media type.
+type requestInfo struct {
+	mediaType   string
+	summary     string
+	examples    []interface{}
+	exampleBody string
+	bodyFields  []*BodyField
+}
 
+func getRequestInfo(op *openapi3.Operation) requestInfo {
 	mts := make(map[string]requestInfo)
 
 	if op.RequestBody != nil && op.RequestBody.Value != nil {
@@ -1250,9 +1579,19 @@ func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}, []*B
 
 			if item.Example != nil {
 				examples = append(examples, item.Example)
-			} else {
-				for _, ex := range item.Examples {
-					if ex.Value != nil {
+			} else if len(item.Examples) > 0 {
+				// Examples is a map, so pick by sorted name rather than
+				// whichever key Go's randomized iteration happens to yield —
+				// otherwise regenerating from an unchanged spec produces a
+				// different example every time.
+				names := make([]string, 0, len(item.Examples))
+				for name := range item.Examples {
+					names = append(names, name)
+				}
+				sort.Strings(names)
+
+				for _, name := range names {
+					if ex := item.Examples[name]; ex != nil && ex.Value != nil && ex.Value.Value != nil {
 						examples = append(examples, ex.Value.Value)
 						break
 					}
@@ -1260,33 +1599,119 @@ func getRequestInfo(op *openapi3.Operation) (string, string, []interface{}, []*B
 			}
 
 			mts[mt] = requestInfo{
-				summary:    summary,
-				examples:   examples,
-				bodyFields: bodyFields,
+				mediaType:   mt,
+				summary:     summary,
+				examples:    examples,
+				exampleBody: buildExampleBody(mt, item),
+				bodyFields:  bodyFields,
 			}
 		}
 	}
 
+	// Walk media types in a stable order for the same reason.
+	mediaTypes := make([]string, 0, len(mts))
+	for mt := range mts {
+		mediaTypes = append(mediaTypes, mt)
+	}
+	sort.Strings(mediaTypes)
+
 	// Prefer JSON.
-	for mt, item := range mts {
+	for _, mt := range mediaTypes {
 		if strings.Contains(mt, "json") {
-			return mt, item.summary, item.examples, item.bodyFields
+			return mts[mt]
 		}
 	}
 
 	// Fall back to YAML next.
-	for mt, item := range mts {
+	for _, mt := range mediaTypes {
 		if strings.Contains(mt, "yaml") {
-			return mt, item.summary, item.examples, item.bodyFields
+			return mts[mt]
 		}
 	}
 
 	// Last resort: return the first we find!
-	for mt, item := range mts {
-		return mt, item.summary, item.examples, item.bodyFields
+	for _, mt := range mediaTypes {
+		return mts[mt]
 	}
 
-	return "", "", nil, nil
+	return requestInfo{}
+}
+
+// renamedFlag records a generated flag that had to be renamed to avoid a
+// collision, so the change can be surfaced in help text and generator output.
+type renamedFlag struct {
+	Field string
+	From  string
+	To    string
+}
+
+// reserveGeneratedFlagNames renames generated flags whose names would collide
+// with a global flag, a cobra built-in, or another flag on the same command.
+//
+// pflag's AddFlagSet skips any flag whose name a command already uses, and
+// cobra merges the root's persistent flags through it. A body field named
+// `profile` therefore does not merely win the long name — it drops the global
+// `--profile` from that command entirely, and a global's shorthand goes with
+// it, so `-o` stops resolving on a command with an `output-format` field.
+// Duplicating a request-body flag such as `--stdin` is worse still: pflag
+// panics when the flag is registered twice.
+//
+// Only optional params and body fields become flags. Required params are
+// positional arguments and keep their names. Body fields are reserved first
+// because the generated command registers them first.
+func reserveGeneratedFlagNames(bodyFields []*BodyField, optionalParams []*Param) []renamedFlag {
+	taken := map[string]bool{}
+	var renamed []renamedFlag
+
+	claim := func(prefix, name string) string {
+		resolved := bartolocli.ResolveGeneratedFlagName(prefix, name)
+		if taken[resolved] {
+			// Two sources want the same flag. Prefix (or further qualify) until
+			// the name is free, since registering it twice would panic.
+			resolved = prefix + "-" + name
+			for i := 2; taken[resolved]; i++ {
+				resolved = fmt.Sprintf("%s-%s-%d", prefix, name, i)
+			}
+		}
+		taken[resolved] = true
+		return resolved
+	}
+
+	// Say why a flag moved, right where the user reads the flag list. The
+	// runtime adds the same note for CLIs generated before this fix; it only
+	// does so when it has to rename, so the note is never duplicated here.
+	note := func(kind, name, from string) string {
+		if _, reserved := bartolocli.ReservedFlagName(from); reserved {
+			return fmt.Sprintf(" (%s %q, renamed to keep the reserved --%s flag available)", kind, name, from)
+		}
+		return fmt.Sprintf(" (%s %q, renamed to avoid a duplicate --%s flag)", kind, name, from)
+	}
+
+	for _, field := range bodyFields {
+		resolved := claim("body", field.CLIName)
+		if resolved != field.CLIName {
+			renamed = append(renamed, renamedFlag{Field: field.Name, From: field.CLIName, To: resolved})
+			description := strings.TrimSpace(field.Description)
+			if description == "" {
+				description = field.Name
+			}
+			field.Description = description + note("body field", field.Name, field.CLIName)
+			field.CLIName = resolved
+			field.GoName = toGoName("body "+resolved, false)
+		}
+	}
+
+	for _, param := range optionalParams {
+		resolved := claim("param", param.CLIName)
+		if resolved != param.CLIName {
+			renamed = append(renamed, renamedFlag{Field: param.Name, From: param.CLIName, To: resolved})
+			param.Description = strings.TrimSpace(param.Description) + note("parameter", param.Name, param.CLIName)
+			param.CLIName = resolved
+			param.GoName = toGoName("param "+resolved, false)
+		}
+	}
+
+	return renamed
 }
 
 func getBodyFields(schema *openapi3.Schema) []*BodyField {
@@ -1350,7 +1775,13 @@ func bodyFieldType(schema *openapi3.Schema) string {
 	effective, nullable := effectiveBodySchema(schema)
 	if effective == nil {
 		// Polymorphic shapes (multi-branch oneOf/anyOf) fall back to a JSON
-		// string flag so users can still drive them from the CLI.
+		// string flag so users can still drive them from the CLI. When one of
+		// the branches is a plain string (e.g. `model: string | object`), use a
+		// flag that accepts a bare string OR JSON, so users don't have to
+		// double-quote scalar values like model IDs.
+		if unionHasStringBranch(schema) {
+			return "json-or-string"
+		}
 		return "json"
 	}
 	if effective.Type == nil {
@@ -1402,10 +1833,52 @@ func bodyFieldType(schema *openapi3.Schema) string {
 	if base == "" {
 		return "json"
 	}
+	if base == "string" && isDateTimeSchema(effective, schema) {
+		// Nullable keeps both: NormalizeDateTime always rejects the "null"
+		// sentinel, so checking it first cannot shadow a timestamp.
+		if nullable {
+			return "datetime-nullable"
+		}
+		return "datetime"
+	}
 	if nullable {
 		return base + "-nullable"
 	}
 	return base
+}
+
+// isDateTimeSchema takes the original too: effectiveBodySchema returns the
+// branch of a single-branch anyOf/oneOf, and the wrapper may hold the `format`.
+func isDateTimeSchema(effective, original *openapi3.Schema) bool {
+	for _, schema := range []*openapi3.Schema{effective, original} {
+		if schema != nil && schema.Format == "date-time" {
+			return true
+		}
+	}
+	return false
+}
+
+// unionHasStringBranch reports whether a multi-branch `oneOf`/`anyOf` schema has
+// at least one branch that resolves to a plain string scalar. Used to decide
+// whether a polymorphic body field should accept a bare string in addition to
+// JSON.
+func unionHasStringBranch(schema *openapi3.Schema) bool {
+	if schema == nil {
+		return false
+	}
+	branches := make([]*openapi3.SchemaRef, 0, len(schema.AnyOf)+len(schema.OneOf))
+	branches = append(branches, schema.AnyOf...)
+	branches = append(branches, schema.OneOf...)
+	for _, br := range branches {
+		if br == nil || br.Value == nil {
+			continue
+		}
+		inner, _ := effectiveBodySchema(br.Value)
+		if scalarType(inner) == "string" {
+			return true
+		}
+	}
+	return false
 }
 
 // mergeAllOf flattens an `allOf`, `oneOf`, or `anyOf` request-body composition
@@ -1413,7 +1886,11 @@ func bodyFieldType(schema *openapi3.Schema) string {
 // branch (host's own properties win on conflict). For `allOf` the Required
 // list is the union of all branches; for `oneOf`/`anyOf` it is the
 // intersection (a field is only universally required if every branch
-// requires it). Returns the schema unchanged when there is nothing to merge.
+// requires it). When the same string-enum property appears in several
+// `oneOf`/`anyOf` branches with different values — the discriminated-union
+// `type`/`strategy` pattern — the merged property carries the union of all
+// branch enums instead of just the first branch's values. Returns the schema
+// unchanged when there is nothing to merge.
 func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 	if schema == nil {
 		return schema
@@ -1427,6 +1904,10 @@ func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 		Properties: openapi3.Schemas{},
 	}
 
+	// Properties collected from the host schema or an `allOf` branch are
+	// authoritative constraints and are never widened by union branches.
+	protected := map[string]struct{}{}
+
 	collectProps := func(src *openapi3.Schema) {
 		if src == nil {
 			return
@@ -1434,6 +1915,35 @@ func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 		for name, ref := range src.Properties {
 			if _, exists := merged.Properties[name]; !exists {
 				merged.Properties[name] = ref
+				protected[name] = struct{}{}
+			}
+		}
+		if src.AdditionalProperties.Schema != nil && merged.AdditionalProperties.Schema == nil {
+			merged.AdditionalProperties.Schema = src.AdditionalProperties.Schema
+		}
+		if src.AdditionalProperties.Has != nil && merged.AdditionalProperties.Has == nil {
+			merged.AdditionalProperties.Has = src.AdditionalProperties.Has
+		}
+	}
+
+	// collectUnionProps is collectProps for `oneOf`/`anyOf` branches: a value
+	// only has to satisfy one branch, so when the same property collides
+	// across branches its string enums are unioned rather than first-wins.
+	collectUnionProps := func(src *openapi3.Schema) {
+		if src == nil {
+			return
+		}
+		for name, ref := range src.Properties {
+			existing, exists := merged.Properties[name]
+			if !exists {
+				merged.Properties[name] = ref
+				continue
+			}
+			if _, ok := protected[name]; ok {
+				continue
+			}
+			if widened := unionEnumSchema(existing, ref); widened != nil {
+				merged.Properties[name] = widened
 			}
 		}
 		if src.AdditionalProperties.Schema != nil && merged.AdditionalProperties.Schema == nil {
@@ -1481,7 +1991,7 @@ func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 		if flat != nil && flat.Type != nil && flat.Type.Is("null") {
 			continue
 		}
-		collectProps(flat)
+		collectUnionProps(flat)
 
 		branchRequired := map[string]struct{}{}
 		if flat != nil {
@@ -1523,20 +2033,95 @@ func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 	return merged
 }
 
+// unionEnumSchema resolves a property collision between two `oneOf`/`anyOf`
+// branches. When both sides are string schemas and the existing one carries
+// an enum, it returns a replacement ref: the union of both enums when the
+// incoming side is also enumerated, or a plain string (enum dropped) when the
+// incoming branch accepts any string — enforcing a partial enum would reject
+// values some branch allows. Returns nil when the existing ref should be kept
+// as-is. The replacement wraps a copy; the source schemas are shared `$ref`
+// components and are never mutated.
+func unionEnumSchema(existing, incoming *openapi3.SchemaRef) *openapi3.SchemaRef {
+	if existing == nil || incoming == nil {
+		return nil
+	}
+	exEff, exNullable := effectiveBodySchema(existing.Value)
+	inEff, inNullable := effectiveBodySchema(incoming.Value)
+	if exEff == nil || inEff == nil {
+		return nil
+	}
+	if exEff.Type == nil || !exEff.Type.Is("string") || inEff.Type == nil || !inEff.Type.Is("string") {
+		return nil
+	}
+	if len(exEff.Enum) == 0 {
+		// Already accepts any string; nothing to widen.
+		return nil
+	}
+
+	clone := *exEff
+	if exNullable || inNullable {
+		clone.Nullable = true
+	}
+	if clone.Description == "" {
+		clone.Description = inEff.Description
+	}
+
+	if len(inEff.Enum) == 0 {
+		clone.Enum = nil
+		return &openapi3.SchemaRef{Value: &clone}
+	}
+
+	seen := map[string]struct{}{}
+	union := make([]interface{}, 0, len(exEff.Enum)+len(inEff.Enum))
+	for _, raw := range exEff.Enum {
+		key := fmt.Sprintf("%T:%v", raw, raw)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		union = append(union, raw)
+	}
+	for _, raw := range inEff.Enum {
+		key := fmt.Sprintf("%T:%v", raw, raw)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		union = append(union, raw)
+	}
+	if len(union) == len(exEff.Enum) {
+		// No new values; keep the existing ref untouched.
+		return nil
+	}
+	clone.Enum = union
+	return &openapi3.SchemaRef{Value: &clone}
+}
+
 func bodyFieldEnum(schema *openapi3.Schema, fieldType string) []string {
 	if fieldType != "enum-string" {
 		return nil
 	}
+
+	return enumStrings(schema)
+}
+
+// enumStrings returns a schema's string enum values, resolving the nullability
+// wrappers first so `anyOf: [{enum: [...]}, {type: null}]` is not mistaken for
+// an unconstrained value. Non-string members are dropped: the generated flags
+// they would constrain are strings.
+func enumStrings(schema *openapi3.Schema) []string {
 	effective, _ := effectiveBodySchema(schema)
 	if effective == nil || len(effective.Enum) == 0 {
 		return nil
 	}
+
 	values := make([]string, 0, len(effective.Enum))
 	for _, raw := range effective.Enum {
 		if s, ok := raw.(string); ok {
 			values = append(values, s)
 		}
 	}
+
 	return values
 }
 
@@ -2020,11 +2605,18 @@ func loadTemplate(name string) []byte {
 	return data
 }
 
-func renderTemplate(name string, funcs template.FuncMap, data interface{}) string {
+func renderTemplate(name string, funcs template.FuncMap, data interface{}, partials ...string) string {
 	templateData := loadTemplate(name)
 	tmpl := template.New(filepath.Base(name))
 	if funcs != nil {
 		tmpl = tmpl.Funcs(funcs)
+	}
+
+	// Same namespace, so the partials' `define` blocks are callable from the named template.
+	for _, partial := range partials {
+		if _, err := tmpl.Parse(string(loadTemplate(partial))); err != nil {
+			panic(err)
+		}
 	}
 
 	parsed, err := tmpl.Parse(string(templateData))
@@ -2053,22 +2645,16 @@ func writeProjectConfig(config *ProjectConfig) {
 
 func loadOpenAPIDocument(data []byte) (*openapi3.T, error) {
 	loader := openapi3.NewLoader()
-	swagger, err := loader.LoadFromData(data)
-	if err == nil {
-		return swagger, nil
+
+	// kin-openapi keeps OpenAPI 3.1 numeric exclusive bounds out of Schema.Min/Max,
+	// so rewrite them to the 3.0 boolean form before loading.
+	if normalized, changed, err := normalizeOpenAPI31Data(data); err == nil && changed {
+		if swagger, err := loader.LoadFromData(normalized); err == nil {
+			return swagger, nil
+		}
 	}
 
-	normalized, changed, normalizeErr := normalizeOpenAPI31Data(data)
-	if normalizeErr != nil || !changed || bytes.Equal(normalized, data) {
-		return nil, err
-	}
-
-	swagger, retryErr := loader.LoadFromData(normalized)
-	if retryErr != nil {
-		return nil, retryErr
-	}
-
-	return swagger, nil
+	return loader.LoadFromData(data)
 }
 
 func normalizeOpenAPI31Data(data []byte) ([]byte, bool, error) {
@@ -2185,6 +2771,11 @@ func loadProjectConfig() *ProjectConfig {
 		return nil
 	}
 
+	if config.SerializationFormat == "" {
+		config.SerializationFormat = config.LegacyDefaultOutputFormat
+	}
+	config.LegacyDefaultOutputFormat = ""
+
 	return &config
 }
 
@@ -2283,24 +2874,29 @@ func promptInterrupted(err error) bool {
 	return err == surveyterminal.InterruptErr
 }
 
-func normalizeOutputFormat(value string) string {
-	if format, ok := parseOutputFormat(value); ok {
-		return format
+// serializationFormats are the values accepted by `--serialization-format`: the
+// generated CLIs' own list, minus `table`, which is a rendering choice and so
+// cannot be what a table falls back to.
+var serializationFormats = withoutTable(bartolocli.OutputFormats)
+
+func withoutTable(formats []string) []string {
+	kept := make([]string, 0, len(formats))
+	for _, format := range formats {
+		if format != "table" {
+			kept = append(kept, format)
+		}
 	}
-	return "json"
+	return kept
 }
 
 func parseOutputFormat(value string) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "json":
-		return "json", true
-	case "yaml":
-		return "yaml", true
-	case "toon":
-		return "toon", true
-	default:
-		return "", false
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	for _, format := range serializationFormats {
+		if normalized == format {
+			return format, true
+		}
 	}
+	return "", false
 }
 
 func isValidEnvVarName(value string) bool {
@@ -2458,7 +3054,7 @@ func printWizardSummary(color bool, config *ProjectConfig) {
 	}
 	fmt.Printf("%s %s\n", wizardAccent(color, "Env prefix:"), config.EnvPrefix)
 	fmt.Printf("%s %s\n", wizardAccent(color, "API key env var:"), config.APIKeyEnvVar)
-	fmt.Printf("%s %s\n", wizardAccent(color, "Default output:"), config.DefaultOutputFormat)
+	fmt.Printf("%s %s\n", wizardAccent(color, "Serializes to:"), config.SerializationFormat)
 	fmt.Printf("%s %s\n", wizardAccent(color, "Targets:"), strings.Join(config.effectiveTargets(), ", "))
 	fmt.Println()
 }
@@ -2525,8 +3121,13 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 	apiKeyEnvVar, _ := cmd.Flags().GetString("api-key-env-var")
 	apiKeyEnvVar = strings.TrimSpace(apiKeyEnvVar)
 
-	defaultFormat, _ := cmd.Flags().GetString("default-format")
-	defaultFormat = normalizeOutputFormat(defaultFormat)
+	serializationFormat, _ := cmd.Flags().GetString("serialization-format")
+	// Reject an unknown format instead of quietly generating a TOON CLI.
+	serializationFormat, ok := parseOutputFormat(serializationFormat)
+	if !ok {
+		rejected, _ := cmd.Flags().GetString("serialization-format")
+		return nil, fmt.Errorf("--serialization-format: %q is not one of [%s]", rejected, strings.Join(serializationFormats, ", "))
+	}
 
 	targetsFlag, _ := cmd.Flags().GetString("targets")
 	var targets []string
@@ -2590,12 +3191,12 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 		}
 		fmt.Println()
 
-		printWizardStep(color, 3, 4, "Output format", "Choose the default rendering style for generated CLIs. Use the arrow keys to move and Enter to confirm.")
-		defaultFormat, err = promptSelect("Default output format", []selectOption{
-			{Value: "json", Label: "json", Description: "Best for agents and automation."},
+		printWizardStep(color, 3, 4, "Serialization format", "List commands render a table on a terminal. Choose what generated CLIs serialize to everywhere else. Use the arrow keys to move and Enter to confirm.")
+		serializationFormat, err = promptSelect("Serialization format", []selectOption{
+			{Value: "json", Label: "json", Description: "What a pipe, a script, or jq expects."},
 			{Value: "yaml", Label: "yaml", Description: "Easy to scan in terminals."},
-			{Value: "toon", Label: "toon", Description: "Human-oriented serialization of data for LLMs."},
-		}, defaultFormat, color)
+			{Value: "toon", Label: "toon", Description: "Compact serialization aimed at LLMs."},
+		}, serializationFormat, color)
 		if err != nil {
 			return nil, err
 		}
@@ -2618,7 +3219,7 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 			BartoloReplacePath:  bartoloReplacePath,
 			BartoloVersion:      bartoloVersion,
 			EnvPrefix:           summaryEnvPrefix,
-			DefaultOutputFormat: defaultFormat,
+			SerializationFormat: serializationFormat,
 			APIKeyEnvVar:        apiKeyEnvVar,
 			Targets:             targets,
 		})
@@ -2658,7 +3259,7 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 		BartoloReplacePath:  bartoloReplacePath,
 		BartoloVersion:      bartoloVersion,
 		EnvPrefix:           envPrefix,
-		DefaultOutputFormat: defaultFormat,
+		SerializationFormat: serializationFormat,
 		APIKeyEnvVar:        apiKeyEnvVar,
 		Targets:             targets,
 	}, nil
@@ -2688,6 +3289,9 @@ func getAuthDocFromProject(api *OpenAPI, project *ProjectConfig) *AuthDoc {
 	}
 
 	doc := getAuthDocFromSpec(api, envPrefix)
+	if doc != nil {
+		doc.EnvPrefix = envPrefix
+	}
 	if doc != nil && apiKeyEnvVar != "" {
 		for i, envVar := range doc.EnvVars {
 			if strings.HasSuffix(envVar, "_API_KEY") {
@@ -2808,7 +3412,7 @@ func buildREADMEExamples(api *OpenAPI) []*READMEExample {
 	examples := []*READMEExample{
 		{
 			Title:       "Check setup",
-			Command:     binary + " --json doctor",
+			Command:     binary + " -o json doctor",
 			Description: "Verify config, auth source, and selected server before making API calls.",
 		},
 		{
@@ -2819,7 +3423,7 @@ func buildREADMEExamples(api *OpenAPI) []*READMEExample {
 		{
 			Title:       "Persist the default output format",
 			Command:     binary + " default-format json",
-			Description: "Write the preferred output format into the CLI config so future commands use it automatically.",
+			Description: "Write the preferred output format into the CLI config so future commands use it automatically. Anything other than `table` turns off the tables that list commands render on a terminal; `default-format table` turns them back on.",
 		},
 	}
 
@@ -2998,7 +3602,7 @@ func writeGeneratedProjectTooling(config *ProjectConfig) {
 	templateData := map[string]string{
 		"CommandName":  config.AppName,
 		"APIKeyEnvVar": config.APIKeyEnvVar,
-		"EnvPrefix":    config.EnvPrefix,
+		"NameEnv":      config.EnvPrefix,
 	}
 
 	writeTemplateFileIfMissing("templates/generated_makefile.tmpl", "Makefile", 0600, templateData)
@@ -3038,6 +3642,15 @@ func resetGeneratedPackage() {
 	}
 }
 
+// commandPartials holds the template blocks every command template shares.
+const commandPartials = "templates/command_partials.tmpl"
+
+// renderCommandTemplate renders a command template with the shared partials in
+// scope.
+func renderCommandTemplate(name string, data interface{}) string {
+	return renderTemplate(name, commandTemplateFuncs(), data, commandPartials)
+}
+
 func commandTemplateFuncs() template.FuncMap {
 	return template.FuncMap{
 		"escapeStr": escapeString,
@@ -3045,6 +3658,7 @@ func commandTemplateFuncs() template.FuncMap {
 		"title":     strings.Title,
 		"rawJSON":   rawJSONLiteral,
 		"snakeName": snakeName,
+		"joinComma": func(values []string) string { return strings.Join(values, ", ") },
 	}
 }
 
@@ -3065,57 +3679,63 @@ func writeGeneratedCommandFiles(api *OpenAPI, shortName string) {
 	// CLI-excluded ops, because generated MCP tool closures call them.
 	writeFormattedFile(
 		filepath.Join("cli", "generated", shortName+"_client.go"),
-		[]byte(renderTemplate("templates/generated_client.tmpl", commandTemplateFuncs(), api)),
+		[]byte(renderCommandTemplate("templates/generated_client.tmpl", api)),
 	)
 	writeFormattedFile(
 		filepath.Join("cli", "generated", "register.go"),
-		[]byte(renderTemplate("templates/generated_register.tmpl", commandTemplateFuncs(), api)),
+		[]byte(renderCommandTemplate("templates/generated_register.tmpl", api)),
 	)
 
 	// CLI command generation only runs when the CLI surface is a target. In
 	// MCP-only mode no root_commands.go / group command files are emitted, and
 	// the register template omits the matching register calls.
 	if api.TargetCLI {
-		// CLI command generation only sees the CLI-visible operations
-		// (x-bartolo-cli-ignore ops are dropped here but survive in the IR above).
-		rootOps := cliVisibleOperations(api.Operations)
-		rootCommands := &CommandsTemplateData{
-			API:        api,
-			Operations: rootOps,
-			Waiters:    api.Waiters,
-			NeedsFmt:   commandFileNeedsFmt(rootOps),
-		}
-		writeFormattedFile(
-			filepath.Join("cli", "generated", "root_commands.go"),
-			[]byte(renderTemplate("templates/generated_root_commands.tmpl", commandTemplateFuncs(), rootCommands)),
-		)
-
-		for _, group := range api.Groups {
-			groupOps := cliVisibleOperations(group.Operations)
-			if len(groupOps) == 0 {
-				// Every operation in this group is CLI-excluded; skip the group
-				// command file entirely so we don't emit an empty group command.
-				// The register template guards the matching register call.
-				continue
-			}
-			groupData := &CommandsTemplateData{
-				API:        api,
-				Group:      group,
-				Operations: groupOps,
-				NeedsFmt:   commandFileNeedsFmt(groupOps),
-			}
-			filename := filepath.Join("cli", "generated", slug(group.CLIName)+"_commands.go")
-			writeFormattedFile(
-				filename,
-				[]byte(renderTemplate("templates/generated_group_commands.tmpl", commandTemplateFuncs(), groupData)),
-			)
-		}
+		writeGeneratedCLICommandFiles(api)
 	}
 
 	if api.HasMCPTools() {
 		writeFormattedFile(
 			filepath.Join("cli", "generated", "mcp_tools.go"),
-			[]byte(renderTemplate("templates/generated_mcp.tmpl", commandTemplateFuncs(), buildMCPTemplateData(api))),
+			[]byte(renderCommandTemplate("templates/generated_mcp.tmpl", buildMCPTemplateData(api))),
+		)
+	}
+}
+
+// writeGeneratedCLICommandFiles renders root_commands.go and one file per
+// command group. It only sees CLI-visible operations: x-bartolo-cli-ignore ops
+// are dropped here but survive in the IR, because MCP tools call their client
+// funcs.
+func writeGeneratedCLICommandFiles(api *OpenAPI) {
+	rootOps := cliVisibleOperations(api.Operations)
+	rootCommands := &CommandsTemplateData{
+		API:        api,
+		Operations: rootOps,
+		Waiters:    api.Waiters,
+		NeedsFmt:   commandFileNeedsFmt(rootOps),
+	}
+	writeFormattedFile(
+		filepath.Join("cli", "generated", "root_commands.go"),
+		[]byte(renderCommandTemplate("templates/generated_root_commands.tmpl", rootCommands)),
+	)
+
+	for _, group := range api.Groups {
+		groupOps := cliVisibleOperations(group.Operations)
+		if len(groupOps) == 0 {
+			// Every operation in this group is CLI-excluded; skip the group
+			// command file entirely so we don't emit an empty group command.
+			// The register template guards the matching register call.
+			continue
+		}
+		groupData := &CommandsTemplateData{
+			API:        api,
+			Group:      group,
+			Operations: groupOps,
+			NeedsFmt:   commandFileNeedsFmt(groupOps),
+		}
+		filename := filepath.Join("cli", "generated", slug(group.CLIName)+"_commands.go")
+		writeFormattedFile(
+			filename,
+			[]byte(renderCommandTemplate("templates/generated_group_commands.tmpl", groupData)),
 		)
 	}
 }
@@ -3153,7 +3773,7 @@ func writeProjectScaffold(config *ProjectConfig, overwrite bool) error {
 		"NameEnv":             config.EnvPrefix,
 		"ModulePath":          config.ModulePath,
 		"APIKeyEnvVar":        config.APIKeyEnvVar,
-		"DefaultOutputFormat": config.DefaultOutputFormat,
+		"SerializationFormat": config.SerializationFormat,
 	}
 
 	sb := renderTemplate("templates/main.tmpl", nil, templateData)
@@ -3260,7 +3880,7 @@ func main() {
 	initCommand.Flags().String("module-path", "", "Go module path for the generated CLI project")
 	initCommand.Flags().String("bartolo-path", "", "Local path to the bartolo repo to use via go.mod replace during development")
 	initCommand.Flags().String("api-key-env-var", "", "Custom API key environment variable for generated CLIs")
-	initCommand.Flags().String("default-format", "json", "Default output format for generated CLIs [json, yaml, toon]")
+	initCommand.Flags().String("serialization-format", "json", fmt.Sprintf("What generated CLIs serialize to when not rendering a table [%s]", strings.Join(serializationFormats, ", ")))
 	initCommand.Flags().String("targets", "", "Comma-separated generation targets [cli, mcp] (default: both)")
 	root.AddCommand(initCommand)
 

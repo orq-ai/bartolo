@@ -3,13 +3,16 @@ package cli
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	colorable "github.com/mattn/go-colorable"
@@ -50,24 +53,30 @@ var tty bool
 
 // Config is used to pass settings to the CLI.
 type Config struct {
-	AppName             string
-	EnvPrefix           string
-	APIKeyEnvVar        string
-	DefaultOutputFormat string
-	Version             string
+	AppName      string
+	EnvPrefix    string
+	APIKeyEnvVar string
+
+	// SerializationFormat is what the CLI encodes with when it is not rendering
+	// a table: a piped or redirected run, a non-list command, a payload that is
+	// not a collection. One of OutputFormats except `table`, which cannot stand
+	// in for itself; anything else falls back to toon. `--output-format` always
+	// starts at `table`, so a user opts out of tables with `default-format`.
+	SerializationFormat string
+
+	Version string
 }
 
 // Init will set up the CLI.
 func Init(config *Config) {
-	initConfig(config.AppName, config.EnvPrefix, config.APIKeyEnvVar, config.DefaultOutputFormat)
+	initConfig(config.AppName, config.EnvPrefix, config.APIKeyEnvVar, config.SerializationFormat)
 	initCache(config.AppName)
 	authInitialized = false
+	resolvedOutputFormat = ""
 
-	// Determine if we are using a TTY or colored output is forced-on.
-	tty = false
-	if isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()) || viper.GetBool("color") {
-		tty = true
-	}
+	// Forced color makes tty true on a pipe, so tables key off terminal alone.
+	stdoutIsTerminal := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
+	tty = stdoutIsTerminal || viper.GetBool("color")
 
 	if viper.GetBool("nocolor") {
 		// If forced off, ignore all of the above!
@@ -87,29 +96,35 @@ func Init(config *Config) {
 	UserAgentMiddleware()
 	LogMiddleware(tty)
 
-	Formatter = NewDefaultFormatter(tty)
+	Formatter = NewDefaultFormatter(tty, stdoutIsTerminal)
 
 	Root = &cobra.Command{
 		Use:     filepath.Base(os.Args[0]),
 		Version: config.Version,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if viper.GetBool("json") {
-				viper.Set("output-format", "json")
+			// An unknown output format used to be ignored, which silently
+			// produced JSON while reporting success. Reject it here so the
+			// flag behaves like any other enumerated one, whether the value
+			// came from the flag, the environment, or a config file.
+			if dotEnvErr != nil {
+				return NewValueError(dotEnvErr)
+			}
+
+			format := viper.GetString("output-format")
+			normalized, ok := parseOutputFormat(format)
+			if !ok {
+				return NewValueError(fmt.Errorf("--output-format: %q is not one of [%s]", format, outputFormatList()))
+			}
+			resolvedOutputFormat = normalized
+
+			if err := applyServerSetting(cmd); err != nil {
+				return err
 			}
 
 			if viper.GetBool("verbose") {
 				zerolog.SetGlobalLevel(zerolog.DebugLevel)
 
-				settings := viper.AllSettings()
-
-				// Hide any secret values
-				for k := range settings {
-					if strings.Contains(k, "secret") || strings.Contains(k, "password") || strings.Contains(k, "token") {
-						settings[k] = "**HIDDEN**"
-					}
-				}
-
-				log.Info().Fields(settings).Msg("Configuration")
+				log.Info().Fields(redactSettings(viper.AllSettings())).Msg("Configuration")
 			}
 
 			if PreRun != nil {
@@ -122,7 +137,14 @@ func Init(config *Config) {
 		},
 	}
 
-	Root.SetOutput(Stdout)
+	Root.SetOut(Stdout)
+	Root.SetErr(Stderr)
+
+	// Flag parsing failures are usage errors. Setting this on the root is
+	// enough: cobra walks up to the nearest parent that has one.
+	Root.SetFlagErrorFunc(func(cmd *cobra.Command, err error) error {
+		return NewUsageError(err)
+	})
 
 	Root.AddCommand(&cobra.Command{
 		Use:   "help-config",
@@ -140,11 +162,15 @@ func Init(config *Config) {
 	initAgentCommands()
 
 	AddGlobalFlag("verbose", "", "Enable verbose log output", false)
-	AddGlobalFlag("output-format", "o", "Output format [json, yaml, toon]", outputFormatOrDefault(config.DefaultOutputFormat))
-	AddGlobalFlag("json", "", "Alias for --output-format json", false)
-	AddGlobalFlag("query", "q", "Filter / project results using JMESPath", "")
-	AddGlobalFlag("raw", "", "Output result of query as raw rather than an escaped JSON string or list", false)
-	AddGlobalFlag("server", "", "Override server URL", "")
+	AddGlobalFlag("output-format", "o", fmt.Sprintf("Output format [%s]", outputFormatList()), tableFormat)
+	AddGlobalFlag("columns", "", "Comma-separated columns to show in table output", "")
+	// Named `jmespath` rather than `query` so it cannot collide with the many
+	// endpoints whose request body or query string has a `query` field. The old
+	// `-q` shorthand went with it: it abbreviated a name that no longer exists.
+	AddGlobalFlag("jmespath", "j", "Filter / project results using JMESPath", "")
+	// Unwraps a scalar result for the shell rather than choosing a format, and suppresses the table; the serialization then comes from --output-format.
+	AddGlobalFlag("raw", "", "Print a string or scalar list result unquoted, one item per line, instead of serializing it", false)
+	AddGlobalFlag("server", "", "API base URL, e.g. https://api.example.com", "")
 }
 
 func userHomeDir() string {
@@ -158,16 +184,119 @@ func userHomeDir() string {
 	return os.Getenv("HOME")
 }
 
-func loadDotEnvFiles() {
-	for _, filename := range []string{".env", ".env.local"} {
-		loadDotEnvFile(filename)
+// dotEnvOrigins lets the credential chain name the file a variable came from.
+var dotEnvOrigins = map[string]string{}
+
+// DotEnvOrigin returns the dotenv file a variable was loaded from, or "".
+func DotEnvOrigin(key string) string {
+	return dotEnvOrigins[key]
+}
+
+// dotEnvErr defers an unusable $PREFIX_DOTENV to the first command run, where it
+// can be a usage error rather than a panic in Init.
+var dotEnvErr error
+
+// dotEnvEnabled reports whether $PREFIX_DOTENV turns dotenv loading on. Off by
+// default: the directory you stand in must not decide which credentials you
+// send. No config-file key, deliberately — persisting it brings that back.
+// A non-boolean value is an error, not an "off": this switch gates credentials.
+func dotEnvEnabled(envPrefix string) (bool, error) {
+	value := strings.TrimSpace(os.Getenv(envPrefix + "_DOTENV"))
+	if value == "" {
+		return false, nil
+	}
+
+	enabled, err := strconv.ParseBool(value)
+	if err != nil {
+		return false, fmt.Errorf("%s_DOTENV: %q is not a boolean; use 1 or 0", envPrefix, value)
+	}
+
+	return enabled, nil
+}
+
+// dotEnvFiles are read in order, and a set variable is never overwritten, so
+// the first file to define a key wins.
+var dotEnvFiles = []string{".env", ".env.local"}
+
+// loadDotEnvFiles imports only envPrefix-prefixed keys and apiKeyEnvVar, never
+// the unrelated secrets an application .env also holds.
+func loadDotEnvFiles(envPrefix, apiKeyEnvVar string) {
+	// Origins describe the current load, not a previous one.
+	dotEnvOrigins = map[string]string{}
+
+	enabled, err := dotEnvEnabled(envPrefix)
+	dotEnvErr = err
+	if err != nil || !enabled {
+		return
+	}
+
+	for _, filename := range dotEnvFiles {
+		err := scanDotEnvFile(filename, func(key, value string) {
+			if !dotEnvWanted(key, envPrefix, apiKeyEnvVar) {
+				return
+			}
+
+			// LookupEnv, not Getenv: `export KEY=` blanks a credential on purpose.
+			if _, set := os.LookupEnv(key); set {
+				return
+			}
+
+			if os.Setenv(key, value) == nil {
+				dotEnvOrigins[key] = filename
+			}
+		})
+		if err != nil {
+			fmt.Fprintf(Stderr, "warning: %s was not fully read (%v); some variables were not imported\n", filename, err)
+		}
 	}
 }
 
-func loadDotEnvFile(filename string) {
+// DotEnvCandidate reports a dotenv file defining one of keys while loading is
+// off, so a missing-credential error can name the file and the switch. It reads
+// nothing into the environment, and returns "" when loading is already on.
+func DotEnvCandidate(keys []string) (file string, key string) {
+	enabled, err := dotEnvEnabled(viper.GetString("env-prefix"))
+	if enabled || err != nil {
+		return "", ""
+	}
+
+	wanted := make(map[string]bool, len(keys))
+	for _, candidate := range keys {
+		if _, set := os.LookupEnv(candidate); !set {
+			wanted[candidate] = true
+		}
+	}
+
+	for _, filename := range dotEnvFiles {
+		// Errors stay quiet: nobody asked to read this file.
+		_ = scanDotEnvFile(filename, func(candidate, value string) {
+			if file == "" && value != "" && wanted[candidate] {
+				file, key = filename, candidate
+			}
+		})
+		if file != "" {
+			return file, key
+		}
+	}
+
+	return "", ""
+}
+
+func dotEnvWanted(key, envPrefix, apiKeyEnvVar string) bool {
+	return (envPrefix != "" && strings.HasPrefix(key, envPrefix+"_")) ||
+		(apiKeyEnvVar != "" && key == apiKeyEnvVar)
+}
+
+// scanDotEnvFile hands every key/value pair to visit. An absent file is not an
+// error; a scan that stops early is, since a line over bufio.Scanner's 64KB
+// limit ends it exactly like EOF and would silently drop the keys below it.
+func scanDotEnvFile(filename string, visit func(key, value string)) error {
 	file, err := os.Open(filename)
 	if err != nil {
-		return
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
 	}
 	defer file.Close()
 
@@ -189,7 +318,7 @@ func loadDotEnvFile(filename string) {
 
 		key = strings.TrimSpace(key)
 		value = strings.TrimSpace(value)
-		if key == "" || os.Getenv(key) != "" {
+		if key == "" {
 			continue
 		}
 
@@ -199,17 +328,20 @@ func loadDotEnvFile(filename string) {
 			}
 		}
 
-		_ = os.Setenv(key, value)
+		visit(key, value)
 	}
+
+	return scanner.Err()
 }
 
-func initConfig(appName, envPrefix, apiKeyEnvVar, defaultOutputFormat string) {
+func initConfig(appName, envPrefix, apiKeyEnvVar, serializationFormat string) {
 	// One-time setup to ensure the path exists so we can write files into it
 	// later as needed.
 	configDir := path.Join(userHomeDir(), "."+appName)
 	if err := os.MkdirAll(configDir, 0700); err != nil {
 		panic(err)
 	}
+	narrowConfigDirPermissions(configDir)
 
 	// Load configuration from file(s) if provided.
 	viper.SetConfigName("config")
@@ -217,9 +349,8 @@ func initConfig(appName, envPrefix, apiKeyEnvVar, defaultOutputFormat string) {
 	viper.AddConfigPath("$HOME/." + appName + "/")
 	viper.ReadInConfig()
 
-	// Load local dotenv files before environment variables so project-level
-	// credentials work without requiring an explicit `export`.
-	loadDotEnvFiles()
+	// Opt-in only, and before viper binds the environment; a set variable wins.
+	loadDotEnvFiles(envPrefix, apiKeyEnvVar)
 
 	// Load configuration from the environment if provided. Flags below get
 	// transformed automatically, e.g. `client-id` -> `PREFIX_CLIENT_ID`.
@@ -232,45 +363,163 @@ func initConfig(appName, envPrefix, apiKeyEnvVar, defaultOutputFormat string) {
 	viper.Set("env-prefix", envPrefix)
 	viper.Set("config-directory", configDir)
 	viper.SetDefault("server-index", 0)
+
+	migrateLegacyServerConfig(configDir)
 	viper.SetDefault("api-key-env-var", apiKeyEnvVar)
-	viper.SetDefault("output-format", outputFormatOrDefault(defaultOutputFormat))
+	viper.SetDefault("output-format", tableFormat)
+	configuredSerialization = serializationOrDefault(serializationFormat)
+}
+
+// OutputFormats are the values accepted by `--output-format` / `-o` and by the
+// `default-format` command. Help text and error messages are built from this
+// list so they cannot drift apart from what is actually accepted, and the
+// generator reads the same list so it cannot offer a `--default-format` that
+// the generated CLI would then reject.
+var OutputFormats = []string{"json", "yaml", "toon", tableFormat}
+
+func outputFormatList() string {
+	return strings.Join(OutputFormats, ", ")
+}
+
+// resolvedOutputFormat is the format for the command being run. It is process
+// state, not configuration: writing the normalized value back to
+// `output-format` would make it a viper override, which outranks the flag, so
+// the first command run in a process would pin the format for every later one.
+var resolvedOutputFormat string
+
+// configuredSerialization is Config.SerializationFormat, resolved once by Init.
+var configuredSerialization = tableFallbackFormat
+
+// OutputFormat is the format the running command should produce. A custom
+// command that renders its own output reads this rather than viper, which
+// still holds the raw, unnormalized value.
+func OutputFormat() string {
+	if resolvedOutputFormat != "" {
+		return resolvedOutputFormat
+	}
+
+	return outputFormatOrDefault(viper.GetString("output-format"))
+}
+
+// SetOutputFormat forces the format for one render, returning the func that
+// puts the command's own format back. A custom command that wants a table from
+// a CLI whose user pinned a serialization needs this; nothing else should.
+func SetOutputFormat(format string) (func(), error) {
+	normalized, ok := parseOutputFormat(format)
+	if !ok {
+		return nil, NewValueError(fmt.Errorf("--output-format: %q is not one of [%s]", format, outputFormatList()))
+	}
+
+	previous := resolvedOutputFormat
+	resolvedOutputFormat = normalized
+	return func() { resolvedOutputFormat = previous }, nil
+}
+
+// narrowConfigDirPermissions closes a credential file left world-readable by an
+// older version. writeFileAtomic creates 0600, but a file written before that,
+// or by another tool sharing the directory, keeps its mode forever because
+// nothing ever chmods it. MkdirAll leaves an existing directory's mode alone.
+func narrowConfigDirPermissions(configDir string) {
+	narrowPermissions(configDir, 0700)
+
+	// Every regular file, not a list of names: a guessed list misses backups,
+	// viper's other extensions, and writeFileAtomic's own temp file.
+	entries, err := os.ReadDir(configDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		// Type() is the dirent's own kind, so a symlink is skipped, not followed.
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		narrowPermissions(path.Join(configDir, entry.Name()), 0600)
+	}
+}
+
+func narrowPermissions(name string, want os.FileMode) {
+	// Lstat, not Stat: Chmod follows a symlink out of the directory.
+	info, err := os.Lstat(name)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			// Not absent: nothing here can say whether the file is private.
+			fmt.Fprintf(Stderr, "warning: could not check the permissions on %s: %v\n", name, err)
+		}
+		return
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return
+	}
+
+	// Only ever clear bits: a file already stricter than want is left alone.
+	perm := info.Mode().Perm()
+	if perm&^want == 0 {
+		return
+	}
+
+	if err := os.Chmod(name, perm&want); err != nil {
+		fmt.Fprintf(Stderr, "warning: %s is readable by other users and could not be narrowed: %v\n", name, err)
+	}
 }
 
 func outputFormatOrDefault(value string) string {
 	if format, ok := parseOutputFormat(value); ok {
 		return format
 	}
-	return "json"
+	return tableFormat
 }
 
 func parseOutputFormat(value string) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "json":
-		return "json", true
-	case "yaml":
-		return "yaml", true
-	case "toon":
-		return "toon", true
-	default:
-		return "", false
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	for _, format := range OutputFormats {
+		if normalized == format {
+			return format, true
+		}
 	}
+	return "", false
+}
+
+// applyServerSetting normalizes the configured server URL in place. Same
+// reasoning as the output format above: an unusable `--server`,
+// `<PREFIX>_SERVER` or config value should fail here rather than as a transport
+// error much later.
+func applyServerSetting(cmd *cobra.Command) error {
+	server := strings.TrimSpace(viper.GetString("server"))
+	if server == "" {
+		return nil
+	}
+
+	normalized, err := normalizeServerURLWarn(server)
+	if err != nil {
+		// Naming --server unconditionally misdirects a user who set <PREFIX>_SERVER.
+		label := "server URL"
+		if flag := cmd.Flags().Lookup("server"); flag != nil && flag.Changed {
+			label = "--server"
+		}
+
+		return NewValueError(fmt.Errorf("%s: %w", label, err))
+	}
+
+	viper.Set("server", normalized)
+
+	return nil
 }
 
 func newDefaultFormatCommand() *cobra.Command {
 	return &cobra.Command{
-		Use:   "default-format [json|yaml|toon]",
+		Use:   "default-format [" + strings.Join(OutputFormats, "|") + "]",
 		Short: "Show or persist the default output format",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return Formatter.Format(map[string]interface{}{
-					"output_format": viper.GetString("output-format"),
+					"output_format": OutputFormat(),
 				})
 			}
 
 			next, ok := parseOutputFormat(args[0])
 			if !ok {
-				return fmt.Errorf("unsupported output format %q", args[0])
+				return NewValueError(fmt.Errorf("%q is not one of [%s]", args[0], outputFormatList()))
 			}
 			if err := saveJSONConfig(map[string]interface{}{"output-format": next}); err != nil {
 				return err
@@ -307,25 +556,98 @@ func newCompletionCommand() *cobra.Command {
 	}
 }
 
+// migrateLegacyServerConfig moves a `server set` override written by an older
+// version out of the `server` key and into `server-default`. Rewriting the file
+// is the point: left under `server`, viper serves the value at flag precedence.
+// Any failure leaves the file alone and keeps the old resolution.
+func migrateLegacyServerConfig(configDir string) {
+	filename := path.Join(configDir, "config.json")
+
+	data, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return
+	}
+
+	config := map[string]interface{}{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return
+	}
+
+	if _, present := config["server"]; !present {
+		return
+	}
+	legacy, _ := config["server"].(string)
+
+	delete(config, "server")
+	if existing, _ := config["server-default"].(string); strings.TrimSpace(existing) == "" && strings.TrimSpace(legacy) != "" {
+		config["server-default"] = legacy
+	}
+
+	if err := writeJSONFile(filename, config); err != nil {
+		return
+	}
+
+	viper.ReadInConfig()
+}
+
 func saveJSONConfig(values map[string]interface{}) error {
 	filename := path.Join(viper.GetString("config-directory"), "config.json")
 	merged := map[string]interface{}{}
 
 	if data, err := ioutil.ReadFile(filename); err == nil {
-		_ = json.Unmarshal(data, &merged)
+		if err := json.Unmarshal(data, &merged); err != nil {
+			return fmt.Errorf("config.json is not valid JSON; fix or delete it: %w", err)
+		}
 	}
 
 	for key, value := range values {
+		if value == nil {
+			delete(merged, key)
+			viper.Set(key, "")
+			continue
+		}
+
 		merged[key] = value
 		viper.Set(key, value)
 	}
 
-	data, err := json.MarshalIndent(merged, "", "  ")
+	return writeJSONFile(filename, merged)
+}
+
+// writeJSONFile atomically replaces filename with value as indented JSON.
+func writeJSONFile(filename string, value interface{}) error {
+	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
 	}
 
-	return ioutil.WriteFile(filename, data, 0600)
+	return writeFileAtomic(filename, func(tmp string) error {
+		return ioutil.WriteFile(tmp, data, 0600)
+	})
+}
+
+// writeFileAtomic fills a sibling temp file, created 0600 from birth so a
+// permissive umask never opens a readable window, then renames it into place.
+// A failure discards it, leaving filename untouched rather than half-written.
+func writeFileAtomic(filename string, write func(tmp string) error) error {
+	dir := filepath.Dir(filename)
+	ext := filepath.Ext(filename)
+	base := strings.TrimSuffix(filepath.Base(filename), ext)
+	f, err := os.CreateTemp(dir, base+"-*"+ext)
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	f.Close()
+	if err := write(tmp); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, filename); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func initCache(appName string) {
@@ -364,6 +686,16 @@ $flags
 
 Environment variables must be capitalized, prefixed with ¬$APP¬, and words are separated by an underscore rather than a dash. For example, setting ¬$APP_VERBOSE=1¬ is equivalent to passing ¬--verbose¬ to the command.
 
+### Dotenv files
+
+The CLI does **not** read ¬.env¬ or ¬.env.local¬ by default. Loading credentials out of the working directory means the directory you are standing in decides which credentials you send, which is a job for your shell or a tool like ¬direnv¬, not for this CLI.
+
+Run a command with ¬$PREFIX_DOTENV=1¬ to turn it on for that command. It is an ordinary environment variable, so exporting it enables dotenv for the rest of the shell session; prefer ¬$PREFIX_DOTENV=1 $app ...¬. A value that is not a boolean is an error rather than a silent "off". There is no configuration-file equivalent on purpose: a persisted setting would bring the surprise back everywhere. When it is enabled:
+
+- Only ¬$PREFIX_¬-prefixed variables and the configured API key variable are imported. That covers settings as well as credentials — ¬$PREFIX_SERVER¬ in a ¬.env¬ retargets the CLI — but the rest of an application ¬.env¬, ¬OPENAI_API_KEY¬ and ¬DATABASE_URL¬ and friends, is ignored.
+- A variable already present in the environment wins, including one exported as empty; a file never overwrites an ¬export¬.
+- For API key and bearer token auth, ¬doctor¬ reports a ¬dotenv¬ auth source and names the file that supplied the key, so a credential from a file is never mistaken for one you exported.
+
 ## Configuration Files
 
 Configuration files can be used to configure the CLI and can be written using JSON or YAML. The CLI searches in your home directory first (e.g. ¬$config-dir/config.json¬) and on Mac/Linux also looks in e.g. ¬/etc/$app/config.json¬. The following is equivalent to passing ¬--verbose¬ to the command:
@@ -385,6 +717,8 @@ Name      | Type   | Description
 `
 
 	help = strings.Replace(help, "¬", "`", -1)
+	// The prefix viper binds, not the app name uppercased: my-cli binds MY_CLI_.
+	help = strings.Replace(help, "$PREFIX", viper.GetString("env-prefix"), -1)
 	help = strings.Replace(help, "$APP", strings.ToUpper(viper.GetString("app-name")), -1)
 	help = strings.Replace(help, "$app", viper.GetString("app-name"), -1)
 	help = strings.Replace(help, "$config-dir", viper.GetString("config-directory"), -1)
@@ -414,14 +748,17 @@ Standard input allows you to send in whatever data is required to make a success
 
 Note: Windows PowerShell and other shells that do not support input redirection via ¬<¬ will need to pipe input instead, for example: ¬cat input.json | my-cli command¬. This may load the entire input file into memory.
 
+Standard input is only read when it can actually supply the body. A redirect from a file is always read, and a pipe is read whenever nothing else supplied the body. When the body already came from ¬--from-file¬, ¬--example¬, shorthand or the generated field flags, a pipe that has no data ready is skipped rather than waited on, so a command never hangs on the open idle stdin that CI runners and process spawners hand their children by default. Pass ¬--stdin¬ to require piped input and wait for it unconditionally.
+
 ## Body Helper Flags
 
 Commands that accept a request body also support:
 
 - ¬--from-file path.json¬ to load the base body from disk.
-- ¬--example¬ to start from the first generated example body.
+- ¬--example¬ to print an example request body and exit without sending a request. It takes precedence over every other body input. Round-trip it: ¬my-cli command --example >body.json¬, edit the file, then ¬my-cli command --from-file body.json¬.
 - ¬--stdin¬ to require piped stdin input explicitly.
 - Generated ¬--field-name¬ flags for simple top-level body properties when Bartolo can infer them safely.
+- Timestamp fields and parameters (¬format: date-time¬) accept RFC 3339 (¬2026-08-31T17:40:00Z¬), a bare date (¬2026-08-31¬) or date and time (¬2026-08-31 14:00:00¬, read as UTC), or a relative value — ¬24h¬, ¬7d¬, ¬30m¬, ¬2w¬, ¬now¬, ¬now-24h¬, ¬now+1h¬. They are normalized to RFC 3339 before the request is sent, so ¬--from 24h --to now¬ means the last day. A bare duration always means "ago", so it carries no sign of its own: write ¬now+1h¬ for a time ahead. A day is exactly 24h and a week exactly 168h. This applies to a generated flag and to shorthand alike (¬from: 24h¬), but not to a body loaded from ¬--from-file¬ or stdin, which is sent as written. A nullable timestamp also takes ¬null¬.
 
 CLI shorthand still applies on top of any base body so you can override or add fields without editing the source file.
 

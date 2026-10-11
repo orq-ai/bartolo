@@ -1,0 +1,5 @@
+# Bartolo is pre-1.0, so a breaking change is a minor bump, not v1.0.0.
+# This also caps the damage from svu matching "BREAKING CHANGE" anywhere in a
+# commit body: a body that merely quotes the phrase cuts a minor, not a major.
+# Revisit before tagging v1.0.0.
+v0: true

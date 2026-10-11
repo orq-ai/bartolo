@@ -50,14 +50,7 @@ func (h *ClientCredentialsHandler) OnRequest(log *zerolog.Logger, request *http.
 			return ErrInvalidProfile
 		}
 
-		params := url.Values{}
-		if h.getParamsFunc != nil {
-			// Backward-compatibility with old call style, only used internally.
-			params = h.getParamsFunc(profile)
-		}
-		for _, name := range h.Params {
-			params.Add(name, profile[name])
-		}
+		params := endpointParams(h.getParamsFunc, h.Params, profile)
 
 		source := (&clientcredentials.Config{
 			ClientID:       profile["client_id"],
@@ -67,7 +60,9 @@ func (h *ClientCredentialsHandler) OnRequest(log *zerolog.Logger, request *http.
 			Scopes:         h.Scopes,
 		}).TokenSource(oauth2.NoContext)
 
-		return TokenHandler(source, log, request)
+		scope := credentialScope("clientcredentials", h.TokenURL, profile["client_id"], h.Scopes, params)
+
+		return TokenHandler(source, scope, log, request)
 	}
 
 	return nil

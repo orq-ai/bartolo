@@ -76,7 +76,7 @@ func TestGenerateCLIIgnoredOpBuildsMCPToolAndClientFunc(t *testing.T) {
 		BartoloReplacePath:  repoRoot,
 		BartoloVersion:      bartoloVersion,
 		EnvPrefix:           "CLIIGNORE",
-		DefaultOutputFormat: "json",
+		SerializationFormat: "json",
 		APIKeyEnvVar:        "CLIIGNORE_API_KEY",
 		Targets:             []string{"cli", "mcp"},
 	}

@@ -70,7 +70,7 @@ func TestGenerateTwoSchemeSpecBuildsCLI(t *testing.T) {
 		BartoloReplacePath:  repoRoot,
 		BartoloVersion:      bartoloVersion,
 		EnvPrefix:           "TWOSCHEME",
-		DefaultOutputFormat: "json",
+		SerializationFormat: "json",
 		APIKeyEnvVar:        "TWOSCHEME_API_KEY",
 		Targets:             []string{"cli", "mcp"},
 	}

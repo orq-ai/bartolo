@@ -17,7 +17,6 @@ import (
 	"github.com/orq-ai/bartolo/cli"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"github.com/spf13/viper"
 	"golang.org/x/oauth2"
 )
 
@@ -167,14 +166,7 @@ func (h *AuthCodeHandler) OnRequest(log *zerolog.Logger, request *http.Request) 
 			clientID = stored
 		}
 
-		params := url.Values{}
-		if h.getParamsFunc != nil {
-			// Backward-compatibility with old call style, only used internally.
-			params = h.getParamsFunc(profile)
-		}
-		for _, name := range h.Params {
-			params.Add(name, profile[name])
-		}
+		params := endpointParams(h.getParamsFunc, h.Params, profile)
 
 		source := &AuthorizationCodeTokenSource{
 			ClientID:       clientID,
@@ -186,7 +178,8 @@ func (h *AuthCodeHandler) OnRequest(log *zerolog.Logger, request *http.Request) 
 
 		// Try to get a cached refresh token from the current profile and use
 		// it to wrap the auth code token source with a refreshing source.
-		refreshKey := "profiles." + viper.GetString("profile") + ".refresh"
+		scope := credentialScope("authcode", h.TokenURL, clientID, h.Scopes, params)
+		refreshKey := "profiles." + scope + ".refresh"
 		refreshSource := RefreshTokenSource{
 			ClientID:       clientID,
 			TokenURL:       h.TokenURL,
@@ -195,7 +188,7 @@ func (h *AuthCodeHandler) OnRequest(log *zerolog.Logger, request *http.Request) 
 			TokenSource:    source,
 		}
 
-		return TokenHandler(refreshSource, log, request)
+		return TokenHandler(refreshSource, scope, log, request)
 	}
 
 	return nil
@@ -204,7 +197,7 @@ func (h *AuthCodeHandler) OnRequest(log *zerolog.Logger, request *http.Request) 
 // InitAuthCode sets up the OAuth 2.0 authorization code with PKCE authentication
 // flow. Must be called *after* you have called `cli.Init()`. The endpoint
 // params allow you to pass additional info to the token URL. Pass in
-// profile-related extra variables to store them alongside the default profile
+// profile-related extra variables to store them alongside the active profile's
 // information.
 func InitAuthCode(clientID string, authorizeURL string, tokenURL string, options ...func(*config) error) {
 	InitAuthCodeWithType("", clientID, authorizeURL, tokenURL, options...)

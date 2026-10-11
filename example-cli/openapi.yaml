@@ -18,6 +18,31 @@ paths:
         in: header
         schema:
           type: string
+      - name: since
+        in: query
+        # Required and optional date-time params render differently, so smoke
+        # compiles both shapes and asserts a bad value is refused locally.
+        description: Only echo events after this time.
+        required: true
+        schema:
+          type: string
+          format: date-time
+      - name: until
+        in: query
+        description: Only echo events before this time.
+        schema:
+          type: string
+          format: date-time
+      - name: status
+        in: query
+        # Exercises schema-driven value checking: a value outside the enum is
+        # refused before any request is built.
+        description: Only echo when the widget is in this state.
+        schema:
+          type: string
+          enum:
+          - active
+          - archived
       requestBody:
         content:
           application/json:
@@ -30,3 +55,51 @@ paths:
             application/json:
               example:
                 hello: world
+  /widgets/{id}:
+    delete:
+      operationId: deleteWidget
+      # Exercises the destructive-command confirm gate, --force flag, and the
+      # flag-name reservation (the `force` query parameter collides with --force).
+      description: Delete a widget by ID.
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: force
+        in: query
+        # Collides with the generated --force; renamed to --param-force.
+        description: Force-delete even if the widget has dependents.
+        schema:
+          type: boolean
+      responses:
+        204:
+          description: Deleted
+  /widgets/search:
+    post:
+      operationId: searchWidgets
+      # Exercises x-cli-list-fields on a non-GET operation: the generated command
+      # must call FormatList with the declared columns, which only a compiled CLI
+      # proves.
+      description: Search widgets.
+      x-cli-list-fields:
+      - id
+      - name
+      responses:
+        200:
+          description: Matches
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  matches:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        name:
+                          type: string

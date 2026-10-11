@@ -54932,6 +54932,10 @@
         ],
         "x-speakeasy-group": "knowledge",
         "x-speakeasy-name-override": "search",
+        "x-cli-list-fields": [
+          "id",
+          "text"
+        ],
         "operationId": "SearchKnowledge",
         "summary": "Search knowledge base",
         "description": "Search a Knowledge Base and return the most similar chunks, along with their search and rerank scores. Note that all configuration changes made in the API will override the settings in the UI.",
@@ -56916,6 +56920,11 @@
         ],
         "x-speakeasy-group": "knowledge",
         "x-speakeasy-name-override": "listChunksPaginated",
+        "x-cli-list-fields": [
+          "_id",
+          "text",
+          "status"
+        ],
         "operationId": "ListChunksPaginated",
         "summary": "List chunks with offset-based pagination",
         "parameters": [

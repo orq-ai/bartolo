@@ -12,6 +12,10 @@ package main
 //	x-bartolo-hidden       <- x-cli-hidden
 //	x-bartolo-aliases      <- x-cli-aliases
 //	x-bartolo-waiters      <- x-cli-waiters
+//	x-bartolo-list         <- x-cli-list
+//	x-bartolo-list-fields  <- x-cli-list-fields
+//	x-bartolo-help-section <- x-cli-help-section
+//	x-bartolo-no-validate  <- x-cli-no-validate
 //	x-bartolo-mcp-ignore   <- x-mcp-ignore
 //
 // Surface-scoped exclusions:
@@ -33,6 +37,10 @@ const (
 	extKeyHidden      = "hidden"
 	extKeyAliases     = "aliases"
 	extKeyWaiters     = "waiters"
+	extKeyList        = "list"
+	extKeyListFields  = "list-fields"
+	extKeyHelpSection = "help-section"
+	extKeyNoValidate  = "no-validate"
 )
 
 // canonicalKeys returns the ordered lookup list for a canonical short key:
@@ -59,6 +67,13 @@ func extLookup(ext map[string]interface{}, keys ...string) (interface{}, bool) {
 // "group"), preferring x-bartolo-<key> over the legacy x-cli-<key> alias.
 func extValue(ext map[string]interface{}, key string) (interface{}, bool) {
 	return extLookup(ext, canonicalKeys(key)...)
+}
+
+// extValueOrNil is extValue for callers that only need the value: an absent
+// extension yields nil.
+func extValueOrNil(ext map[string]interface{}, key string) interface{} {
+	v, _ := extValue(ext, key)
+	return v
 }
 
 // extString resolves a canonical short key to its decoded string value, or "".

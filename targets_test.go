@@ -21,7 +21,7 @@ func initTestCmd(targets string) *cobra.Command {
 	cmd.Flags().Bool("interactive", false, "")
 	cmd.Flags().String("module-path", "github.com/acme/demo-cli", "")
 	cmd.Flags().String("api-key-env-var", "", "")
-	cmd.Flags().String("default-format", "json", "")
+	cmd.Flags().String("serialization-format", "json", "")
 	cmd.Flags().String("targets", targets, "")
 	return cmd
 }
@@ -130,7 +130,7 @@ func scaffoldAndGenerate(t *testing.T, appName string, targets []string) string 
 		BartoloReplacePath:  repoRoot,
 		BartoloVersion:      bartoloVersion,
 		EnvPrefix:           strings.ToUpper(appName),
-		DefaultOutputFormat: "json",
+		SerializationFormat: "json",
 		APIKeyEnvVar:        strings.ToUpper(appName) + "_API_KEY",
 		Targets:             targets,
 	}
@@ -265,7 +265,7 @@ func TestLegacyConfigMigrationNonTTYDefaultsBoth(t *testing.T) {
 		BartoloReplacePath:  repoRoot,
 		BartoloVersion:      bartoloVersion,
 		EnvPrefix:           "LEGACY",
-		DefaultOutputFormat: "json",
+		SerializationFormat: "json",
 		APIKeyEnvVar:        "LEGACY_API_KEY",
 		Targets:             []string{"cli", "mcp"},
 	}

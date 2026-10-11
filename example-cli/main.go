@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+
 	"github.com/orq-ai/bartolo/cli"
 )
 
@@ -13,5 +15,5 @@ func main() {
 
 	registerGeneratedCommands()
 
-	cli.Root.Execute()
+	os.Exit(cli.Execute())
 }

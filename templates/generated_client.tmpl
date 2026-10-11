@@ -7,6 +7,7 @@ import (
 	{{ if .Imports.Fmt }}"fmt"{{ end }}
 	{{ if .Imports.Strings }}"strings"{{ end }}
 	{{ if .Imports.Time }}"time"{{ end }}
+	{{ if .Imports.Url }}neturl "net/url"{{ end }}
 
 	{{ if .NeedsAPIKeyImport }}"github.com/orq-ai/bartolo/apikey"{{ end }}
 	{{ if .NeedsOAuthImport }}"github.com/orq-ai/bartolo/oauth"{{ end }}
@@ -37,145 +38,13 @@ func initGeneratedRuntime() {
 	{{ end }}
 }
 
-{{ range $operation := .Operations }}
-	// {{ $apiPublic }}{{ .GoName }} {{ .Short }}
-	func {{ $apiPublic }}{{ .GoName }}({{ range .RequiredParams }}{{ .GoName }} string, {{ end }}params *viper.Viper{{ if .CanHaveBody }}, body string{{ end }}) (*gentleman.Response, {{ .ReturnType }}, error) {
-		handlerPath := "{{ .HandlerName | escapeStr }}"
-		server := viper.GetString("server")
-		if server == "" {
-			server = servers()[viper.GetInt("server-index")]["url"]
-		}
-
-		url := server+"{{ .Path | escapeStr }}"
-
-		{{- range $param := .RequiredParams }}
-			{{- if eq $param.In "path" }}
-				url = strings.Replace(url, "{{`{`}}{{ $param.Name | escapeStr }}{{`}`}}", {{ $param.GoName }}, 1)
-			{{- end }}
-		{{- end }}
-
-		req := bartolocli.Client.{{ .Method }}().URL(url)
-
-		{{ range $param := .RequiredParams }}
-			{{ if eq $param.In "query" }}
-				req = req.AddQuery("{{ .Name | escapeStr }}", {{ $param.GoName }})
-			{{ else if eq $param.In "header" }}
-				req = req.AddHeader("{{ .Name | escapeStr }}", {{ $param.GoName }})
-			{{ end }}
-		{{ end }}
-
-		{{- range .OptionalParams }}
-			{{ .GoName }} := params.Get{{ .Type | title }}("{{ .CLIName | escapeStr }}")
-			if {{ .GoName }} != {{ .TypeNil }} {
-				{{- if eq .In "query" }}
-					req = req.AddQuery("{{ .Name | escapeStr }}", fmt.Sprintf("%v", {{ .GoName }}))
-				{{- else if eq .In "header" }}
-					req = req.AddHeader("{{ .Name | escapeStr }}", fmt.Sprintf("%v", {{ .GoName }}))
-				{{- end }}
-			}
-		{{- end }}
-
-		{{ if .CanHaveBody }}
-			if body != "" {
-				req = req.AddHeader("Content-Type", "{{ .MediaType | escapeStr }}").BodyString(body)
-			}
-		{{ end }}
-
-		bartolocli.HandleBefore(handlerPath, params, req)
-
-		resp, err := req.Do()
-		if err != nil {
-			return nil, nil, errors.Wrap(err, "request failed")
-		}
-
-		var decoded {{ .ReturnType }}
-
-		if resp.StatusCode < 400 {
-			if err := bartolocli.UnmarshalResponse(resp, &decoded); err != nil {
-				return nil, nil, errors.Wrap(err, "unmarshalling response failed")
-			}
-		} else {
-			return nil, nil, &bartolocli.HTTPError{StatusCode: resp.StatusCode, Headers: resp.Header, Body: resp.Bytes()}
-		}
-
-		after := bartolocli.HandleAfter(handlerPath, params, resp, decoded)
-		if after != nil {
-			decoded = after{{ if ne .ReturnType "interface{}" }}.({{ .ReturnType }}){{ end }}
-		}
-
-		return resp, decoded, nil
-	}
+{{ range .Operations }}
+	{{ template "operationFunc" . }}
 {{ end }}
 
 {{ range $group := .Groups }}
-	{{ range $operation := .Operations }}
-		// {{ $apiPublic }}{{ .GoName }} {{ .Short }}
-		func {{ $apiPublic }}{{ .GoName }}({{ range .RequiredParams }}{{ .GoName }} string, {{ end }}params *viper.Viper{{ if .CanHaveBody }}, body string{{ end }}) (*gentleman.Response, {{ .ReturnType }}, error) {
-			handlerPath := "{{ .HandlerName | escapeStr }}"
-			server := viper.GetString("server")
-			if server == "" {
-				server = servers()[viper.GetInt("server-index")]["url"]
-			}
-
-			url := server+"{{ .Path | escapeStr }}"
-
-			{{- range $param := .RequiredParams }}
-				{{- if eq $param.In "path" }}
-					url = strings.Replace(url, "{{`{`}}{{ $param.Name | escapeStr }}{{`}`}}", {{ $param.GoName }}, 1)
-				{{- end }}
-			{{- end }}
-
-			req := bartolocli.Client.{{ .Method }}().URL(url)
-
-			{{ range $param := .RequiredParams }}
-				{{ if eq $param.In "query" }}
-					req = req.AddQuery("{{ .Name | escapeStr }}", {{ $param.GoName }})
-				{{ else if eq $param.In "header" }}
-					req = req.AddHeader("{{ .Name | escapeStr }}", {{ $param.GoName }})
-				{{ end }}
-			{{ end }}
-
-			{{- range .OptionalParams }}
-				{{ .GoName }} := params.Get{{ .Type | title }}("{{ .CLIName | escapeStr }}")
-				if {{ .GoName }} != {{ .TypeNil }} {
-					{{- if eq .In "query" }}
-						req = req.AddQuery("{{ .Name | escapeStr }}", fmt.Sprintf("%v", {{ .GoName }}))
-					{{- else if eq .In "header" }}
-						req = req.AddHeader("{{ .Name | escapeStr }}", fmt.Sprintf("%v", {{ .GoName }}))
-					{{- end }}
-				}
-			{{- end }}
-
-			{{ if .CanHaveBody }}
-				if body != "" {
-					req = req.AddHeader("Content-Type", "{{ .MediaType | escapeStr }}").BodyString(body)
-				}
-			{{ end }}
-
-			bartolocli.HandleBefore(handlerPath, params, req)
-
-			resp, err := req.Do()
-			if err != nil {
-				return nil, nil, errors.Wrap(err, "request failed")
-			}
-
-			var decoded {{ .ReturnType }}
-
-			if resp.StatusCode < 400 {
-				if err := bartolocli.UnmarshalResponse(resp, &decoded); err != nil {
-					return nil, nil, errors.Wrap(err, "unmarshalling response failed")
-				}
-			} else {
-				return nil, nil, &bartolocli.HTTPError{StatusCode: resp.StatusCode, Headers: resp.Header, Body: resp.Bytes()}
-			}
-
-			after := bartolocli.HandleAfter(handlerPath, params, resp, decoded)
-			if after != nil {
-				decoded = after{{ if ne .ReturnType "interface{}" }}.({{ .ReturnType }}){{ end }}
-			}
-
-			return resp, decoded, nil
-		}
+	{{ range .Operations }}
+		{{ template "operationFunc" . }}
 	{{ end }}
 {{ end }}
 

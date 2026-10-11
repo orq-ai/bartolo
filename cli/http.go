@@ -8,7 +8,9 @@ import (
 	"io"
 	"io/ioutil"
 	"math/rand"
+	"mime"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -30,19 +32,16 @@ var (
 // HTTPError represents a non-2xx HTTP response from an upstream API call. It
 // carries the structured status/headers/body so callers (such as the MCP
 // server) can surface them as structured error results rather than a bare
-// string. Its Error() string is intentionally identical to the message
-// previously produced by the generated client funcs so existing CLI behavior
-// is unchanged.
+// string. Body is already redacted by ResponseError.
 type HTTPError struct {
 	StatusCode int
 	Headers    http.Header
 	Body       []byte
 }
 
-// Error implements the error interface, rendering the same "HTTP %d: %s"
-// message that generated client funcs historically returned.
+// Error renders the "HTTP <status>:\n<body>" message the CLI prints.
 func (e *HTTPError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, string(e.Body))
+	return fmt.Sprintf("HTTP %d:\n%s", e.StatusCode, string(e.Body))
 }
 
 func indent(value string) string {
@@ -80,6 +79,156 @@ func UserAgentMiddleware() {
 	})
 }
 
+// redactHeaderValue masks the value of a sensitive header so `--verbose` never
+// prints an API key, bearer token, or cookie. What counts as sensitive is
+// looksSensitiveKey, the same predicate the configuration dump and the profile
+// listing use: the transport names this used to list separately
+// (authorization, proxy-authorization, cookie, set-cookie) all match its
+// "auth" and "cookie" hints.
+func redactHeaderValue(key, val string) string {
+	if looksSensitiveKey(key) {
+		return "[REDACTED]"
+	}
+	// An `X-Auth-Server` is exempt by name but can still hold a password.
+	if namesALocation(strings.ToLower(key)) {
+		if masked, ok := redactAddressValue(val).(string); ok {
+			return masked
+		}
+	}
+	return val
+}
+
+// redactURL renders a URL with its password and the value of every sensitive
+// query parameter masked. An API key can be carried in the query rather than a
+// header (apikey.LocationQuery), and `--verbose` prints the request line, so
+// the URL needs the same treatment the headers get.
+func redactURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+
+	// Copy unconditionally, so every exit runs past the userinfo strip: an
+	// early return for the no-query case printed the password in full.
+	clean := *u
+	if clean.User != nil {
+		clean.User = url.User(clean.User.Username())
+	}
+
+	query := clean.Query()
+	if redactValues(query) {
+		clean.RawQuery = query.Encode()
+	}
+	return clean.String()
+}
+
+// redactValues masks every sensitive entry in a set of query or form values in
+// place, and reports whether it masked anything. The query string and a form
+// body are the same shape, so they get the same walk.
+func redactValues(values url.Values) bool {
+	redacted := false
+	for name, vals := range values {
+		if looksSensitiveKey(name) {
+			values.Set(name, "[REDACTED]")
+			redacted = true
+			continue
+		}
+		// OAuth carries a redirect_uri routinely, with whatever its query holds.
+		if !namesALocation(strings.ToLower(name)) || len(vals) == 0 {
+			continue
+		}
+		if masked, ok := redactAddressValue(vals[0]).(string); ok && masked != vals[0] {
+			values.Set(name, masked)
+			redacted = true
+		}
+	}
+	return redacted
+}
+
+// redactBody masks credentials inside a request or response body so
+// `--verbose` does not print what the header and URL redaction just kept out
+// of the log: an OAuth token exchange carries client_secret in a form body and
+// returns access_token in a JSON one, and any endpoint that mints a key
+// returns it in its response.
+//
+// Only JSON and form-encoded bodies can be redacted, since redaction needs
+// field names, and the two are recognised differently: JSON is parsed whatever
+// the declared type says, because a server can return a JSON error body
+// labelled text/plain, while a form body is recognised only by its exact media
+// type.
+//
+// This fails OPEN, deliberately. Every body it cannot parse is logged
+// verbatim: multipart, NDJSON, an event stream, XML, truncated or malformed
+// JSON, a form body sent without its media type, and a JSON document carried
+// as a string inside another one (one value to this walk). A credential in any
+// of those still reaches the log. Failing closed would replace exactly the
+// malformed bodies people turn `--verbose` on to look at with a placeholder,
+// so the leak is the accepted cost of the flag being useful -- but it is a
+// leak, and it is why `--verbose` output is not safe to paste unread.
+//
+// The original text is returned untouched when nothing matched, so a body the
+// user is trying to debug is not silently reformatted.
+func redactBody(contentType, body string) string {
+	if strings.TrimSpace(body) == "" {
+		return body
+	}
+
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		mediaType = strings.ToLower(strings.TrimSpace(contentType))
+	}
+
+	if mediaType == "application/x-www-form-urlencoded" {
+		return redactFormBody(body)
+	}
+
+	return redactJSONBody(body)
+}
+
+func redactJSONBody(body string) string {
+	// Without UseNumber and SetEscapeHTML(false) the re-render rounds every
+	// integer past 2^53 and escapes `&`, `<` and `>`.
+	decoder := json.NewDecoder(strings.NewReader(body))
+	decoder.UseNumber()
+
+	var parsed interface{}
+	if err := decoder.Decode(&parsed); err != nil {
+		return body
+	}
+
+	redacted, changed := redactTree("", parsed, maskRedacted)
+	if !changed {
+		return body
+	}
+
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(redacted); err != nil {
+		// Should not happen; dropping the body beats printing it unredacted.
+		return "[REDACTED BODY]"
+	}
+	return strings.TrimRight(out.String(), "\n")
+}
+
+// maskRedacted is the mask redactTree uses for wire bodies, where nothing of
+// the value is worth keeping. The configuration dump passes maskHidden.
+func maskRedacted(string, interface{}) interface{} {
+	return "[REDACTED]"
+}
+
+func redactFormBody(body string) string {
+	values, err := url.ParseQuery(body)
+	if err != nil {
+		return body
+	}
+
+	if !redactValues(values) {
+		return body
+	}
+	return values.Encode()
+}
+
 // LogMiddleware adds verbose log info to HTTP requests.
 func LogMiddleware(useColor bool) {
 	rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
@@ -109,14 +258,14 @@ func LogMiddleware(useColor bool) {
 		if viper.GetBool("verbose") {
 			headers := ""
 			for key, val := range ctx.Request.Header {
-				headers += key + ": " + val[0] + "\n"
+				headers += key + ": " + redactHeaderValue(key, val[0]) + "\n"
 			}
 
 			if body != "" {
-				body = "\n" + body
+				body = "\n" + redactBody(ctx.Request.Header.Get("Content-Type"), body)
 			}
 
-			http := fmt.Sprintf("%s %s %s\n%s%s", ctx.Request.Method, ctx.Request.URL, ctx.Request.Proto, headers, body)
+			http := fmt.Sprintf("%s %s %s\n%s%s", ctx.Request.Method, redactURL(ctx.Request.URL), ctx.Request.Proto, headers, body)
 
 			if useColor {
 				sb := strings.Builder{}
@@ -138,7 +287,7 @@ func LogMiddleware(useColor bool) {
 		if viper.GetBool("verbose") {
 			headers := ""
 			for key, val := range ctx.Response.Header {
-				headers += key + ": " + val[0] + "\n"
+				headers += key + ": " + redactHeaderValue(key, val[0]) + "\n"
 			}
 
 			body, newReader, err := getBody(ctx.Response.Body)
@@ -148,7 +297,7 @@ func LogMiddleware(useColor bool) {
 			}
 			ctx.Response.Body = newReader
 
-			http := fmt.Sprintf("%s %s\n%s\n%s", ctx.Response.Proto, ctx.Response.Status, headers, body)
+			http := fmt.Sprintf("%s %s\n%s\n%s", ctx.Response.Proto, ctx.Response.Status, headers, redactBody(ctx.Response.Header.Get("Content-Type"), body))
 
 			if useColor {
 				sb := strings.Builder{}
@@ -174,13 +323,25 @@ func UnmarshalRequest(ctx *context.Context, s interface{}) error {
 // UnmarshalResponse into a given structure `s`. Supports both JSON and
 // YAML depending on the response's content-type header.
 func UnmarshalResponse(resp *gentleman.Response, s interface{}) error {
-	data := resp.Bytes()
-
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("HTTP %d:\n%s", resp.StatusCode, string(data))
+		return ResponseError(resp)
 	}
 
-	return unmarshalBody(resp.Header, data, s)
+	return unmarshalBody(resp.Header, resp.Bytes(), s)
+}
+
+// ResponseError renders a failed response as an error, with the body redacted.
+// Every caller that turns a >= 400 response into an error goes through here, so
+// none can skip that: this prints to stderr on every failed command, not only
+// under `--verbose`, and a 401 that echoes back the token it rejected is
+// ordinary.
+func ResponseError(resp *gentleman.Response) error {
+	if resp == nil {
+		return fmt.Errorf("the request failed with no response")
+	}
+
+	body := redactBody(resp.Header.Get("content-type"), string(resp.Bytes()))
+	return &HTTPError{StatusCode: resp.StatusCode, Headers: resp.Header, Body: []byte(body)}
 }
 
 func unmarshalBody(headers http.Header, data []byte, s interface{}) error {

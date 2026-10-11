@@ -168,7 +168,7 @@ func TestMCPEndToEnd(t *testing.T) {
 	scaffold := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(scaffold, "openapi.yaml"), []byte(e2eSpec), 0o600), "write fixture")
 
-	runCmd(t, scaffold, genBin, "init", "mcpe2e", "--bartolo-path", repoRoot, "--default-format", "json")
+	runCmd(t, scaffold, genBin, "init", "mcpe2e", "--bartolo-path", repoRoot, "--serialization-format", "json")
 	runCmd(t, scaffold, genBin, "generate", "openapi.yaml")
 	require.NoError(t, os.WriteFile(filepath.Join(scaffold, "cli", "custom", "register.go"), []byte(e2eCustomRegister), 0o600), "write custom MCP hooks")
 	runCmd(t, scaffold, "go", "mod", "tidy")

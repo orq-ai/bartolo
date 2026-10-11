@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/spf13/viper"
@@ -14,7 +15,7 @@ func TestDefaultFormatterHandlesNilQueryResult(t *testing.T) {
 		AppName: "test",
 	})
 
-	viper.Set("query", "missing")
+	viper.Set("jmespath", "missing")
 	defer viper.Set("query", "")
 
 	out := new(bytes.Buffer)
@@ -23,8 +24,1093 @@ func TestDefaultFormatterHandlesNilQueryResult(t *testing.T) {
 		Stdout = os.Stdout
 	}()
 
-	formatter := NewDefaultFormatter(false)
+	formatter := NewDefaultFormatter(false, false)
 	err := formatter.Format(map[string]interface{}{"hello": "world"})
 	assert.NoError(t, err)
 	assert.Equal(t, "null\n", out.String())
+}
+
+func TestDefaultFormatterRendersListAsTableOnTTY(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{"id": "one", "active": true},
+		map[string]interface{}{"id": "two", "active": false},
+	}, "id", "active")
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "│ ID  │ ACTIVE │")
+	assert.Contains(t, out.String(), "│ one │ true   │")
+	assert.Contains(t, out.String(), "│ two │ false  │")
+}
+
+func TestDefaultFormatterKeepsListJSONWhenNotInteractive(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", "json")
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(false, false).FormatList([]interface{}{
+		map[string]interface{}{"id": "one"},
+	})
+	assert.NoError(t, err)
+	assert.JSONEq(t, `[{"id":"one"}]`, out.String())
+}
+
+func TestDefaultFormatterRendersListEnvelopeMetadata(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
+		"selected_server": "https://example.test",
+		"servers": []map[string]interface{}{
+			{"url": "https://example.test", "selected": true},
+		},
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "selected_server: https://example.test")
+	assert.Contains(t, out.String(), "│ SELECTED │         URL          │")
+}
+
+func TestDefaultFormatterRendersEmptyListWithConfiguredColumns(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{}, "id", "name")
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "│ ID │ NAME │")
+}
+
+func TestDefaultFormatterSkipsNestedObjectColumnsAndTruncatesCells(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"id":       "one",
+			"prompt":   map[string]interface{}{"messages": []interface{}{"long"}},
+			"metadata": []interface{}{"a", "b"},
+			"note":     strings.Repeat("x", 100),
+		},
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "│ ID  │")
+	assert.NotContains(t, out.String(), "PROMPT")
+	assert.Contains(t, out.String(), "METADATA")
+	assert.Contains(t, out.String(), "│ a, b ")
+	assert.Contains(t, out.String(), strings.Repeat("x", maxCellWidth-1)+"…")
+	assert.NotContains(t, out.String(), strings.Repeat("x", maxCellWidth+1))
+}
+
+func TestDefaultFormatterAbbreviatesLongListCells(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"id":     "one",
+			"tags":   []interface{}{"a", "b", "c", "d", "e"},
+			"scores": []interface{}{0.5, 1},
+			"items":  []interface{}{map[string]interface{}{"k": "v"}},
+			"none":   []interface{}{},
+		},
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "a, b, c, …")
+	assert.Contains(t, out.String(), "0.5, 1")
+	assert.Contains(t, out.String(), `{"k":"v"}`)
+	assert.Contains(t, out.String(), "NONE")
+}
+
+func TestDefaultFormatterRendersDeclaredNestedColumns(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"id":    "agent_1",
+			"model": map[string]interface{}{"id": "model_1"},
+		},
+	}, "model.id")
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "│   ID    │")
+	assert.Contains(t, out.String(), "│ model_1 │")
+}
+
+func TestDefaultFormatterRendersExplicitNestedColumns(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	viper.Set("columns", "model.id")
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"id":    "agent_1",
+			"model": map[string]interface{}{"id": "model_1"},
+		},
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "│   ID    │")
+	assert.Contains(t, out.String(), "│ model_1 │")
+}
+
+func TestDefaultFormatterPrefersLiteralDottedColumn(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"model.id": "literal",
+			"model":    map[string]interface{}{"id": "nested"},
+		},
+	}, "model.id")
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "│ MODEL . ID │")
+	assert.Contains(t, out.String(), "│ literal    │")
+	assert.NotContains(t, out.String(), "nested")
+}
+
+func TestDefaultFormatterRendersMixedNestedRows(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"model": map[string]interface{}{"id": "model_1"},
+		},
+		map[string]interface{}{
+			"model": "not-an-object",
+		},
+	}, "model.id")
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "model_1")
+}
+
+func TestDefaultFormatterRendersYAMLNestedMaps(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[interface{}]interface{}{
+			"model": map[interface{}]interface{}{"id": "model_1"},
+		},
+	}, "model.id")
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "│ model_1 │")
+}
+
+func TestDefaultFormatterRejectsUnknownNestedColumn(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	viper.Set("columns", "model.name")
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"model": map[string]interface{}{"id": "model_1"},
+		},
+	})
+	assert.ErrorContains(t, err, `--columns: "model.name" is not a field of the returned items`)
+	assert.Empty(t, out.String())
+}
+
+func TestDefaultFormatterRejectsUnknownDeclaredNestedColumn(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{
+			"model": map[string]interface{}{"id": "model_1"},
+		},
+	}, "model.name")
+	assert.ErrorContains(t, err, `declared column: "model.name" is not a field of the returned items`)
+	assert.Empty(t, out.String())
+}
+
+func TestTableFieldProjectsArrayElementPaths(t *testing.T) {
+	row := map[string]interface{}{
+		"settings": map[string]interface{}{
+			"tools": []interface{}{
+				map[string]interface{}{
+					"key":           "lookup-order",
+					"configuration": map[string]interface{}{"name": "orders"},
+				},
+				"not-an-object",
+				map[string]interface{}{"id": "missing-key"},
+				map[string]interface{}{"key": nil},
+				map[string]interface{}{"key": "issue-refund"},
+			},
+			"tools[0]": map[string]interface{}{"key": "zero"},
+			"tools[*]": map[string]interface{}{"key": "wildcard"},
+			"tools[ ]": map[string]interface{}{"key": "space"},
+		},
+		"empty": []interface{}{},
+		"null":  nil,
+		"name":  "not-an-array",
+		"literal": map[string]interface{}{
+			"tools[]": "nested-literal",
+		},
+		"groups": []interface{}{
+			map[string]interface{}{
+				"tools": []interface{}{map[string]interface{}{"key": "nested"}},
+			},
+		},
+	}
+
+	tests := []struct {
+		name       string
+		column     string
+		want       interface{}
+		resolution tableFieldResolution
+	}{
+		{
+			name:       "projects present values and omits unusable elements",
+			column:     "settings.tools[].key",
+			want:       []interface{}{"lookup-order", "issue-refund"},
+			resolution: tableFieldResolved,
+		},
+		{
+			name:       "walks a dotted suffix",
+			column:     "settings.tools[].configuration.name",
+			want:       []interface{}{"orders"},
+			resolution: tableFieldResolved,
+		},
+		{
+			name:       "empty array is resolved",
+			column:     "empty[].key",
+			want:       []interface{}{},
+			resolution: tableFieldEmptyProjection,
+		},
+		{
+			name:       "null array resolves like an empty one",
+			column:     "null[].key",
+			want:       []interface{}{},
+			resolution: tableFieldEmptyProjection,
+		},
+		{
+			name:       "a string prefix is not an array",
+			column:     "name[].key",
+			want:       nil,
+			resolution: tableFieldPrefixNotAnArray,
+		},
+		{
+			name:       "an object prefix is not an array",
+			column:     "settings[].key",
+			want:       nil,
+			resolution: tableFieldPrefixNotAnArray,
+		},
+		{
+			name:       "an empty path segment is not a field",
+			column:     "settings..tools",
+			want:       nil,
+			resolution: tableFieldMissing,
+		},
+		{
+			name:       "an unsupported selector still finds a nested literal key",
+			column:     "literal.tools[]",
+			want:       "nested-literal",
+			resolution: tableFieldResolved,
+		},
+		{
+			name:       "non-empty projection with no values is unresolved",
+			column:     "settings.tools[].missing",
+			want:       nil,
+			resolution: tableFieldUnresolvedPopulatedProjection,
+		},
+		{
+			name:       "terminal projection is unsupported",
+			column:     "settings.tools[]",
+			want:       nil,
+			resolution: tableFieldMissing,
+		},
+		{
+			name:       "multiple projections are unsupported",
+			column:     "groups[].tools[].key",
+			want:       nil,
+			resolution: tableFieldMissing,
+		},
+		{
+			name:       "index syntax stays an ordinary property name",
+			column:     "settings.tools[0].key",
+			want:       "zero",
+			resolution: tableFieldResolved,
+		},
+		{
+			name:       "wildcard stays an ordinary property name",
+			column:     "settings.tools[*].key",
+			want:       "wildcard",
+			resolution: tableFieldResolved,
+		},
+		{
+			name:       "spaced brackets stay an ordinary property name",
+			column:     "settings.tools[ ].key",
+			want:       "space",
+			resolution: tableFieldResolved,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, resolution := resolveTableField(row, tt.column)
+			assert.Equal(t, tt.resolution, resolution)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestTableFieldPrefersLiteralArrayElementPath(t *testing.T) {
+	row := map[string]interface{}{
+		"settings.tools[].key": "literal",
+		"settings": map[string]interface{}{
+			"tools": []interface{}{map[string]interface{}{"key": "projected"}},
+		},
+	}
+
+	got, resolution := resolveTableField(row, "settings.tools[].key")
+
+	assert.Equal(t, tableFieldLiteral, resolution)
+	assert.Equal(t, "literal", got)
+}
+
+func TestDefaultFormatterRendersExplicitArrayElementColumn(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	viper.Set("columns", "settings.tools[].key")
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[interface{}]interface{}{
+			"settings": map[interface{}]interface{}{
+				"tools": []interface{}{
+					map[interface{}]interface{}{"key": "lookup-order"},
+				},
+			},
+		},
+	})
+
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "lookup-order")
+}
+
+func TestCheckColumnsExplainsWhyAColumnIsMissing(t *testing.T) {
+	populated := map[string]interface{}{
+		"id":       "agent_1",
+		"name":     "not-an-array",
+		"settings": map[string]interface{}{"tools": []interface{}{map[string]interface{}{"key": "lookup"}}},
+	}
+	empty := map[string]interface{}{"settings": map[string]interface{}{"tools": []interface{}{}}}
+
+	const grammar = "a selector supports one [] and needs a field after it"
+
+	tests := []struct {
+		name          string
+		column        string
+		rows          []map[string]interface{}
+		declared      bool
+		contains      string
+		quotesGrammar bool
+	}{
+		{
+			name:          "a second projection names the rule",
+			column:        "groups[].tools[].key",
+			contains:      `--columns: "groups[].tools[].key" is not a field of the returned items`,
+			quotesGrammar: true,
+		},
+		{
+			name:          "a terminal projection names the rule",
+			column:        "settings.tools[]",
+			contains:      `--columns: "settings.tools[]" is not a field of the returned items`,
+			quotesGrammar: true,
+		},
+		{
+			name:          "an index names the rule, since it is the documented --jmespath case",
+			column:        "settings.tools[0].key",
+			contains:      `--columns: "settings.tools[0].key" is not a field of the returned items`,
+			quotesGrammar: true,
+		},
+		{
+			name:     "a bracket-free typo has no rule to quote",
+			column:   "settings..tools",
+			contains: `--columns: "settings..tools" is not a field of the returned items`,
+		},
+		{
+			name:     "a plain misspelling has no rule to quote",
+			column:   "naem",
+			contains: `--columns: "naem" is not a field of the returned items`,
+		},
+		{
+			name:     "a non-array prefix says so rather than claiming the field is absent",
+			column:   "name[].key",
+			contains: `--columns: "name[].key" projects "name", which is not an array in the returned items`,
+		},
+		{
+			name:          "an empty array cannot mask a misspelling on a populated row",
+			column:        "settings.tools[].nmae",
+			rows:          []map[string]interface{}{empty, populated},
+			contains:      `--columns: "settings.tools[].nmae" is not a field of the returned items`,
+			quotesGrammar: true,
+		},
+		{
+			name:          "a declared column names its own source",
+			column:        "settings.tools[].nmae",
+			declared:      true,
+			contains:      `declared column: "settings.tools[].nmae" is not a field of the returned items`,
+			quotesGrammar: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rows := tt.rows
+			if rows == nil {
+				rows = []map[string]interface{}{populated}
+			}
+
+			err := checkColumns([]string{tt.column}, rows, !tt.declared)
+
+			assert.ErrorContains(t, err, tt.contains)
+			if tt.quotesGrammar {
+				assert.ErrorContains(t, err, grammar)
+			} else {
+				assert.NotContains(t, err.Error(), grammar)
+			}
+		})
+	}
+}
+
+func TestCheckColumnsAcceptsIndeterminateProjections(t *testing.T) {
+	empty := map[string]interface{}{"settings": map[string]interface{}{"tools": []interface{}{}}}
+	null := map[string]interface{}{"settings": map[string]interface{}{"tools": nil}}
+	allNull := map[string]interface{}{"settings": map[string]interface{}{"tools": []interface{}{map[string]interface{}{"key": nil}}}}
+	populated := map[string]interface{}{"settings": map[string]interface{}{"tools": []interface{}{map[string]interface{}{"key": "lookup"}}}}
+
+	for name, rows := range map[string][]map[string]interface{}{
+		"every array empty":            {empty},
+		"every array null":             {null},
+		"every value null":             {allNull},
+		"one empty beside a populated": {empty, populated},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.NoError(t, checkColumns([]string{"settings.tools[].key"}, rows, true))
+		})
+	}
+}
+
+func TestDefaultFormatterRendersProjectedColumn(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	tools := func(items ...interface{}) map[string]interface{} {
+		return map[string]interface{}{"settings": map[string]interface{}{"tools": items}}
+	}
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		tools(
+			map[string]interface{}{"key": "lookup"},
+			map[string]interface{}{"key": "refund"},
+			map[string]interface{}{"key": "policy"},
+			map[string]interface{}{"key": "escalate"},
+		),
+		tools(map[string]interface{}{"id": "no-key"}),
+		tools(),
+		tools(map[string]interface{}{"key": nil}),
+		map[string]interface{}{"settings": map[string]interface{}{"tools": nil}},
+	}, "settings.tools[].key")
+	assert.NoError(t, err)
+
+	// Whole lines, so a blank cell is asserted as rendered output rather than
+	// inferred by counting box-drawing characters.
+	lines := strings.Split(out.String(), "\n")
+	assert.Contains(t, lines, "│            KEY            │")
+	assert.Contains(t, lines, "│ lookup, refund, policy, … │")
+	assert.Equal(t, 4, strings.Count(out.String(), "│                           │"))
+}
+
+func TestTableHeadersUseShortestUniqueSuffix(t *testing.T) {
+	// Literal strings, never recomputed from tw, so a tablewriter upgrade
+	// that changes auto-format fails here instead of reshaping every header.
+	cases := []struct {
+		name    string
+		columns []string
+		literal []bool
+		want    []string
+	}{
+		{"top-level unchanged", []string{"displayName", "created_at"}, nil, []string{"DISPLAY NAME", "CREATED AT"}},
+		{"single nested leaf", []string{"metadata.context_window"}, nil, []string{"CONTEXT WINDOW"}},
+		{
+			"colliding leaves extend by one parent",
+			[]string{"pricing.input.cost", "pricing.output.cost"},
+			nil,
+			[]string{"INPUT . COST", "OUTPUT . COST"},
+		},
+		{"top-level and nested leaf", []string{"id", "model.id"}, nil, []string{"ID", "MODEL . ID"}},
+		{"extends until distinct", []string{"a.x.id", "b.x.id"}, nil, []string{"A . X . ID", "B . X . ID"}},
+		{
+			"leaves equal after formatting collide",
+			[]string{"model.contextWindow", "metadata.context_window"},
+			nil,
+			[]string{"MODEL . CONTEXT WINDOW", "METADATA . CONTEXT WINDOW"},
+		},
+		{
+			"each member extends only as far as its group needs",
+			[]string{"pricing.cost", "pricing.input.cost", "pricing.output.cost"},
+			nil,
+			[]string{"PRICING . COST", "INPUT . COST", "OUTPUT . COST"},
+		},
+		{"literal dotted key keeps whole name", []string{"model.id"}, []bool{true}, []string{"MODEL . ID"}},
+		{"projection leaf", []string{"settings.tools[].key"}, nil, []string{"KEY"}},
+		{
+			"projection collision drops the marker",
+			[]string{"settings.tools[].key", "settings.key"},
+			nil,
+			[]string{"TOOLS . KEY", "SETTINGS . KEY"},
+		},
+		{"identical columns stay identical", []string{"id", "id"}, nil, []string{"ID", "ID"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			literal := tc.literal
+			if literal == nil {
+				literal = make([]bool, len(tc.columns))
+			}
+			assert.Equal(t, tc.want, tableHeaders(tc.columns, literal))
+		})
+	}
+}
+
+func TestDefaultFormatterClassifiesEnvelopeShapes(t *testing.T) {
+	const (
+		table      = "table"
+		noResults  = "no results"
+		serialized = "serialized"
+	)
+
+	rowOne := map[string]interface{}{"id": "one"}
+	rowTwo := map[string]interface{}{"id": "two"}
+
+	tests := []struct {
+		name     string
+		data     interface{}
+		want     string
+		wantCell string
+	}{
+		{"resource-named wrapper", map[string]interface{}{"schedules": []interface{}{rowOne}}, table, "one"},
+		{"conventional key", map[string]interface{}{"data": []interface{}{rowOne}}, table, "one"},
+		{"populated beside an empty sibling", map[string]interface{}{"matches": []interface{}{rowOne}, "warnings": []interface{}{}}, table, "one"},
+		{"populated beside an empty conventional key", map[string]interface{}{"data": []interface{}{}, "matches": []interface{}{rowOne}}, table, "one"},
+		{"conventional key wins among populated arrays", map[string]interface{}{"data": []interface{}{rowOne}, "matches": []interface{}{rowTwo}}, table, "one"},
+		{"sole empty envelope", map[string]interface{}{"matches": []interface{}{}}, noResults, ""},
+		{"sole empty envelope beside a scalar", map[string]interface{}{"matches": []interface{}{}, "total": 0}, noResults, ""},
+		{"empty peer arrays", map[string]interface{}{"before": []interface{}{}, "after": []interface{}{}}, serialized, ""},
+		{"two populated arrays", map[string]interface{}{"input": []interface{}{rowOne}, "output": []interface{}{rowTwo}}, serialized, ""},
+		{"scalar array beside an empty sibling", map[string]interface{}{"ids": []interface{}{"a", "b"}, "warnings": []interface{}{}}, serialized, ""},
+		{"scalar array beside an empty conventional key", map[string]interface{}{"data": []interface{}{}, "ids": []interface{}{"a", "b"}}, serialized, ""},
+		{"no array at all", map[string]interface{}{"id": "one"}, serialized, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			viper.Reset()
+			viper.Set("output-format", tableFormat)
+			viper.Set("jmespath", "")
+			viper.Set("raw", false)
+			out, errOut := new(bytes.Buffer), new(bytes.Buffer)
+			originalOut, originalErr := Stdout, Stderr
+			Stdout, Stderr = out, errOut
+			t.Cleanup(func() { Stdout, Stderr = originalOut, originalErr })
+
+			assert.NoError(t, NewDefaultFormatter(true, true).FormatList(tt.data))
+
+			switch tt.want {
+			case table:
+				assert.Contains(t, out.String(), "│")
+				assert.Contains(t, out.String(), tt.wantCell)
+				assert.Empty(t, errOut.String())
+			case noResults:
+				assert.Equal(t, "No results.\n", out.String())
+				assert.Empty(t, errOut.String())
+			case serialized:
+				assert.NotContains(t, out.String(), "No results.")
+				assert.NotContains(t, out.String(), "│")
+				assert.Contains(t, errOut.String(), "Not shown as a table")
+			}
+		})
+	}
+}
+
+func TestDefaultFormatterInfersColumnsFromJMESPathProjection(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "data[].{id: id, model: model.id}")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
+		"data": []interface{}{map[string]interface{}{
+			"id":    "ag_1",
+			"name":  "support",
+			"model": map[string]interface{}{"id": "gpt-5"},
+		}},
+	}, "id", "name")
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "MODEL")
+	assert.Contains(t, out.String(), "gpt-5")
+	assert.NotContains(t, out.String(), "NAME")
+}
+
+func TestDefaultFormatterKeepsAmbiguousObjectAsJSON(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", "json")
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
+		"input":  []interface{}{map[string]interface{}{"id": "one"}},
+		"output": []interface{}{map[string]interface{}{"id": "two"}},
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), `"input"`)
+	assert.NotContains(t, out.String(), "│ ID │")
+}
+
+func TestDefaultFormatterReportsEmptyCollection(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
+		"data":     []interface{}{},
+		"has_more": false,
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, "No results.\n", out.String())
+}
+
+func TestDefaultFormatterSummarizesEnvelopeInFooter(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
+		"object":   "list",
+		"has_more": true,
+		"data":     []interface{}{map[string]interface{}{"id": "one"}},
+	})
+	assert.NoError(t, err)
+	assert.NotContains(t, out.String(), "object")
+	assert.Contains(t, out.String(), "1 shown, more available")
+}
+
+func TestDefaultFormatterFooterCountsAgainstTotal(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
+		"data":     []interface{}{map[string]interface{}{"id": "one"}},
+		"total":    float64(47),
+		"limit":    float64(1),
+		"offset":   float64(0),
+		"has_more": true,
+		"object":   "list",
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "1 of 47")
+	assert.NotContains(t, out.String(), "limit")
+	assert.NotContains(t, out.String(), "offset")
+}
+
+func TestTableFooterKeepsUnrecognizedEnvelopeFields(t *testing.T) {
+	footer, err := tableFooter(2, "evaluators", map[string]interface{}{
+		"enabled": true,
+		"id":      "pol_1",
+		"name":    "PII guard",
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, "enabled: true · id: pol_1 · name: PII guard", footer)
+}
+
+func TestDefaultFormatterSerializesTableFormatWhenNotATerminal(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(false, false).FormatList([]interface{}{
+		map[string]interface{}{"id": "one"},
+	})
+	assert.NoError(t, err)
+	assert.NotContains(t, out.String(), "│")
+	assert.Contains(t, out.String(), "id")
+}
+
+// Forced color makes tty true on a pipe, which must not turn a redirect into a table.
+func TestDefaultFormatterSerializesForColorForcedOntoAPipe(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	formatter := NewDefaultFormatter(true, false)
+	err := formatter.FormatList([]interface{}{map[string]interface{}{"id": "one"}})
+	assert.NoError(t, err)
+	assert.NotContains(t, out.String(), "│")
+}
+
+func TestDefaultFormatterKeepsExplicitFormatOnATerminal(t *testing.T) {
+	for _, format := range []string{"json", "yaml", "toon"} {
+		t.Run(format, func(t *testing.T) {
+			viper.Reset()
+			viper.Set("output-format", format)
+			viper.Set("jmespath", "")
+			viper.Set("raw", false)
+
+			out := new(bytes.Buffer)
+			original := Stdout
+			Stdout = out
+			t.Cleanup(func() { Stdout = original })
+
+			err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+				map[string]interface{}{"id": "one"},
+			})
+			assert.NoError(t, err)
+			assert.NotContains(t, out.String(), "│")
+		})
+	}
+}
+
+func TestDefaultFormatterRawWinsOverTable(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "[].id")
+	viper.Set("raw", true)
+
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{"id": "one"},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, "one\n", out.String())
+}
+
+func TestDefaultFormatterColumnsFlagSelectsColumns(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	viper.Set("columns", " name , id ")
+
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{"id": "one", "name": "first", "note": "hidden"},
+	}, "id")
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "│ NAME  │ ID  │")
+	assert.NotContains(t, out.String(), "NOTE")
+}
+
+func TestDefaultFormatterWarnsWhenAListCannotBeTabulated(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+
+	out, errOut := new(bytes.Buffer), new(bytes.Buffer)
+	originalOut, originalErr := Stdout, Stderr
+	Stdout, Stderr = out, errOut
+	t.Cleanup(func() { Stdout, Stderr = originalOut, originalErr })
+
+	// Two candidate arrays: nothing to tabulate without being told which.
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
+		"input":  []interface{}{map[string]interface{}{"id": "one"}},
+		"output": []interface{}{map[string]interface{}{"id": "two"}},
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, errOut.String(), "Not shown as a table")
+	assert.Contains(t, out.String(), "input")
+}
+
+func TestDefaultFormatterRejectsUnknownColumn(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	viper.Set("columns", "id,nmae")
+
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{"id": "one", "name": "first"},
+	})
+	assert.ErrorContains(t, err, `--columns: "nmae" is not a field of the returned items`)
+	assert.Empty(t, out.String())
+}
+
+func TestDefaultFormatterRejectsEmptyColumnList(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	viper.Set("columns", " , ")
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{"id": "one"},
+	})
+	assert.ErrorContains(t, err, "names no columns")
+}
+
+// Trimming to fit is for a guess. Columns someone asked for by name are the
+// one thing the flag exists to guarantee, so a narrow terminal keeps them.
+func TestDefaultFormatterTrimsOnlyGuessedColumns(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		columns string
+		want    func(assert.TestingT, interface{}, interface{}, ...interface{}) bool
+	}{
+		{"asked for by name", "id,name,description", assert.Contains},
+		{"guessed", "", assert.NotContains},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			viper.Reset()
+			viper.Set("output-format", tableFormat)
+			viper.Set("jmespath", "")
+			viper.Set("raw", false)
+			viper.Set("columns", tc.columns)
+
+			out := new(bytes.Buffer)
+			originalOut, originalWidth := Stdout, terminalWidth
+			Stdout, terminalWidth = out, func() int { return 20 }
+			t.Cleanup(func() { Stdout, terminalWidth = originalOut, originalWidth })
+
+			err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+				map[string]interface{}{"id": "one", "name": "first", "description": "a long description"},
+			})
+			assert.NoError(t, err)
+			tc.want(t, out.String(), "DESCRIPTION")
+		})
+	}
+}
+
+// Accepting --columns and then ignoring it is the same silent mismatch the
+// table fallback notice exists to prevent.
+func TestDefaultFormatterSaysWhenColumnsAreIgnored(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", "json")
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	viper.Set("columns", "id")
+
+	out, errOut := new(bytes.Buffer), new(bytes.Buffer)
+	originalOut, originalErr := Stdout, Stderr
+	Stdout, Stderr = out, errOut
+	t.Cleanup(func() { Stdout, Stderr = originalOut, originalErr })
+
+	err := NewDefaultFormatter(true, true).FormatList([]interface{}{
+		map[string]interface{}{"id": "one", "name": "first"},
+	}, "id")
+	assert.NoError(t, err)
+	assert.Contains(t, errOut.String(), "--columns was ignored")
+	assert.Contains(t, out.String(), `"name"`)
+}
+
+func TestDefaultFormatterSuppressesCursorPlumbingInFooter(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	err := NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
+		"object": "list",
+		"data": []map[string]interface{}{
+			{"id": "trace_1", "name": "first"},
+		},
+		"has_more":        true,
+		"next_page_token": "eyJvZmZzZXQiOjUwfQ",
+		"total_pages":     3,
+	})
+
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "trace_1")
+	assert.NotContains(t, out.String(), "eyJvZmZzZXQiOjUwfQ")
+	assert.NotContains(t, out.String(), "total_pages")
+	assert.Contains(t, out.String(), "1 shown, more available")
+}
+
+func TestDefaultFormatterFooterReadsEveryMoreAvailableSpelling(t *testing.T) {
+	for name, metadata := range map[string]map[string]interface{}{
+		"has_next_page":   {"has_next_page": true},
+		"next_page_token": {"next_page_token": "eyJvZmZzZXQiOjUwfQ"},
+		"cursor":          {"cursor": "abc"},
+		"total_pages":     {"total_pages": 3},
+	} {
+		t.Run(name, func(t *testing.T) {
+			viper.Reset()
+			viper.Set("output-format", tableFormat)
+			viper.Set("jmespath", "")
+			viper.Set("raw", false)
+			out := new(bytes.Buffer)
+			original := Stdout
+			Stdout = out
+			t.Cleanup(func() { Stdout = original })
+
+			payload := map[string]interface{}{
+				"data": []map[string]interface{}{{"id": "trace_1"}},
+			}
+			for key, value := range metadata {
+				payload[key] = value
+			}
+
+			assert.NoError(t, NewDefaultFormatter(true, true).FormatList(payload))
+			assert.Contains(t, out.String(), "1 shown, more available")
+			assert.NotContains(t, out.String(), name+":")
+		})
+	}
+}
+
+func TestDefaultFormatterFooterStaysQuietWithoutMorePages(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("jmespath", "")
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	original := Stdout
+	Stdout = out
+	t.Cleanup(func() { Stdout = original })
+
+	assert.NoError(t, NewDefaultFormatter(true, true).FormatList(map[string]interface{}{
+		"data":        []map[string]interface{}{{"id": "trace_1"}},
+		"has_more":    false,
+		"total_pages": 1,
+	}))
+	assert.NotContains(t, out.String(), "more available")
 }

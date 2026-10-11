@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+
 	custom "{{ .ModulePath }}/cli/custom"
 	generated "{{ .ModulePath }}/cli/generated"
 	bartolocli "github.com/orq-ai/bartolo/cli"
@@ -11,12 +13,12 @@ func main() {
 		AppName:             "{{ .Name }}",
 		EnvPrefix:           "{{ .NameEnv }}",
 		APIKeyEnvVar:        "{{ .APIKeyEnvVar }}",
-		DefaultOutputFormat: "{{ .DefaultOutputFormat }}",
+		SerializationFormat: "{{ .SerializationFormat }}",
 		Version:             "{{ .AppVersion }}",
 	})
 
 	generated.Register(bartolocli.Root)
 	custom.Register(bartolocli.Root)
 
-	bartolocli.Root.Execute()
+	os.Exit(bartolocli.Execute())
 }

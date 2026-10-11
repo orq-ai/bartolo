@@ -40,7 +40,7 @@ The scaffold also includes:
 Check the generated setup before making requests:
 
 ```sh
-{{ .CommandName }} --json doctor
+{{ .CommandName }} -o json doctor
 ```
 
 ## Authentication
@@ -61,7 +61,26 @@ Environment variables:
 - `{{ . }}`
 {{- end }}
 
-Project-local `.env` and `.env.local` files are loaded automatically if present.
+### Dotenv files
+
+This CLI does **not** read `.env` or `.env.local`. Loading credentials from the
+working directory would let the directory you are standing in decide which
+credentials you send; use your shell or `direnv` if you want that.
+
+Run a command with `{{ .AuthDoc.EnvPrefix }}_DOTENV=1` to opt in. It is an
+ordinary environment variable, so exporting it enables dotenv for the rest of
+the shell session — prefer `{{ .AuthDoc.EnvPrefix }}_DOTENV=1 {{ .CommandName }}
+...`. A value that is not a boolean is an error, not a silent "off". There is no
+config-file equivalent, deliberately. When it is enabled:
+
+- Only `{{ .AuthDoc.EnvPrefix }}_`-prefixed variables and the API key variable
+  above are imported. That includes settings, not just credentials —
+  `{{ .AuthDoc.EnvPrefix }}_SERVER` in a `.env` retargets the CLI — but the rest
+  of an application `.env` is ignored.
+- A variable already present in the environment wins, including one exported as
+  empty; a file never overwrites an `export`.
+- `{{ .CommandName }} doctor` reports a `dotenv` source and names the file, so a
+  key from a file is never mistaken for one you exported.
 {{- end }}
 {{- if .AuthDoc.ProfileCommand }}
 
@@ -70,6 +89,46 @@ Profile setup:
 ```sh
 {{ .AuthDoc.ProfileCommand }}
 ```
+
+Bind a profile to its own API base URL with `--server` when adding it, so you do
+not have to repeat the flag on every call:
+
+```sh
+{{ .CommandName }} auth profile add --server https://api.staging.example.com staging
+```
+
+`{{ .CommandName }} auth setup` takes the same flag.
+
+Each secret is prompted for without echo. In CI or automation, use `--<key>-file <path>`
+(or `--<key>-file -` for stdin) to supply secrets without putting them on the command line.
+Positional arguments still work but print a warning for sensitive keys.
+
+Pick the profile every command uses, so `--profile` does not have to be repeated:
+
+```sh
+{{ .CommandName }} auth profile use staging   # `auth profile list` marks the active one
+{{ .CommandName }} auth profile current       # see the active profile
+{{ .CommandName }} auth profile clear         # go back to no profile
+{{ .CommandName }} auth profile remove staging  # delete it (aliases: rm, delete)
+```
+
+There is no implicit profile. Until one is named or chosen, credentials come
+from the environment variables above, which is the usual shape in CI. A profile
+you add is auto-selected whenever no profile is currently active — including
+right after `auth profile clear`, so adding another profile silently
+re-enables profiles.
+
+Once a profile is in force it outranks the environment for its key, so
+`--profile staging` cannot end up sending a key that came from the
+environment — see "Server resolution order" below for how a profile's server
+fits in. A profile that cannot supply a key is an error rather than a silent
+fallback, and `--profile ""` turns profiles off for one command.
+
+Server resolution order, most specific first: an explicit `--server` flag, the
+profile's bound server, the `<PREFIX>_SERVER` environment variable (same prefix
+as the variables above), a persisted `server set` default, then the generated
+server default. `auth profile list` shows the server bound to each profile, and
+`doctor` shows the one the active profile resolves to.
 {{- end }}
 {{- if .AuthDoc.ManualNotes }}
 
@@ -228,10 +287,14 @@ Bartolo keeps generated and user-owned code separate:
 
 ## Output Conventions
 
-- Prefer `--json` when you want machine-readable output.
+- `-o table|json|yaml|toon` picks the output. With the default `-o table`, collection commands render object results as readable tables in an interactive terminal and fall back to the CLI's serialization format everywhere else — a pipe, a redirect, a non-list command, or a payload that is not a collection. `--raw` also suppresses the table.
+- GET collections are inferred automatically, as is any method whose 2xx JSON response is a conventional page of rows: an array of objects under `data`, `items`, `results`, `records`, `entries` or `servers`, next to a field that describes the collection — `has_more`, `next_page_token`, a cursor, `total_count`, `count`. An echoed `limit` or `offset` is hidden from the table footer but does not classify an operation. Only immediate properties are read, so an envelope or a row schema composed with `allOf`/`oneOf` is not inferred. Anything else can opt in with `x-cli-list: true`, and `x-cli-list: false` disables inference. A non-empty `x-cli-list-fields` list both marks the operation as a collection and sets the table's ordered default columns (an empty `x-cli-list-fields: []` marks nothing on its own); otherwise columns are inferred from the response (nested objects skipped, lists abbreviated to their first three entries) and trimmed to fit the terminal. Use `--columns id,name` to pick and order them for one invocation. Declared or explicit columns can reach through nested objects with `model.id` and can project a field from one nested array with `settings.tools[].key`; elements that are not objects or that lack the field are skipped before the usual three-entry list abbreviation, and a field that is present but null renders nothing while still confirming the column exists. A nested column is labelled by its last field, extended with parent fields only as far as needed to keep headers distinct (`pricing.input.cost` and `pricing.output.cost` show as `INPUT . COST` and `OUTPUT . COST`); array markers are not shown and literal keys keep their full name. An empty or null array renders a blank cell and still validates the column, so confirm a name against a response whose arrays have elements. A selector supports one `[]` and requires a field after it; a bracket the grammar does not accept — an array index, a second `[]` — is reported with that rule. Because `[]` contains shell metacharacters, quote the complete argument when selecting a projected column, for example `--columns 'key,settings.tools[].key'`. Use `--jmespath` for indexing, filtering, aggregation, multiple projections, or another one-off restructuring (its result is tabled with columns inferred from the projected rows), and `-o json` for the complete response.
+- Prefer `-o json` when you want machine-readable output.
+- Piping a response also keeps the serialized output stable for scripts and agents.
 - Use `--help` on any command group or command to inspect flags and required args.
 - Use `help-input` when a command accepts a request body from stdin or CLI shorthand.
 - Use `server list`, `server use`, and `server set` to manage generated server defaults.
+- Use `auth profile list`, `auth profile use`, `auth profile current`, and `auth profile clear` to see, pick, show, and drop the active credentials profile, and `auth profile remove <name>` to delete one outright.
 - `make build` writes the binary to `./bin/{{ .CommandName }}`.
 - `make install-local` installs the binary to `~/.local/bin/{{ .CommandName }}` by default.
 - `make completions` writes shell completion files into `./completions/`.

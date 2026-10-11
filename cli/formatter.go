@@ -3,14 +3,21 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"reflect"
+	"slices"
+	"sort"
+	"strings"
 
 	"github.com/alecthomas/chroma"
 	"github.com/alecthomas/chroma/quick"
 	"github.com/alecthomas/chroma/styles"
+	"github.com/olekukonko/tablewriter"
+	"github.com/olekukonko/tablewriter/tw"
 	"github.com/orq-ai/bartolo/internal/jmespathx"
 	"github.com/spf13/viper"
 	toon "github.com/toon-format/toon-go"
+	"golang.org/x/term"
 	"gopkg.in/yaml.v2"
 )
 
@@ -40,42 +47,108 @@ func init() {
 	}))
 }
 
+const (
+	// maxCellWidth keeps one long value from pushing other columns off screen.
+	maxCellWidth = 40
+
+	// maxCellItems is how many entries of a list value a cell shows before "…".
+	maxCellItems = 3
+
+	// defaultTableWidth is used when the terminal size is unavailable.
+	defaultTableWidth = 120
+)
+
 // ResponseFormatter will filter, prettify, and print out the results of a call.
 type ResponseFormatter interface {
 	Format(interface{}) error
 }
 
-// DefaultFormatter can apply JMESPath queries and can output prettyfied JSON,
-// YAML, or TOON output. If Stdout is a TTY, then colorized output is provided.
-// The default formatter uses the `query` and `output-format` configuration
-// values to perform JMESPath queries and set JSON (default), YAML, or TOON
-// output.
-type DefaultFormatter struct {
-	tty bool
+// FormatList renders a collection through the formatter's collection-aware
+// output, falling back to Format for custom ResponseFormatter implementations.
+func FormatList(data interface{}, columns ...string) error {
+	if listFormatter, ok := Formatter.(interface {
+		FormatList(interface{}, ...string) error
+	}); ok {
+		return listFormatter.FormatList(data, columns...)
+	}
+	return Formatter.Format(data)
 }
 
-// NewDefaultFormatter creates a new formatted with autodetected TTY
-// capabilities.
-func NewDefaultFormatter(tty bool) *DefaultFormatter {
+// DefaultFormatter can apply JMESPath queries and can render a table or output
+// prettyfied JSON, YAML, or TOON. If Stdout is a TTY, colorized output is provided.
+type DefaultFormatter struct {
+	// tty and terminal differ when color is forced onto a pipe.
+	tty      bool
+	terminal bool
+}
+
+// NewDefaultFormatter creates a new formatter. tty enables colorized output;
+// terminal reports whether stdout really is a terminal. They are separate
+// arguments because forcing color on makes the first true on a pipe, and a pipe
+// must never render a table.
+func NewDefaultFormatter(tty, terminal bool) *DefaultFormatter {
 	return &DefaultFormatter{
-		tty: tty,
+		tty:      tty,
+		terminal: terminal,
 	}
 }
 
 // Format will filter, prettify, colorize and output the data.
 func (f *DefaultFormatter) Format(data interface{}) error {
+	return f.format(data, false, nil)
+}
+
+// FormatList renders a collection as a table for a human at a terminal and
+// keeps the serialized output for pipes and explicit format flags.
+func (f *DefaultFormatter) FormatList(data interface{}, columns ...string) error {
+	return f.format(data, true, columns)
+}
+
+func (f *DefaultFormatter) format(data interface{}, list bool, columns []string) error {
+	if !list {
+		columns = nil
+	}
 	if data == nil {
 		data = nil
 	}
 
-	if viper.GetString("query") != "" {
-		result, err := jmespathx.Search(viper.GetString("query"), data)
+	if viper.GetString("jmespath") != "" {
+		result, err := jmespathx.Search(viper.GetString("jmespath"), data)
 
 		if err != nil {
 			return err
 		}
 
-		data = result
+		// The schema's columns describe the original rows, not the projection.
+		data, columns = result, nil
+	}
+
+	override := ""
+	if list {
+		override = viper.GetString("columns")
+	}
+
+	if list && f.shouldRenderTable() {
+		userColumns := false
+		if override != "" {
+			selected, err := splitColumns(override)
+			if err != nil {
+				return err
+			}
+
+			columns, userColumns = selected, true
+		}
+
+		if rendered, err := renderTable(data, columns, userColumns); err != nil {
+			return err
+		} else if rendered {
+			return nil
+		}
+
+		// Falling back silently looks exactly like the bug this path exists to fix.
+		fmt.Fprintf(Stderr, "Not shown as a table: this response is not a recognizable collection. Showing %s instead.\n", configuredSerialization)
+	} else if override != "" {
+		fmt.Fprintf(Stderr, "--columns was ignored: this output is not a table. Showing %s instead.\n", serializationFormat())
 	}
 
 	// Encode to the requested output format using nice formatting.
@@ -130,7 +203,7 @@ func (f *DefaultFormatter) Format(data interface{}) error {
 	}
 
 	if !handled {
-		switch viper.GetString("output-format") {
+		switch serializationFormat() {
 		case "yaml":
 			encoded, err = yaml.Marshal(data)
 
@@ -174,4 +247,758 @@ func (f *DefaultFormatter) Format(data interface{}) error {
 	}
 
 	return nil
+}
+
+// tableFormat renders a list command as a table for a human at a terminal.
+// tableFallbackFormat is what it serializes to everywhere else when the CLI
+// configured nothing: a piped or redirected run, a non-list command, and a
+// payload that is not a collection. It is JSON because whatever reads a pipe
+// is far more likely to be `jq` than a model; a CLI that knows otherwise says
+// so with Config.SerializationFormat.
+const (
+	tableFormat         = "table"
+	tableFallbackFormat = "json"
+)
+
+// serializationFormat is the format to encode with. `table` is a rendering
+// choice rather than a serialization, so the CLI's configured one stands in.
+func serializationFormat() string {
+	if format := OutputFormat(); format != tableFormat {
+		return format
+	}
+
+	return configuredSerialization
+}
+
+// serializationOrDefault resolves Config.SerializationFormat. `table` cannot be
+// what a table falls back to, so it is rejected like any unknown value.
+func serializationOrDefault(value string) string {
+	if format, ok := parseOutputFormat(value); ok && format != tableFormat {
+		return format
+	}
+
+	return tableFallbackFormat
+}
+
+// splitColumns parses the `--columns` value. A JMESPath projection is the tool
+// for reshaping data; this only picks which of the existing fields to show.
+func splitColumns(value string) ([]string, error) {
+	columns := make([]string, 0, 1)
+	for _, column := range strings.Split(value, ",") {
+		if trimmed := strings.TrimSpace(column); trimmed != "" {
+			columns = append(columns, trimmed)
+		}
+	}
+
+	if len(columns) == 0 {
+		return nil, NewValueError(fmt.Errorf("--columns: %q names no columns", value))
+	}
+
+	return columns, nil
+}
+
+func (f *DefaultFormatter) shouldRenderTable() bool {
+	return f.terminal && !viper.GetBool("raw") && OutputFormat() == tableFormat
+}
+
+// checkColumns rejects a column no row has. A misspelled name would otherwise
+// render as a blank column, which reads as missing data rather than a typo.
+// Empty and null projected arrays are indeterminate: they validate a result
+// with nothing to project, but cannot outweigh a populated array whose
+// elements do not contain the path.
+func checkColumns(requestedColumns []string, rows []map[string]interface{}, userColumns bool) error {
+	if len(requestedColumns) == 0 || len(rows) == 0 {
+		return nil
+	}
+
+	for _, column := range requestedColumns {
+		found := false
+		emptyProjection := false
+		unresolvedPopulatedProjection := false
+		notAnArray := ""
+		for _, row := range rows {
+			_, resolution := resolveTableField(row, column)
+			switch resolution {
+			case tableFieldResolved, tableFieldLiteral:
+				found = true
+			case tableFieldEmptyProjection:
+				emptyProjection = true
+			case tableFieldUnresolvedPopulatedProjection:
+				unresolvedPopulatedProjection = true
+			case tableFieldPrefixNotAnArray:
+				notAnArray = column
+			}
+			if found {
+				// One row carrying the column settles it; nothing later overturns a hit.
+				break
+			}
+		}
+		found = found || (emptyProjection && !unresolvedPopulatedProjection)
+
+		if !found {
+			label := "declared column"
+			if userColumns {
+				label = "--columns"
+			}
+			if notAnArray != "" {
+				prefix, _, _ := parseTableProjection(notAnArray)
+				return NewValueError(fmt.Errorf(
+					"%s: %q projects %q, which is not an array in the returned items", label, column, prefix))
+			}
+			// A bracket is more often a mistyped selector than a literal key,
+			// so name the rule instead of sending the reader to the response.
+			if strings.Contains(column, "[") {
+				return NewValueError(fmt.Errorf(
+					"%s: %q is not a field of the returned items; a selector supports one [] and needs a field after it, such as settings.tools[].key — use --jmespath for indexing or filtering",
+					label, column))
+			}
+			return NewValueError(fmt.Errorf("%s: %q is not a field of the returned items", label, column))
+		}
+	}
+
+	return nil
+}
+
+type tableProjectionState uint8
+
+const (
+	tableProjectionAbsent tableProjectionState = iota
+	tableProjectionValid
+	tableProjectionInvalid
+)
+
+type tableFieldResolution uint8
+
+const (
+	tableFieldMissing tableFieldResolution = iota
+	tableFieldResolved
+	// tableFieldLiteral is a resolved column found as an exact flat key, so
+	// its dots are part of one name rather than a path.
+	tableFieldLiteral
+	tableFieldEmptyProjection
+	tableFieldUnresolvedPopulatedProjection
+	tableFieldPrefixNotAnArray
+)
+
+// parseTableProjection splits "settings.tools[].key" into the arrayPath
+// "settings.tools" and the elementPath "key". Exactly one segment may carry a
+// trailing [], it may not be the last segment, and no segment may be empty;
+// anything else is invalid and is not a projection.
+func parseTableProjection(column string) (arrayPath, elementPath string, state tableProjectionState) {
+	parts := strings.Split(column, ".")
+	projection := -1
+	for i, part := range parts {
+		if part == "" {
+			return "", "", tableProjectionInvalid
+		}
+		if !strings.HasSuffix(part, "[]") {
+			continue
+		}
+		if projection >= 0 || i == len(parts)-1 || strings.Count(part, "[]") != 1 {
+			return "", "", tableProjectionInvalid
+		}
+		parts[i] = strings.TrimSuffix(part, "[]")
+		if parts[i] == "" {
+			return "", "", tableProjectionInvalid
+		}
+		projection = i
+	}
+
+	if projection < 0 {
+		return "", "", tableProjectionAbsent
+	}
+	return strings.Join(parts[:projection+1], "."), strings.Join(parts[projection+1:], "."), tableProjectionValid
+}
+
+// resolveTableField resolves dotted object paths and one array projection
+// while preserving literal keys. An empty projection resolves to an empty
+// list, not to a missing field, so the row renders a blank cell.
+func resolveTableField(row map[string]interface{}, column string) (interface{}, tableFieldResolution) {
+	if value, ok := row[column]; ok {
+		return value, tableFieldLiteral
+	}
+
+	prefix, suffix, projection := parseTableProjection(column)
+	if projection != tableProjectionValid {
+		// Anything but a valid projection is an ordinary property name, so a
+		// literal key spelled with brackets keeps working.
+		value, ok := objectField(row, column)
+		if !ok {
+			return nil, tableFieldMissing
+		}
+		return value, tableFieldResolved
+	}
+
+	value, ok := objectField(row, prefix)
+	if !ok {
+		return nil, tableFieldMissing
+	}
+	if value == nil {
+		// A null list is the same absence as an empty one, not a missing field.
+		return []interface{}{}, tableFieldEmptyProjection
+	}
+	items, ok := value.([]interface{})
+	if !ok {
+		// The prefix is there, just the wrong shape; saying so beats claiming
+		// it is absent when the reader can see it in -o json.
+		return nil, tableFieldPrefixNotAnArray
+	}
+	if len(items) == 0 {
+		return []interface{}{}, tableFieldEmptyProjection
+	}
+
+	projected := make([]interface{}, 0, len(items))
+	resolved := false
+	for _, item := range items {
+		object, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		child, ok := objectField(object, suffix)
+		if !ok {
+			continue
+		}
+		// A present null proves the column exists even though it renders nothing.
+		resolved = true
+		if child != nil {
+			projected = append(projected, child)
+		}
+	}
+	if !resolved {
+		return nil, tableFieldUnresolvedPopulatedProjection
+	}
+	return projected, tableFieldResolved
+}
+
+// objectField resolves exact or dotted keys through objects only.
+func objectField(row map[string]interface{}, column string) (interface{}, bool) {
+	if value, ok := row[column]; ok {
+		return value, true
+	}
+
+	parts := strings.Split(column, ".")
+	if len(parts) < 2 {
+		return nil, false
+	}
+
+	var value interface{} = row
+	for _, part := range parts {
+		if part == "" {
+			return nil, false
+		}
+		object, ok := value.(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		value, ok = object[part]
+		if !ok {
+			return nil, false
+		}
+	}
+	return value, true
+}
+
+// renderTable reports false for anything that is not a collection so callers
+// can fall back to the requested serialization format.
+func renderTable(data interface{}, requestedColumns []string, userColumns bool) (bool, error) {
+	rows, label, metadata, ok := tableRows(data, requestedColumns)
+	if !ok {
+		return false, nil
+	}
+
+	if err := checkColumns(requestedColumns, rows, userColumns); err != nil {
+		return false, err
+	}
+
+	headers := append([]string(nil), requestedColumns...)
+	if len(headers) == 0 {
+		headers = autoColumns(rows)
+	}
+	if len(headers) == 0 && len(rows) > 0 {
+		return false, nil
+	}
+
+	if len(rows) == 0 && len(headers) == 0 {
+		fmt.Fprintln(Stdout, "No results.")
+		return true, nil
+	}
+
+	literal := make([]bool, len(headers))
+	values := make([][]string, 0, len(rows))
+	for _, row := range rows {
+		cells := make([]string, len(headers))
+		for i, key := range headers {
+			rawValue, resolution := resolveTableField(row, key)
+			literal[i] = literal[i] || resolution == tableFieldLiteral
+			value, err := tableValue(rawValue)
+			if err != nil {
+				return false, err
+			}
+			cells[i] = truncateCell(value)
+		}
+		values = append(values, cells)
+	}
+
+	// Labels before fitting, so widths are budgeted on what is printed.
+	labels := tableHeaders(headers, literal)
+	// Columns someone asked for — by spec or on the command line — are never dropped.
+	if len(requestedColumns) == 0 {
+		labels, values = fitColumns(labels, values, terminalWidth())
+	}
+
+	table := tablewriter.NewTable(Stdout,
+		tablewriter.WithHeaderAutoFormat(tw.Off),
+		tablewriter.WithHeaderAutoWrap(tw.WrapNone),
+		tablewriter.WithRowAutoWrap(tw.WrapNone),
+	)
+	table.Header(labels)
+	for _, cells := range values {
+		if err := table.Append(cells); err != nil {
+			return false, err
+		}
+	}
+	if err := table.Render(); err != nil {
+		return false, err
+	}
+
+	footer, err := tableFooter(len(rows), label, metadata)
+	if err != nil {
+		return false, err
+	}
+	if footer != "" {
+		fmt.Fprintln(Stdout, footer)
+	}
+	return true, nil
+}
+
+// tableHeaders labels each column by its shortest unique suffix of path
+// segments: metadata.context_window renders as CONTEXT WINDOW, while
+// pricing.input.cost and pricing.output.cost extend to INPUT . COST and
+// OUTPUT . COST. Array markers are dropped, so settings.tools[].key is KEY.
+// A literal column is one segment and keeps its whole name. Columns equal at
+// full length keep equal headers.
+func tableHeaders(columns []string, literal []bool) []string {
+	segments := make([][]string, len(columns))
+	used := make([]int, len(columns))
+	for i, column := range columns {
+		segments[i] = tableHeaderSegments(column, literal[i])
+		used[i] = 1
+	}
+
+	headers := make([]string, len(columns))
+	for {
+		groups := make(map[string][]int, len(columns))
+		for i, parts := range segments {
+			suffix := parts[len(parts)-used[i]:]
+			formatted := make([]string, len(suffix))
+			for j, part := range suffix {
+				formatted[j] = formatTableHeader(part)
+			}
+			headers[i] = strings.Join(formatted, " . ")
+			groups[headers[i]] = append(groups[headers[i]], i)
+		}
+
+		extended := false
+		for _, members := range groups {
+			if len(members) < 2 {
+				continue
+			}
+			for _, i := range members {
+				if used[i] < len(segments[i]) {
+					used[i]++
+					extended = true
+				}
+			}
+		}
+		if !extended {
+			return headers
+		}
+	}
+}
+
+// tableHeaderSegments splits a column into its path segments, without the []
+// projection marker. A literal key is a single segment.
+func tableHeaderSegments(column string, literal bool) []string {
+	if literal {
+		return []string{column}
+	}
+	arrayPath, elementPath, projection := parseTableProjection(column)
+	if projection == tableProjectionValid {
+		return append(strings.Split(arrayPath, "."), strings.Split(elementPath, ".")...)
+	}
+	return strings.Split(column, ".")
+}
+
+// formatTableHeader is tablewriter's own AutoFormat expression
+// (tablewriter.go:987), reproduced here because header AutoFormat is off so
+// that suffixes are formatted per segment and joined with " . ".
+func formatTableHeader(value string) string {
+	return tw.Title(strings.Join(tw.SplitCamelCase(value), tw.Space))
+}
+
+// tableFooter summarizes the envelope in one line below the table: how many
+// rows are shown out of how many exist, then whatever else the envelope holds.
+// Pagination plumbing is for scripts reading `-o json`, not for a reader looking
+// at a table.
+func tableFooter(shown int, label string, metadata map[string]interface{}) (string, error) {
+	if label == "" {
+		return "", nil
+	}
+
+	parts := make([]string, 0, len(metadata))
+	if total, ok := metadataInt(metadata, "total", "total_count"); ok {
+		parts = append(parts, fmt.Sprintf("%d of %d", shown, total))
+	} else if moreAvailable(metadata) {
+		parts = append(parts, fmt.Sprintf("%d shown, more available", shown))
+	}
+
+	keys := make([]string, 0, len(metadata))
+	for key, value := range metadata {
+		if _, isRows := objectRowsValue(value, true); isRows || isEnvelopePlumbing(key, value) {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value, err := tableValue(metadata[key])
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, fmt.Sprintf("%s: %s", key, truncateCell(value)))
+	}
+	return strings.Join(parts, " · "), nil
+}
+
+// moreAvailable reports whether the envelope says another page exists, in any of the spellings the footer hides.
+func moreAvailable(metadata map[string]interface{}) bool {
+	for _, key := range []string{"has_more", "has_next_page"} {
+		if more, ok := metadata[key].(bool); ok && more {
+			return true
+		}
+	}
+	for _, key := range []string{"next_page_token", "next_page", "next_cursor", "cursor", "starting_after"} {
+		if token, ok := metadata[key].(string); ok && token != "" {
+			return true
+		}
+	}
+	pages, ok := metadataInt(metadata, "total_pages")
+	return ok && pages > 1
+}
+
+func metadataInt(metadata map[string]interface{}, keys ...string) (int, bool) {
+	for _, key := range keys {
+		switch value := metadata[key].(type) {
+		case float64:
+			return int(value), true
+		case int:
+			return value, true
+		}
+	}
+	return 0, false
+}
+
+// PaginationEvidenceKeys are the envelope fields that describe the collection
+// itself. The generator classifies from these, so `limit` and its friends, which
+// describe the request that asked for it, are not here.
+var PaginationEvidenceKeys = []string{
+	"has_more", "has_next_page", "next_page_token", "next_page",
+	"next_cursor", "prev_cursor", "cursor", "next", "previous",
+	"starting_after", "ending_before",
+	"total", "total_count", "total_pages", "count",
+}
+
+// FooterSuppressedKeys are the envelope fields the table hides below itself: the
+// paging evidence plus the request echoes. Kept separate so that widening what
+// the footer hides cannot change what renders as a table.
+var FooterSuppressedKeys = append(append([]string{}, PaginationEvidenceKeys...),
+	"limit", "offset", "page", "per_page")
+
+// isEnvelopePlumbing reports whether a top-level key is paging bookkeeping, or
+// only restates that the response is a collection (Stripe-style object: list).
+func isEnvelopePlumbing(key string, value interface{}) bool {
+	switch key {
+	case "object", "kind", "type":
+		return value == "list" || value == "collection"
+	}
+	return slices.Contains(FooterSuppressedKeys, key)
+}
+
+// autoColumns picks columns for a collection without x-cli-list-fields:
+// scalar values only, recognizable identifiers first.
+func autoColumns(rows []map[string]interface{}) []string {
+	scalar := make(map[string]bool)
+	for _, row := range rows {
+		for key, value := range row {
+			switch value.(type) {
+			case nil, map[string]interface{}:
+			default:
+				scalar[key] = true
+			}
+		}
+	}
+
+	headers := make([]string, 0, len(scalar))
+	for _, key := range []string{"id", "key", "name", "display_name", "title", "slug", "type", "status", "state", "model", "created", "created_at", "updated", "updated_at"} {
+		if scalar[key] {
+			headers = append(headers, key)
+			delete(scalar, key)
+		}
+	}
+
+	rest := make([]string, 0, len(scalar))
+	for key := range scalar {
+		rest = append(rest, key)
+	}
+	sort.Strings(rest)
+	return append(headers, rest...)
+}
+
+// fitColumns drops trailing columns that do not fit, always keeping the first.
+func fitColumns(headers []string, values [][]string, width int) ([]string, [][]string) {
+	total := 1
+	keep := 0
+	for i, header := range headers {
+		column := len([]rune(header))
+		for _, cells := range values {
+			if size := len([]rune(cells[i])); size > column {
+				column = size
+			}
+		}
+
+		total += column + 3 // tablewriter pads each cell and draws a separator.
+		if i > 0 && total > width {
+			break
+		}
+		keep = i + 1
+	}
+
+	if keep == len(headers) {
+		return headers, values
+	}
+	for i, cells := range values {
+		values[i] = cells[:keep]
+	}
+	return headers[:keep], values
+}
+
+// A var so a test can render at a width it chose rather than whatever the
+// process happens to be attached to.
+var terminalWidth = func() int {
+	if width, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && width > 0 {
+		return width
+	}
+	return defaultTableWidth
+}
+
+func truncateCell(value string) string {
+	value = strings.ReplaceAll(value, "\n", " ")
+	runes := []rune(value)
+	if len(runes) <= maxCellWidth {
+		return value
+	}
+	return string(runes[:maxCellWidth-1]) + "…"
+}
+
+func tableRows(data interface{}, requestedColumns []string) ([]map[string]interface{}, string, map[string]interface{}, bool) {
+	normalized, ok := normalizeTableValue(data)
+	if !ok {
+		return nil, "", nil, false
+	}
+	data = normalized
+
+	if rows, ok := objectRowsValue(data, len(requestedColumns) > 0); ok {
+		return rows, "", nil, true
+	}
+
+	object, ok := data.(map[string]interface{})
+	if !ok {
+		return nil, "", nil, false
+	}
+
+	// A populated array always wins, so an empty `data` beside a populated
+	// `matches` does not report no results. Empty arrays only enter the running
+	// once nothing populated has, so a `warnings: []` sibling does not make a
+	// populated `matches` ambiguous.
+	if rows, key, ok := collectionCandidate(object, false); ok {
+		return rows, key, object, true
+	}
+	if rows, key, ok := collectionCandidate(object, true); ok {
+		return rows, key, object, true
+	}
+	return nil, "", nil, false
+}
+
+// ConventionalCollectionKeys are envelope names that outrank a wrapper named
+// after the resource, so a stray nested array is not mistaken for the
+// collection.
+var ConventionalCollectionKeys = []string{"items", "data", "results", "records", "entries", "servers"}
+
+func collectionCandidate(object map[string]interface{}, allowEmpty bool) ([]map[string]interface{}, string, bool) {
+	// An empty array only speaks for the envelope when nothing else can be the
+	// payload. A populated array of non-objects is data no table can render, so
+	// `{"ids": ["a"], "warnings": []}` serializes rather than reporting no
+	// results over the ids.
+	if allowEmpty && hasUnrenderableArray(object) {
+		return nil, "", false
+	}
+
+	for _, key := range ConventionalCollectionKeys {
+		if rows, valid := objectRowsValue(object[key], allowEmpty); valid {
+			return rows, key, true
+		}
+	}
+	return soleObjectArray(object, allowEmpty)
+}
+
+func hasUnrenderableArray(object map[string]interface{}) bool {
+	for _, value := range object {
+		if _, valid := objectRowsValue(value, true); valid {
+			continue
+		}
+		switch value.(type) {
+		case []interface{}, []map[string]interface{}:
+			return true
+		}
+	}
+	return false
+}
+
+func soleObjectArray(object map[string]interface{}, allowEmpty bool) ([]map[string]interface{}, string, bool) {
+	found := ""
+	var rows []map[string]interface{}
+	for key, value := range object {
+		result, valid := objectRowsValue(value, allowEmpty)
+		if !valid {
+			continue
+		}
+		if found != "" {
+			return nil, "", false
+		}
+		found, rows = key, result
+	}
+	return rows, found, found != ""
+}
+
+func objectRowsValue(value interface{}, allowEmpty bool) ([]map[string]interface{}, bool) {
+	if values, ok := value.([]interface{}); ok {
+		return objectRows(values, allowEmpty)
+	}
+	if values, ok := value.([]map[string]interface{}); ok {
+		return objectRowsFromMaps(values, allowEmpty)
+	}
+	return nil, false
+}
+
+func objectRows(values []interface{}, allowEmpty bool) ([]map[string]interface{}, bool) {
+	rows := make([]map[string]interface{}, 0, len(values))
+	for _, value := range values {
+		row, ok := value.(map[string]interface{})
+		if !ok {
+			return nil, false
+		}
+		rows = append(rows, row)
+	}
+	if len(rows) == 0 && !allowEmpty {
+		return nil, false
+	}
+	return rows, true
+}
+
+// normalizeTableValue unifies JSON and YAML object shapes for table rendering.
+func normalizeTableValue(value interface{}) (interface{}, bool) {
+	switch value := value.(type) {
+	case map[string]interface{}:
+		result := make(map[string]interface{}, len(value))
+		for key, child := range value {
+			normalized, ok := normalizeTableValue(child)
+			if !ok {
+				return nil, false
+			}
+			result[key] = normalized
+		}
+		return result, true
+	case map[interface{}]interface{}:
+		result := make(map[string]interface{}, len(value))
+		for key, child := range value {
+			name, ok := key.(string)
+			if !ok {
+				return nil, false
+			}
+			normalized, ok := normalizeTableValue(child)
+			if !ok {
+				return nil, false
+			}
+			result[name] = normalized
+		}
+		return result, true
+	case []interface{}:
+		result := make([]interface{}, len(value))
+		for i, child := range value {
+			normalized, ok := normalizeTableValue(child)
+			if !ok {
+				return nil, false
+			}
+			result[i] = normalized
+		}
+		return result, true
+	case []map[string]interface{}:
+		result := make([]interface{}, len(value))
+		for i, child := range value {
+			normalized, ok := normalizeTableValue(child)
+			if !ok {
+				return nil, false
+			}
+			result[i] = normalized
+		}
+		return result, true
+	default:
+		return value, true
+	}
+}
+
+func objectRowsFromMaps(values []map[string]interface{}, allowEmpty bool) ([]map[string]interface{}, bool) {
+	if len(values) == 0 && !allowEmpty {
+		return nil, false
+	}
+	return values, true
+}
+
+func tableValue(value interface{}) (string, error) {
+	switch typed := value.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return typed, nil
+	case []interface{}:
+		return listValue(typed)
+	case []map[string]interface{}:
+		items := make([]interface{}, len(typed))
+		for i, item := range typed {
+			items[i] = item
+		}
+		return listValue(items)
+	}
+
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func listValue(items []interface{}) (string, error) {
+	parts := make([]string, 0, maxCellItems+1)
+	for i, item := range items {
+		if i == maxCellItems {
+			parts = append(parts, "…")
+			break
+		}
+		text, err := tableValue(item)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, text)
+	}
+	return strings.Join(parts, ", "), nil
 }

@@ -1,13 +1,19 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/rs/zerolog"
 	"github.com/spf13/viper"
+	"github.com/stretchr/testify/assert"
 )
 
 type stubAuthHandler struct{}
@@ -15,42 +21,1583 @@ type stubAuthHandler struct{}
 func (stubAuthHandler) ProfileKeys() []string                              { return []string{"api-key"} }
 func (stubAuthHandler) OnRequest(_ *zerolog.Logger, _ *http.Request) error { return nil }
 
-func TestSaveAuthProfile(t *testing.T) {
+// stubOptionalKeyHandler declares a required credential plus an optional
+// extra field (e.g. a region), narrowing what must be present via
+// RequiredKeysHandler the same way apikey.Handler does.
+type stubOptionalKeyHandler struct{}
+
+func (stubOptionalKeyHandler) ProfileKeys() []string { return []string{"api-key", "region"} }
+func (stubOptionalKeyHandler) RequiredProfileKeys() []string {
+	return []string{"api-key"}
+}
+func (stubOptionalKeyHandler) OnRequest(_ *zerolog.Logger, _ *http.Request) error { return nil }
+
+// stubTwoKeyHandler declares two profile keys but does not implement
+// RequiredKeysHandler, so both must stay required.
+type stubTwoKeyHandler struct{}
+
+func (stubTwoKeyHandler) ProfileKeys() []string                              { return []string{"api-key", "region"} }
+func (stubTwoKeyHandler) OnRequest(_ *zerolog.Logger, _ *http.Request) error { return nil }
+
+// stubMismatchedSpellingHandler spells its required key `api_key` and its
+// declared key `api-key`, as apikey and oauth do in-tree. A raw comparison
+// would not match them, silently making the credential optional.
+type stubMismatchedSpellingHandler struct{}
+
+func (stubMismatchedSpellingHandler) ProfileKeys() []string { return []string{"api-key"} }
+func (stubMismatchedSpellingHandler) RequiredProfileKeys() []string {
+	return []string{"api_key"}
+}
+func (stubMismatchedSpellingHandler) OnRequest(_ *zerolog.Logger, _ *http.Request) error { return nil }
+
+// initTestCLI resets the auth singletons, points HOME at a fresh temp dir, and
+// runs Init with one auth handler registered under typeName. Returns HOME.
+func initTestCLI(t *testing.T, typeName string, handler AuthHandler) string {
+	t.Helper()
+
+	home := resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth(typeName, handler)
+
+	return home
+}
+
+// resetAuthSingletons clears the package-level auth state so a fresh Init can
+// run without tripping over flags or commands registered by a prior test (or,
+// within one test, a prior simulated process).
+func resetAuthSingletons() {
 	viper.Reset()
 	Cache = nil
 	Client = nil
 	Root = nil
 	Creds = nil
 	authInitialized = false
+	authCommand = nil
+	profileCommand = nil
+	authAddCommand = nil
 	AuthHandlers = make(map[string]AuthHandler)
+	registeredServers = nil
+}
+
+// resetAuthState clears the auth singletons and points HOME at a temp dir.
+func resetAuthState(t *testing.T) string {
+	t.Helper()
+
+	resetAuthSingletons()
+	// Resolution branches on len(AuthHandlers), so a leaked registration
+	// changes what the next test resolves instead of failing it loudly.
+	t.Cleanup(resetAuthSingletons)
 
 	home := t.TempDir()
 	oldHome := os.Getenv("HOME")
 	if err := os.Setenv("HOME", home); err != nil {
 		t.Fatalf("set HOME: %v", err)
 	}
-	defer os.Setenv("HOME", oldHome)
+	t.Cleanup(func() { os.Setenv("HOME", oldHome) })
 
-	Init(&Config{
-		AppName:   "test-auth",
-		EnvPrefix: "TEST_AUTH",
-	})
+	return home
+}
+
+// serverFixture builds a CLI with one spec server and an `acme` profile bound
+// to profileServer, or to nothing when it is empty.
+func serverFixture(t *testing.T, profileServer string) {
+	t.Helper()
+	resetAuthState(t)
+	serverFixtureNoReset(t, profileServer)
+}
+
+// serverFixtureNoReset is serverFixture for tests that seed HOME first.
+func serverFixtureNoReset(t *testing.T, profileServer string) {
+	t.Helper()
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
 	UseAuth("", stubAuthHandler{})
+	RegisterServers([]map[string]string{{"description": "Prod", "url": "https://prod.example.com"}})
 
-	if err := saveAuthProfile("", "default", []string{"api-key"}, []string{"secret"}); err != nil {
+	keys, values := []string{"api-key"}, []string{"secret"}
+	if err := saveAuthProfile("", "acme", keys, values, profileServer); err != nil {
 		t.Fatalf("saveAuthProfile: %v", err)
 	}
+	viper.Set("profile", "acme")
+}
 
-	if got := GetProfile()["api_key"]; got != "secret" {
-		t.Fatalf("expected saved api key, got %q", got)
+// writeConfig seeds config.json before Init reads it.
+func writeConfig(t *testing.T, home, body string) {
+	t.Helper()
+	writeAppFile(t, home, "config.json", body)
+}
+
+func writeCredentials(t *testing.T, home, body string) {
+	t.Helper()
+	writeAppFile(t, home, "credentials.json", body)
+}
+
+func writeAppFile(t *testing.T, home, name, body string) {
+	t.Helper()
+
+	dir := filepath.Join(home, ".test-auth")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
 	}
-
-	if _, err := os.Stat(filepath.Join(home, ".test-auth", "credentials.json")); err != nil {
-		t.Fatalf("credentials.json not written: %v", err)
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func TestResolveAuthHandlerDefault(t *testing.T) {
+// executeJSON runs a command and decodes its stdout, which must be JSON.
+func executeJSON(t *testing.T, command string) map[string]interface{} {
+	t.Helper()
+
+	out := execute(command)
+	var decoded map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("output of %q is not JSON: %v\n%s", command, err, out)
+	}
+
+	return decoded
+}
+
+// bootCLI runs init against an existing HOME, as a fresh process would, and
+// returns whatever init wrote to stderr.
+func bootCLI(t *testing.T, home string) *bytes.Buffer {
+	t.Helper()
+
+	resetAuthSingletons()
+	t.Setenv("HOME", home)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+
+	errBuf := new(bytes.Buffer)
+	Stderr = errBuf
+	UseAuth("", stubAuthHandler{})
+
+	return errBuf
+}
+
+func TestAddProfileStoresServerFromGlobalFlag(t *testing.T) {
+	home := initTestCLI(t, "", stubAuthHandler{})
+
+	execute("auth profile add --server https://orq.acme.internal acme secret")
+
+	viper.Set("profile", "acme")
+	profile := GetProfile()
+	if got := profile["api_key"]; got != "secret" {
+		t.Fatalf("expected saved api key, got %q", got)
+	}
+	if got := profile["server"]; got != "https://orq.acme.internal" {
+		t.Fatalf("expected saved server, got %q", got)
+	}
+	assert.FileExists(t, filepath.Join(home, ".test-auth", "credentials.json"))
+}
+
+func TestAddProfileIgnoresEnvAndConfigServer(t *testing.T) {
+	home := resetAuthState(t)
+	writeConfig(t, home, `{"server-default":"https://config.example.com"}`)
+	t.Setenv("TEST_AUTH_SERVER", "https://env.example.com")
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+
+	execute("auth profile add acme secret")
+
+	viper.Set("profile", "acme")
+	if got, ok := GetProfile()["server"]; ok {
+		t.Fatalf("expected no server on profile, got %q", got)
+	}
+}
+
+// With no env prefix, viper's mergeWithEnvPrefix reads a bare SERVER.
+func TestResolveServerReadsEnvWithoutEnvPrefix(t *testing.T) {
+	t.Setenv("SERVER", "https://bare-env.example.com")
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth"})
+	UseAuth("", stubAuthHandler{})
+	RegisterServers([]map[string]string{{"description": "Prod", "url": "https://prod.example.com"}})
+	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, ""); err != nil {
+		t.Fatalf("saveAuthProfile: %v", err)
+	}
+	viper.Set("profile", "acme")
+
+	if got := ResolveServer(); got != "https://bare-env.example.com" {
+		t.Fatalf("expected bare SERVER env override, got %q", got)
+	}
+}
+
+// TestResolveServerPrecedence walks the whole ladder from ResolveServer's
+// doc comment. Ranking the server separately from the key is what lets a
+// command reach one deployment holding another's credentials, so each rung
+// gets a case that only it can satisfy.
+func TestResolveServerPrecedence(t *testing.T) {
+	tests := []struct {
+		name          string
+		config        string
+		env           string
+		profileServer string
+		viperSet      string
+		flag          string
+		want          string
+	}{
+		{name: "the --server flag beats the profile", profileServer: "https://orq.acme.internal", flag: "https://override.example.com", want: "https://override.example.com"},
+		{name: "the profile beats the environment", env: "https://env.example.com", profileServer: "https://orq.acme.internal", want: "https://orq.acme.internal"},
+		{name: "the profile beats the persisted default", config: `{"server-default":"https://config.example.com"}`, profileServer: "https://orq.acme.internal", want: "https://orq.acme.internal"},
+		{name: "the profile beats the generated server list", profileServer: "https://orq.acme.internal", want: "https://orq.acme.internal"},
+		{name: "a profile with no bound server falls through to the environment", env: "https://env.example.com", want: "https://env.example.com"},
+		// orq-cli's OAuth bridge sets the server via viper.Set; it ranks with
+		// the environment, above the generated defaults.
+		{name: "viper.Set beats the generated server list", viperSet: "https://session.example.com", want: "https://session.example.com"},
+		{name: "the persisted default beats the generated server list", config: `{"server-default":"https://config.example.com"}`, want: "https://config.example.com"},
+		// A config.json written before the persisted default moved keys.
+		{name: "a legacy config.json `server` key still resolves", config: `{"server":"https://legacy.example.com"}`, want: "https://legacy.example.com"},
+		{name: "nothing set falls back to the generated server list", want: "https://prod.example.com"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := resetAuthState(t)
+			if tt.config != "" {
+				writeConfig(t, home, tt.config)
+			}
+			if tt.env != "" {
+				t.Setenv("TEST_AUTH_SERVER", tt.env)
+			}
+
+			serverFixtureNoReset(t, tt.profileServer)
+
+			if tt.viperSet != "" {
+				viper.Set("server", tt.viperSet)
+			}
+			if tt.flag != "" {
+				if err := Root.PersistentFlags().Set("server", tt.flag); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			assert.Equal(t, tt.want, ResolveServer())
+		})
+	}
+}
+
+// The legacy key shares `server` with the flag, so it must be migrated out.
+func TestResolveServerPrefersProfileOverLegacyConfigServerKey(t *testing.T) {
+	home := resetAuthState(t)
+	writeConfig(t, home, `{"server":"https://legacy.example.com"}`)
+	serverFixtureNoReset(t, "https://orq.acme.internal")
+
+	if got := ResolveServer(); got != "https://orq.acme.internal" {
+		t.Fatalf("expected profile server over legacy config key, got %q", got)
+	}
+
+	migrated, err := os.ReadFile(filepath.Join(home, ".test-auth", "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(migrated), `"server"`) {
+		t.Fatalf("expected legacy key removed, got %s", migrated)
+	}
+	if !strings.Contains(string(migrated), "server-default") {
+		t.Fatalf("expected value moved to server-default, got %s", migrated)
+	}
+}
+
+func TestAuthSetupBindsServer(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, "https://wizard.example.com"); err != nil {
+		t.Fatalf("saveAuthProfile: %v", err)
+	}
+	viper.Set("profile", "acme")
+
+	if got := GetProfile()["server"]; got != "https://wizard.example.com" {
+		t.Fatalf("expected wizard-bound server, got %q", got)
+	}
+}
+
+// The deprecated `auth add-profile` / `auth list-profiles` spellings, and
+// `auth add-profile`'s own `auth add` alias, are gone. Exercise the generated
+// CLI entry point so this checks the real exit status and diagnostics rather
+// than only Cobra's command lookup.
+func TestDeprecatedProfileSpellingsAreGone(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	for _, name := range []string{"add-profile", "add", "list-profiles"} {
+		stdout, stderr, code := executeForExit("auth " + name)
+		if code != ExitUsage {
+			t.Errorf("`auth %s` returned exit code %d, want %d", name, code, ExitUsage)
+		}
+		if stdout != "" {
+			t.Errorf("`auth %s` wrote to stdout: %q", name, stdout)
+		}
+		if !strings.Contains(stderr, `unknown command "`+name+`"`) {
+			t.Errorf("`auth %s` did not report an unknown command: %q", name, stderr)
+		}
+	}
+
+}
+
+func TestListProfilesRendersServerColumn(t *testing.T) {
+	serverFixture(t, "https://orq.acme.internal")
+
+	out := execute("auth profile list")
+
+	if !strings.Contains(out, "https://orq.acme.internal") {
+		t.Fatalf("expected profile server in table, got %q", out)
+	}
+	if !strings.Contains(strings.ToUpper(out), "SERVER") {
+		t.Fatalf("expected SERVER column header, got %q", out)
+	}
+}
+
+func TestListProfilesToleratesMissingServer(t *testing.T) {
+	serverFixture(t, "")
+
+	out := execute("auth profile list")
+
+	if !strings.Contains(out, "acme") {
+		t.Fatalf("expected profile row, got %q", out)
+	}
+}
+
+func TestMaskIfSecret(t *testing.T) {
+	for _, field := range []string{"api_key", "API-Key", "access_token", "client_secret", "password"} {
+		assert.Equal(t, "sk-o****mnop", maskIfSecret(field, "sk-orq-abcdefghijklmnop"), field)
+	}
+
+	// A short secret keeps a tail alone: four either side would rebuild it.
+	assert.Equal(t, "sk****cd", maskIfSecret("api_key", "sk-orq-abcd"))           // 11 runes
+	assert.Equal(t, "sk****op", maskIfSecret("api_key", "sk-orq-abcdefop"))       // 15 runes
+	assert.Equal(t, "sk-o****fghi", maskIfSecret("api_key", "sk-orq-abcdefghi"))  // 16 runes: the boundary
+	assert.Equal(t, "sk-o****mnop", maskIfSecret("api_key", "sk-orq-abcdefmnop")) // 17 runes
+	assert.Equal(t, "****-a", maskIfSecret("api_key", "sk-orq-a"))                // 8 runes: tail only
+	assert.Equal(t, "****rq", maskIfSecret("api_key", "sk-orq"))                  // 6 runes
+	assert.Equal(t, "****", maskIfSecret("api_key", "sk"))                        // 2 runes: a tail would be all of it
+
+	// Multi-byte secrets are cut on rune boundaries, not bytes.
+	assert.Equal(t, "日本****すね", maskIfSecret("password", "日本語ですごく長い秘密ですね"))
+
+	// YAML decodes a numeric key as an int, no less a secret for it.
+	assert.Equal(t, "****", maskIfSecret("api_key", 1234567890))
+	assert.Equal(t, "****", maskIfSecret("api_key", map[string]interface{}{"a": "b"}))
+
+	// An empty secret has nothing to hide, and a mask would imply it is set.
+	assert.Equal(t, "", maskIfSecret("api_key", ""))
+
+	// `api_key:` decodes to nil, and a mask would report one that is not set.
+	assert.Nil(t, maskIfSecret("api_key", nil))
+
+	// An auth_url is where a key is exchanged, not a key.
+	assert.Equal(t, "https://id.orq.ai/authorize", maskIfSecret("auth_url", "https://id.orq.ai/authorize"))
+	assert.Equal(t, "https://id.orq.ai/token", maskIfSecret("token_endpoint", "https://id.orq.ai/token"))
+
+	// Non-secret fields pass through untouched.
+	assert.Equal(t, "https://api.orq.ai", maskIfSecret("base_url", "https://api.orq.ai"))
+	assert.Equal(t, "prod", maskIfSecret("type", "prod"))
+}
+
+func TestListProfilesMasksSecretsAndHonorsJSON(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	const secret = "sk-orq-abcdefghijklmnop"
+	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{secret}, "https://acme.example.com"); err != nil {
+		t.Fatalf("saveAuthProfile: %v", err)
+	}
+
+	viper.Set("output-format", "json")
+	out := execute("auth profile list -o json")
+
+	assert.NotContains(t, out, secret)
+
+	var decoded struct {
+		Profiles []map[string]interface{} `json:"profiles"`
+	}
+	if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, out)
+	}
+	assert.Len(t, decoded.Profiles, 1)
+	assert.Equal(t, "acme", decoded.Profiles[0]["name"])
+	assert.Equal(t, "", decoded.Profiles[0]["type"])
+	assert.Equal(t, "sk-o****mnop", decoded.Profiles[0]["api_key"])
+	assert.Equal(t, "https://acme.example.com", decoded.Profiles[0]["server"])
+}
+
+// `auth profile list -o json` must emit the same object shape either way.
+func TestListProfilesJSONShapeIsStableAcrossEmptyAndNonEmpty(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	viper.Set("output-format", "json")
+	empty := executeJSON(t, "auth profile list -o json")
+
+	_, hasMessageWhenEmpty := empty["message"]
+	assert.True(t, hasMessageWhenEmpty)
+	emptyProfiles, ok := empty["profiles"].([]interface{})
+	assert.True(t, ok, "empty response must include a profiles array")
+	assert.Len(t, emptyProfiles, 0)
+
+	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, ""); err != nil {
+		t.Fatalf("saveAuthProfile: %v", err)
+	}
+	nonEmpty := executeJSON(t, "auth profile list -o json")
+	_, hasMessageWhenNonEmpty := nonEmpty["message"]
+	assert.Equal(t, hasMessageWhenEmpty, hasMessageWhenNonEmpty)
+	nonEmptyProfiles, ok := nonEmpty["profiles"].([]interface{})
+	assert.True(t, ok, "non-empty response must include a profiles array")
+	assert.Len(t, nonEmptyProfiles, 1)
+}
+
+// `auth profile use` persists off the flag's viper key. Writing it to
+// `profile` would land on viper's override layer, which outranks a bound
+// flag, so `--profile` would stop working for the rest of the process.
+func TestExplicitProfileBeatsAuthProfileUse(t *testing.T) {
+	serverFixture(t, "")
+	execute("auth profile use acme")
+
+	assert.NoError(t, Root.PersistentFlags().Set("profile", "other"))
+	assert.Equal(t, "other", ActiveProfileName())
+}
+
+// Pins every pairing of the flag/env/persisted ranking. Without the full
+// table, swapping the env and persisted rungs has no defended answer.
+func TestActiveProfileNamePrecedenceAcrossAllRungs(t *testing.T) {
+	tests := []struct {
+		name         string
+		setFlag      string
+		setEnv       string
+		setPersisted string
+		want         string
+	}{
+		{name: "flag alone", setFlag: "flag-profile", want: "flag-profile"},
+		{name: "env alone", setEnv: "env-profile", want: "env-profile"},
+		{name: "persisted alone", setPersisted: "persisted-profile", want: "persisted-profile"},
+		{name: "flag beats env", setFlag: "flag-profile", setEnv: "env-profile", want: "flag-profile"},
+		{name: "flag beats persisted", setFlag: "flag-profile", setPersisted: "persisted-profile", want: "flag-profile"},
+		{name: "env beats persisted", setEnv: "env-profile", setPersisted: "persisted-profile", want: "env-profile"},
+		{name: "flag beats env and persisted together", setFlag: "flag-profile", setEnv: "env-profile", setPersisted: "persisted-profile", want: "flag-profile"},
+		{name: "nothing set", want: ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			initTestCLI(t, "", stubAuthHandler{})
+
+			if tc.setPersisted != "" {
+				// The persisted rung must come from the real command, which
+				// validates the profile exists before it writes the
+				// selection, exactly like `auth profile use` does.
+				Creds.Set("profiles."+tc.setPersisted+".api_key", "secret")
+				execute("auth profile use " + tc.setPersisted)
+			}
+			if tc.setEnv != "" {
+				t.Setenv("TEST_AUTH_PROFILE", tc.setEnv)
+			}
+			if tc.setFlag != "" {
+				assert.NoError(t, Root.PersistentFlags().Set("profile", tc.setFlag))
+			}
+
+			assert.Equal(t, tc.want, ActiveProfileName())
+		})
+	}
+}
+
+func TestAuthProfileUseRejectsUnknownProfile(t *testing.T) {
+	serverFixture(t, "")
+
+	_, stderr := executeStreams("auth profile use nope")
+
+	assert.Contains(t, stderr, `unknown profile "nope"`)
+	assert.Equal(t, "acme", ActiveProfileName(), "a rejected profile must not change the selection")
+}
+
+// `auth use` never shipped and must not resolve to `auth profile use`. It
+// surfaces as help text rather than an error, since `auth` has no RunE.
+func TestAuthUseCommandIsGone(t *testing.T) {
+	serverFixture(t, "")
+	viper.Set("profile", "")
+
+	configPath := filepath.Join(viper.GetString("config-directory"), "config.json")
+	before, _ := os.ReadFile(configPath)
+
+	stdout, _ := executeStreams("auth use acme")
+
+	assert.Contains(t, stdout, "Available Commands", "expected auth's help text, not a resolved `use` command")
+	assert.NotContains(t, stdout, "active_profile", "must not have run a profile switch")
+
+	after, err := os.ReadFile(configPath)
+	assert.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "must not have persisted a selection")
+}
+
+func TestActiveProfileNameAndListingAreCaseInsensitive(t *testing.T) {
+	serverFixture(t, "")
+	assert.NoError(t, Root.PersistentFlags().Set("profile", "ACME"))
+
+	assert.Equal(t, "acme", ActiveProfileName())
+	assert.Contains(t, execute("auth profile list -o json"), `"active": true`)
+}
+
+// ProfileExists must agree with SelectProfile and ActiveProfileName, which
+// both run their input through sanitizeProfileName: a caller that resolves a
+// name through one of those and checks it through ProfileExists must see the
+// same profile either way.
+func TestProfileExistsSanitizesName(t *testing.T) {
+	serverFixture(t, "")
+
+	assert.True(t, ProfileExists("ACME"), "expected a differently-cased spelling of an existing profile to be found")
+	assert.True(t, ProfileExists("  acme  "), "expected surrounding whitespace to be trimmed")
+}
+
+func TestEmptyProfileFlagDisablesProfiles(t *testing.T) {
+	serverFixture(t, "https://orq.acme.internal")
+	execute("auth profile use acme")
+
+	assert.NoError(t, Root.PersistentFlags().Set("profile", ""))
+
+	assert.Empty(t, GetProfile())
+	assert.Equal(t, "https://prod.example.com", ResolveServer())
+}
+
+// TestSaveAuthProfileRequiredness tables which declared keys a save may leave
+// empty. RequiredKeysHandler narrows that set; a handler that does not
+// implement it keeps every declared key required, so nothing outside this
+// repo breaks.
+func TestSaveAuthProfileRequiredness(t *testing.T) {
+	tests := []struct {
+		name     string
+		typeName string
+		handler  AuthHandler
+		keys     []string
+		values   []string
+		wantErr  string
+	}{
+		{
+			name: "a narrowed optional key may be left empty", typeName: "optional", handler: stubOptionalKeyHandler{},
+			keys: []string{"api-key", "region"}, values: []string{"secret", ""},
+		},
+		{
+			name: "the credential is still required", typeName: "optional", handler: stubOptionalKeyHandler{},
+			keys: []string{"api-key", "region"}, values: []string{"  ", "eu-west"}, wantErr: "api-key cannot be empty",
+		},
+		{
+			name: "without the interface every declared key is required", typeName: "twokey", handler: stubTwoKeyHandler{},
+			keys: []string{"api-key", "region"}, values: []string{"secret", ""}, wantErr: "region cannot be empty",
+		},
+		{
+			// Required-key matching used to be an exact-string comparison
+			// across a codebase that spells profile keys two ways (`-` in
+			// ProfileKeys and flags, `_` once normalised and stored), which
+			// silently made the credential optional.
+			name: "a required key spelled with the other separator still matches", typeName: "mismatched", handler: stubMismatchedSpellingHandler{},
+			keys: []string{"api-key"}, values: []string{"  "}, wantErr: "api-key cannot be empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			initTestCLI(t, tt.typeName, tt.handler)
+
+			err := saveAuthProfile(tt.typeName, "acme", tt.keys, tt.values, "")
+
+			if tt.wantErr != "" {
+				assert.ErrorContains(t, err, tt.wantErr)
+				assert.False(t, ProfileExists("acme"), "a rejected save must not leave a profile behind")
+				return
+			}
+
+			assert.NoError(t, err)
+			profile := Creds.GetStringMapString("profiles.acme")
+			assert.Equal(t, "secret", profile["api_key"])
+			_, hasRegion := profile["region"]
+			assert.False(t, hasRegion, "an empty optional value must be absent from the profile, not stored as \"\"")
+		})
+	}
+}
+
+// End-to-end through resolveProfileValue: an optional key may resolve to an
+// empty positional while the required one arrives via --<key>-file. The
+// trailing "" is its own vector element, as a shell sends a quoted empty string.
+func TestAuthProfileAddOptionalKeyThroughRealCommandPath(t *testing.T) {
+	initTestCLI(t, "optional", stubOptionalKeyHandler{})
+
+	keyFile := filepath.Join(t.TempDir(), "api-key")
+	if err := os.WriteFile(keyFile, []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// `api-key` is resolved via the --api-key-file route; `acme` is the
+	// profile name; the placeholder positional is the api-key positional
+	// (ignored, since the file flag wins); the final "" is the optional
+	// `region` positional, exercising the positional route with an empty
+	// value.
+	stdout, stderr, err := executeArgsStreams([]string{
+		"auth", "profile", "add", "optional",
+		"--api-key-file", keyFile, "acme", "placeholder", "",
+	})
+
+	assert.NoError(t, err)
+	assert.Empty(t, stderr)
+	_ = stdout
+	profile := Creds.GetStringMapString("profiles.acme")
+	assert.Equal(t, "secret", profile["api_key"])
+	_, hasRegion := profile["region"]
+	assert.False(t, hasRegion, "expected optional region left out of the profile via empty positional arg")
+}
+
+// The required key still fails through the real command path when resolved
+// via an empty positional, passed as an explicit vector element -- a double
+// space would collapse in a real shell -- and would
+// therefore route "eu-west" into the required position instead.
+func TestAuthProfileAddRequiredKeyEmptyThroughRealCommandPath(t *testing.T) {
+	initTestCLI(t, "optional", stubOptionalKeyHandler{})
+
+	_, stderr, err := executeArgsStreams([]string{
+		"auth", "profile", "add", "optional", "acme", "", "eu-west",
+	})
+
+	assert.Error(t, err)
+	assert.Contains(t, stderr, "api-key cannot be empty")
+	assert.False(t, ProfileExists("acme"))
+}
+
+// resolveProfileValue used to demand a TTY before consulting `required`, so
+// simply omitting an optional trailing positional failed non-interactively.
+func TestAuthProfileAddOmittedOptionalPositionalSucceedsNonInteractively(t *testing.T) {
+	initTestCLI(t, "optional", stubOptionalKeyHandler{})
+
+	keyFile := filepath.Join(t.TempDir(), "api-key")
+	if err := os.WriteFile(keyFile, []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, err := executeArgsStreams([]string{
+		"auth", "profile", "add", "optional", "--api-key-file", keyFile, "acme",
+	})
+
+	assert.NoError(t, err)
+	assert.Empty(t, stderr)
+	profile := Creds.GetStringMapString("profiles.acme")
+	assert.Equal(t, "secret", profile["api_key"])
+	_, hasRegion := profile["region"]
+	assert.False(t, hasRegion, "expected the omitted optional region left out of the profile")
+}
+
+// Adoption reverses which credential goes on the wire — the environment key
+// used to win, the profile now does — so it must say so once on stderr, and
+// not again on a later run.
+func TestLegacyAdoptionPrintsOneTimeNotice(t *testing.T) {
+	home := resetAuthState(t)
+	writeCredentials(t, home, `{"profiles":{"default":{"type":"","api_key":"secret"}}}`)
+
+	errBuf := bootCLI(t, home)
+
+	assert.Equal(t, "default", ActiveProfileName())
+	assert.Contains(t, errBuf.String(), `"default"`)
+	assert.Contains(t, errBuf.String(), "auth profile clear")
+
+	assert.Empty(t, bootCLI(t, home).String(), "adoption must warn only once")
+}
+
+// TestSecondProfileDoesNotStealSelectionFromFirst guards saveAuthProfile's
+// `if !ProfileSelected()` auto-select: it must fire only for the first
+// profile ever saved. TestFirstProfileBecomesActive only ever saves one
+// profile, so it cannot catch the auto-select firing unconditionally
+// (which would silently repoint every later command onto whatever scratch
+// profile was added last, while a real profile like `prod` was in force).
+func TestSecondProfileDoesNotStealSelectionFromFirst(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	execute("auth profile add prod secret-prod")
+	assert.Equal(t, "prod", ActiveProfileName(), "the first saved profile must become active")
+
+	execute("auth profile add scratch secret-scratch")
+	assert.Equal(t, "prod", ActiveProfileName(), "a later profile save must not repoint an already-active selection")
+
+	data, err := os.ReadFile(filepath.Join(viper.GetString("config-directory"), "config.json"))
+	assert.NoError(t, err)
+	assert.Contains(t, string(data), `"profile-selected": "prod"`)
+}
+
+// TestClearedProfileStaysClearedAcrossRestart is the regression test for the
+// Critical defect where `auth profile clear` was silently undone. Adoption
+// used to guard only on `profile-selected` being empty, so deleting that key
+// looked identical to never having adopted anything, and the very next process
+// re-adopted `default` and rewrote config.json. The cases differ in which code
+// path put a profile in force, because each writes the marker separately.
+func TestClearedProfileStaysClearedAcrossRestart(t *testing.T) {
+	const legacyDefault = `{"profiles":{"default":{"type":"","api_key":"secret"}}}`
+
+	tests := []struct {
+		name        string
+		credentials string
+		config      string
+		bootstrap   string
+		wantActive  string
+	}{
+		{
+			name:        "adoption selected a legacy `default`",
+			credentials: legacyDefault,
+			wantActive:  "default",
+		},
+		{
+			// Adoption is a no-op here: `default` is created fresh on this
+			// branch, so the first-profile auto-select must write the marker.
+			name:       "the first-profile auto-select fired",
+			bootstrap:  "auth profile add default secret",
+			wantActive: "default",
+		},
+		{
+			// Neither adoption nor auto-select runs, leaving `clear` as the
+			// only command that can write the marker.
+			name:        "a selection was already persisted",
+			credentials: `{"profiles":{"default":{"type":"","api_key":"secret"},"work":{"type":"","api_key":"secret2"}}}`,
+			config:      `{"profile-selected":"work"}`,
+			wantActive:  "work",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := resetAuthState(t)
+			if tt.credentials != "" {
+				writeCredentials(t, home, tt.credentials)
+			}
+			if tt.config != "" {
+				writeConfig(t, home, tt.config)
+			}
+
+			bootCLI(t, home)
+			if tt.bootstrap != "" {
+				execute(tt.bootstrap)
+			}
+			assert.Equal(t, tt.wantActive, ActiveProfileName())
+
+			execute("auth profile clear")
+			assert.Empty(t, ActiveProfileName(), "clear must empty the active profile")
+
+			bootCLI(t, home)
+
+			assert.Empty(t, ActiveProfileName(), "the cleared selection must survive a restart, not be silently re-adopted")
+		})
+	}
+}
+
+// TestAdoptLegacyDefaultProfile tables the first-run adoption behaviour across
+// the states that matter: no profiles, only `default`, a non-default profile,
+// and a selection already persisted. Each entry runs init twice and asserts
+// config.json after both runs.
+func TestAdoptLegacyDefaultProfile(t *testing.T) {
+	tests := []struct {
+		name              string
+		credentialsBody   string
+		seedConfig        string
+		wantSelectedAfter string
+		wantAdoptedAfter  bool
+	}{
+		{
+			name:              "no profiles: nothing adopted",
+			credentialsBody:   `{}`,
+			wantSelectedAfter: "",
+			wantAdoptedAfter:  false,
+		},
+		{
+			name:              "profiles.default: adopted once",
+			credentialsBody:   `{"profiles":{"default":{"type":"","api_key":"secret"}}}`,
+			wantSelectedAfter: "default",
+			wantAdoptedAfter:  true,
+		},
+		{
+			name:              "profiles.work only: nothing adopted",
+			credentialsBody:   `{"profiles":{"work":{"type":"","api_key":"secret"}}}`,
+			wantSelectedAfter: "",
+			wantAdoptedAfter:  false,
+		},
+		{
+			name:              "profiles.default with a selection already persisted: not overwritten",
+			credentialsBody:   `{"profiles":{"default":{"type":"","api_key":"secret"},"work":{"type":"","api_key":"secret2"}}}`,
+			seedConfig:        `{"profile-selected":"work"}`,
+			wantSelectedAfter: "work",
+			wantAdoptedAfter:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := resetAuthState(t)
+			dir := filepath.Join(home, ".test-auth")
+			writeCredentials(t, home, tt.credentialsBody)
+			if tt.seedConfig != "" {
+				writeConfig(t, home, tt.seedConfig)
+			}
+
+			bootCLI(t, home)
+
+			assert.Equal(t, tt.wantSelectedAfter, sanitizeProfileName(viper.GetString("profile-selected")))
+			assert.Equal(t, tt.wantAdoptedAfter, viper.GetBool("profile-decided"))
+			assert.Equal(t, tt.wantSelectedAfter, ActiveProfileName())
+
+			firstRun, err := os.ReadFile(filepath.Join(dir, "config.json"))
+			if tt.wantAdoptedAfter || tt.seedConfig != "" {
+				if err != nil {
+					t.Fatalf("read config.json after first init: %v", err)
+				}
+			}
+
+			// The second run must not rewrite what the first run settled.
+			bootCLI(t, home)
+
+			assert.Equal(t, tt.wantSelectedAfter, sanitizeProfileName(viper.GetString("profile-selected")))
+			assert.Equal(t, tt.wantAdoptedAfter, viper.GetBool("profile-decided"))
+
+			secondRun, err := os.ReadFile(filepath.Join(dir, "config.json"))
+			if err == nil && firstRun != nil {
+				assert.Equal(t, string(firstRun), string(secondRun), "second init must not rewrite a settled config.json")
+			}
+		})
+	}
+}
+
+// TestSaveJSONConfigRejectsMalformedExistingFile is the regression test for
+// the Critical defect where a corrupt config.json got silently replaced by an
+// empty one, destroying every other key it held.
+func TestSaveJSONConfigRejectsMalformedExistingFile(t *testing.T) {
+	home := resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+
+	dir := filepath.Join(home, ".test-auth")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	filename := filepath.Join(dir, "config.json")
+	const malformed = `{"server-default": "https://acme.example.com",`
+	if err := os.WriteFile(filename, []byte(malformed), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := saveJSONConfig(map[string]interface{}{"profile-selected": "acme"})
+
+	assert.Error(t, err)
+
+	data, readErr := os.ReadFile(filename)
+	if readErr != nil {
+		t.Fatalf("read config.json: %v", readErr)
+	}
+	assert.Equal(t, malformed, string(data), "a malformed config.json must be left untouched")
+}
+
+// `auth setup` used to default its `--profile` flag to the literal string
+// "default", reinventing the implicit profile this branch removed.
+func TestAuthSetupWithoutProfileFlagTargetsTheActiveProfile(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	withFakeInteractiveSetup(t, func(key string, required bool) (string, error) {
+		return "rotated-secret", nil
+	})
+	viper.Set("profile", "staging")
+
+	_, _, err := executeArgsStreams([]string{"auth", "setup"})
+	assert.NoError(t, err)
+
+	viper.Set("profile", "staging")
+	assert.Equal(t, "rotated-secret", GetProfile()["api_key"], "expected `auth setup` to rotate the active profile")
+	assert.False(t, ProfileExists("default"), "a --profile default would invent a profile nobody asked for")
+}
+
+// `auth setup` registers a local `--profile` that shadows the persistent root
+// one; pflag silently picks a winner, and only a run through the real command
+// tree shows which.
+func TestAuthSetupCommandTargetsProfileFlagThroughCobra(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	withFakeInteractiveSetup(t, func(key string, required bool) (string, error) {
+		return "secret", nil
+	})
+
+	_, stderr, err := executeArgsStreams([]string{"auth", "setup", "--profile", "named"})
+
+	assert.NoError(t, err)
+	assert.Empty(t, stderr)
+	assert.True(t, ProfileExists("named"), "expected `--profile named` to target the `named` profile")
+}
+
+// withFakeInteractiveSetup swaps the terminal check and promptProfileValue for the
+// duration of the test so RunAuthSetup can be exercised without a TTY.
+func withFakeInteractiveSetup(t *testing.T, prompt func(key string, required bool) (string, error)) {
+	t.Helper()
+	origInteractive, origPrompt := hasInteractiveInput, promptProfileValue
+	t.Cleanup(func() { hasInteractiveInput, promptProfileValue = origInteractive, origPrompt })
+	hasInteractiveInput = func() bool { return true }
+	promptProfileValue = prompt
+}
+
+// With no profile in force and no --profile given, RunAuthSetup must prompt
+// for a name instead of falling back to "default".
+func TestRunAuthSetupPromptsForNameWhenNoneActive(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	var prompted []string
+	withFakeInteractiveSetup(t, func(key string, required bool) (string, error) {
+		prompted = append(prompted, key)
+		if key == "profile_name" {
+			return "acme", nil
+		}
+		return "secret", nil
+	})
+
+	if err := RunAuthSetup("", "", ""); err != nil {
+		t.Fatalf("RunAuthSetup: %v", err)
+	}
+
+	if !ProfileExists("acme") {
+		t.Fatal("expected the prompted profile name to be used")
+	}
+	if ProfileExists("default") {
+		t.Fatal("expected no `default` profile to be invented")
+	}
+	if len(prompted) == 0 || prompted[0] != "profile_name" {
+		t.Fatalf("expected the profile name prompt first, got %v", prompted)
+	}
+}
+
+// An empty answer to the profile-name prompt must be rejected rather than
+// silently producing a profile named "".
+func TestRunAuthSetupRejectsEmptyProfileNamePrompt(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	withFakeInteractiveSetup(t, func(key string, required bool) (string, error) {
+		if key == "profile_name" {
+			return "   ", nil
+		}
+		return "secret", nil
+	})
+
+	if err := RunAuthSetup("", "", ""); err == nil {
+		t.Fatal("expected an error for an empty profile name")
+	}
+	if ProfileExists("") {
+		t.Fatal("expected no profile to be created for an empty name")
+	}
+}
+
+// promptEntryPoints are the two interactive routes into a profile save: the
+// `auth setup` wizard, which also prompts for the profile name, and
+// `auth profile add`'s prompt fallback (resolveProfileValue's third route,
+// reached when neither --<key>-file nor a positional supplies a key). Each
+// returns whatever the user would see go wrong, empty on success.
+var promptEntryPoints = []struct {
+	name string
+	run  func(t *testing.T) string
+}{
+	{"auth setup", func(t *testing.T) string {
+		if err := RunAuthSetup("", "optional", ""); err != nil {
+			return err.Error()
+		}
+		return ""
+	}},
+	{"auth profile add", func(t *testing.T) string {
+		_, stderr := executeStreams("auth profile add optional acme")
+		return stderr
+	}},
+}
+
+// survey.Required must apply to the required key alone: Enter on the optional
+// `region` saves without it.
+func TestInteractivePromptSkipsOptionalKey(t *testing.T) {
+	for _, entry := range promptEntryPoints {
+		t.Run(entry.name, func(t *testing.T) {
+			initTestCLI(t, "optional", stubOptionalKeyHandler{})
+
+			sawRequired := map[string]bool{}
+			withFakeInteractiveSetup(t, func(key string, required bool) (string, error) {
+				sawRequired[key] = required
+				switch key {
+				case "profile_name":
+					return "acme", nil
+				case "api-key":
+					return "secret", nil
+				case "region":
+					return "", nil
+				}
+				t.Fatalf("unexpected prompt for %q", key)
+				return "", nil
+			})
+
+			assert.Empty(t, entry.run(t))
+
+			assert.True(t, sawRequired["api-key"], "expected api-key threaded through as required")
+			// Asserting region was prompted at all, not just reported optional:
+			// skipping the prompt outright leaves an identical profile while
+			// silently removing the operator's chance to fill the field in.
+			promptedRegion, prompted := sawRequired["region"]
+			assert.True(t, prompted, "expected region to be prompted for")
+			assert.False(t, promptedRegion, "expected region threaded through as optional")
+
+			profile := Creds.GetStringMapString("profiles.acme")
+			assert.Equal(t, "secret", profile["api_key"])
+			_, hasRegion := profile["region"]
+			assert.False(t, hasRegion, "expected the empty optional answer left out of the profile")
+		})
+	}
+}
+
+// Enter on the required credential must still fail the whole save.
+func TestInteractivePromptRejectsEmptyCredential(t *testing.T) {
+	for _, entry := range promptEntryPoints {
+		t.Run(entry.name, func(t *testing.T) {
+			initTestCLI(t, "optional", stubOptionalKeyHandler{})
+
+			withFakeInteractiveSetup(t, func(key string, required bool) (string, error) {
+				switch key {
+				case "profile_name":
+					return "acme", nil
+				case "api-key":
+					return "", nil
+				case "region":
+					return "eu-west", nil
+				}
+				t.Fatalf("unexpected prompt for %q", key)
+				return "", nil
+			})
+
+			assert.Contains(t, entry.run(t), "api-key cannot be empty")
+			assert.False(t, ProfileExists("acme"))
+		})
+	}
+}
+
+// `auth profile current` reports which rung put a profile in force, and
+// whether that profile exists -- the one state nothing else surfaces, since a
+// `--profile ghost` hard-fails every request but shows up nowhere in `list`.
+func TestAuthProfileCurrentNoneInForce(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	decoded := executeJSON(t, "auth profile current -o json")
+
+	assert.Equal(t, "", decoded["active_profile"])
+	assert.Equal(t, "none", decoded["source"])
+	assert.Equal(t, false, decoded["exists"])
+}
+
+func TestAuthProfileCurrentFromFlagReportsMissing(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	decoded := executeJSON(t, "--profile ghost auth profile current -o json")
+
+	assert.Equal(t, "ghost", decoded["active_profile"])
+	assert.Equal(t, "flag", decoded["source"])
+	assert.Equal(t, false, decoded["exists"], "an unknown profile must report exists:false, not error")
+}
+
+func TestAuthProfileCurrentFromPersistedSelection(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, ""); err != nil {
+		t.Fatalf("saveAuthProfile: %v", err)
+	}
+	execute("auth profile use acme")
+
+	decoded := executeJSON(t, "auth profile current -o json")
+
+	assert.Equal(t, "acme", decoded["active_profile"])
+	assert.Equal(t, "selected", decoded["source"])
+	assert.Equal(t, true, decoded["exists"])
+}
+
+// When credentials.json is written but the profile-selected marker can't be
+// persisted afterward, the error must say the key was saved and name the
+// recovery command, rather than surfacing the raw underlying I/O error alone.
+func TestSaveAuthProfilePartialSaveErrorNamesRecovery(t *testing.T) {
+	home := initTestCLI(t, "", stubAuthHandler{})
+
+	writeConfig(t, home, `{"server-default": "https://acme.example.com",`)
+
+	err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, "")
+
+	assert.ErrorContains(t, err, `"acme" was saved`)
+	assert.ErrorContains(t, err, "auth profile use acme")
+	assert.ErrorContains(t, err, "--profile acme")
+
+	// The profile itself must have made it to disk despite the second
+	// write failing.
+	bootCLI(t, home)
+	assert.True(t, ProfileExists("acme"))
+}
+
+// With a profile in force, CredentialScope must be the profile name itself,
+// so existing `profiles.<name>.<field>` cache keys keep working.
+func TestCredentialScopeIsProfileNameWhenSelected(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	if err := saveAuthProfile("", "acme", []string{"api-key"}, []string{"secret"}, ""); err != nil {
+		t.Fatalf("saveAuthProfile: %v", err)
+	}
+	SelectProfile("acme")
+
+	assert.Equal(t, "acme", CredentialScope())
+}
+
+// With no profile in force, two environments differing only by the resolved
+// server must land in different scopes, or a cached OAuth token for one
+// deployment would be replayed against another that happens to share the
+// unnamed bucket.
+func TestCredentialScopeDiffersByServerWhenNoProfileSelected(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	t.Setenv("TEST_AUTH_SERVER", "https://one.example.com")
+	scopeOne := CredentialScope()
+
+	t.Setenv("TEST_AUTH_SERVER", "https://two.example.com")
+	scopeTwo := CredentialScope()
+
+	assert.NotEmpty(t, scopeOne)
+	assert.NotEmpty(t, scopeTwo)
+	assert.NotEqual(t, scopeOne, scopeTwo)
+	assert.True(t, strings.HasPrefix(scopeOne, "env-"))
+	assert.True(t, strings.HasPrefix(scopeTwo, "env-"))
+}
+
+// Every other prompt test replaces promptProfileValue wholesale, so nothing
+// reaches the validator it actually installs. This is the assertion that
+// survives that stub: an optional key must run no validator at all, or
+// survey.Required rejects the empty answer that leaves the field unset.
+func TestProfilePromptValidatorRunsOnlyForRequiredKeys(t *testing.T) {
+	assert.Nil(t, profilePromptValidator(false), "an optional key must accept an empty answer")
+
+	validator := profilePromptValidator(true)
+	if assert.NotNil(t, validator, "a required key must be validated") {
+		assert.Error(t, validator(""), "a required key must reject an empty answer")
+		assert.NoError(t, validator("secret"))
+	}
+}
+
+func TestAuthHandlerFor(t *testing.T) {
+	type registration struct {
+		name    string
+		handler AuthHandler
+	}
+	tests := []struct {
+		name        string
+		registered  []registration
+		storedType  string
+		wantHandler AuthHandler
+	}{
+		{
+			name:        "exact match wins among several",
+			registered:  []registration{{"apikey", stubAuthHandler{}}, {"oauth", stubOptionalKeyHandler{}}},
+			storedType:  "oauth",
+			wantHandler: stubOptionalKeyHandler{},
+		},
+		{
+			name:        "stored label resolves through the sole anonymous handler",
+			registered:  []registration{{"", stubAuthHandler{}}},
+			storedType:  "apikey",
+			wantHandler: stubAuthHandler{},
+		},
+		{
+			name:       "a named handler does not answer to another label",
+			registered: []registration{{"bearer", stubAuthHandler{}}},
+			storedType: "apikey",
+		},
+		{
+			name:       "an anonymous handler does not claim a label alongside a named one",
+			registered: []registration{{"", stubAuthHandler{}}, {"oauth", stubOptionalKeyHandler{}}},
+			storedType: "apikey",
+		},
+		{
+			name:        "empty type resolves to the sole named handler",
+			registered:  []registration{{"bearer", stubAuthHandler{}}},
+			storedType:  "",
+			wantHandler: stubAuthHandler{},
+		},
+		{
+			name:       "empty type with several handlers resolves to none",
+			registered: []registration{{"apikey", stubAuthHandler{}}, {"oauth", stubOptionalKeyHandler{}}},
+			storedType: "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			resetAuthState(t)
+			Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+			for _, r := range tc.registered {
+				UseAuth(r.name, r.handler)
+			}
+
+			assert.Equal(t, tc.wantHandler, authHandlerFor(tc.storedType))
+		})
+	}
+}
+
+// A named handler answering only to its own name is the half of the contract
+// that must keep refusing, so assert it end to end and not just in the table:
+// a request must fail rather than be signed by a handler the profile does not
+// name, and the error must say which label failed and which would not have.
+func TestRequestRefusesAStoredLabelNoHandlerAnswersTo(t *testing.T) {
+	initTestCLI(t, "", headerAuthHandler{})
+	UseAuth("oauth", stubOptionalKeyHandler{})
+	Creds.Set("profiles.acme.type", "legacy")
+	Creds.Set("profiles.acme.api_key", "secret")
+	viper.Set("profile", "acme")
+
+	reached := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	_, err := Client.URL(server.URL).Get().Do()
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), `"legacy"`, "the message must name the label that failed")
+		assert.Contains(t, err.Error(), "oauth", "the message must name a label that would resolve")
+	}
+	assert.False(t, reached, "an unauthenticated request must not go out on the wire")
+}
+
+// Saving a profile used to write nested keys ("profiles.<name>.<field>"),
+// which places a viper override covering only part of the profiles map and
+// hides every sibling from any later read of "profiles". Listing in the same
+// process then showed only the profile just saved, while the others sat
+// untouched on disk. This is the second symptom RES-1463 reports.
+func TestSavingAProfileKeepsTheOthersListable(t *testing.T) {
+	home := resetAuthState(t)
+	// The profiles have to arrive from the file rather than from an earlier
+	// Set in the same process: the override only hides what a lower layer
+	// supplies, so seeding them in memory would not reproduce the defect.
+	writeCredentials(t, home, `{"profiles":{"prod":{"type":"","api_key":"secret-prod"},"scratch":{"type":"","api_key":"secret-scratch"}}}`)
+	bootCLI(t, home)
+
+	execute("auth profile add third secret-third")
+
+	decoded := executeJSON(t, "auth profile list -o json")
+	profiles, _ := decoded["profiles"].([]interface{})
+	names := make([]string, 0, len(profiles))
+	for _, entry := range profiles {
+		if profile, ok := entry.(map[string]interface{}); ok {
+			names = append(names, fmt.Sprintf("%v", profile["name"]))
+		}
+	}
+
+	assert.ElementsMatch(t, []string{"prod", "scratch", "third"}, names, "a save must not mask the profiles it did not write")
+	assert.Equal(t, "secret-prod", Creds.GetStringMapString("profiles.prod")["api_key"])
+}
+
+// SetProfile merges over what a profile already holds, so rotating one field
+// does not drop the rest.
+func TestSetProfileMergesOverStoredFields(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+	Creds.Set("profiles.acme.type", "apikey")
+	Creds.Set("profiles.acme.api_key", "first")
+	Creds.Set("profiles.acme.server", "https://orq.acme.internal")
+
+	Creds.SetProfile("acme", map[string]string{"api_key": "second"})
+
+	stored := Creds.GetStringMapString("profiles.acme")
+	assert.Equal(t, "second", stored["api_key"])
+	assert.Equal(t, "apikey", stored["type"], "an untouched field must survive a merge")
+	assert.Equal(t, "https://orq.acme.internal", stored["server"])
+}
+
+// saveAuthProfile deliberately omits an empty optional field, so a correctly
+// saved profile for a handler with optional keys holds only the required ones.
+// Without the requiredProfileKeys narrowing, doctor calls that profile
+// unconfigured and offers to reconfigure a profile that is already fine.
+func TestAuthStatusReportsAProfileMissingOnlyAnOptionalKeyAsConfigured(t *testing.T) {
+	initTestCLI(t, "", stubOptionalKeyHandler{})
+	Creds.Set("profiles.acme.api_key", "secret")
+	viper.Set("profile", "acme")
+
+	status := GetAuthStatus()
+	assert.Equal(t, true, status["configured"], "an absent optional key must not read as unconfigured")
+	assert.Equal(t, "profile", status["source"])
+}
+
+// The read path went lenient while `auth setup --type` stayed strict, because
+// one is a label read back from a file and the other is something the user
+// typed. Pin the asymmetry, or a later change that "makes setup consistent"
+// reopens RES-1463 from the other side.
+func TestSetupRejectsALabelTheReadPathWouldResolve(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+
+	assert.Equal(t, stubAuthHandler{}, authHandlerFor("apikey"), "the read path resolves a stored label")
+
+	_, _, err := pickAuthHandler("apikey")
+	if assert.Error(t, err, "an explicitly typed --type must not") {
+		assert.Contains(t, err.Error(), `unknown auth type "apikey"`)
+	}
+}
+
+// headerAuthHandler marks each request it authenticates, so a test can tell
+// the request middleware used it.
+type headerAuthHandler struct{}
+
+func (headerAuthHandler) ProfileKeys() []string { return []string{"api-key"} }
+func (headerAuthHandler) OnRequest(_ *zerolog.Logger, r *http.Request) error {
+	r.Header.Set("X-Test-Auth", "anonymous")
+	return nil
+}
+
+func TestRequestAuthenticatesAStoredLabelThroughTheAnonymousHandler(t *testing.T) {
+	initTestCLI(t, "", headerAuthHandler{})
+	Creds.Set("profiles.acme.type", "apikey")
+	Creds.Set("profiles.acme.api_key", "secret")
+	viper.Set("profile", "acme")
+
+	var got string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get("X-Test-Auth")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	_, err := Client.URL(server.URL).Get().Do()
+	assert.NoError(t, err)
+	assert.Equal(t, "anonymous", got)
+}
+
+func TestAuthStatusReportsTheStoredTypeResolvedByTheAnonymousHandler(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+	Creds.Set("profiles.acme.type", "apikey")
+	Creds.Set("profiles.acme.api_key", "secret")
+	viper.Set("profile", "acme")
+
+	status := GetAuthStatus()
+	assert.Equal(t, "apikey", status["type"])
+	assert.Equal(t, true, status["configured"])
+}
+
+type clientIDAuthHandler struct{}
+
+func (clientIDAuthHandler) ProfileKeys() []string                              { return []string{"client-id"} }
+func (clientIDAuthHandler) OnRequest(_ *zerolog.Logger, _ *http.Request) error { return nil }
+
+func TestAuthStatusReportsAProfileWithoutTheHandlerKeysAsUnconfigured(t *testing.T) {
+	initTestCLI(t, "", clientIDAuthHandler{})
+	Creds.Set("profiles.acme.type", "apikey")
+	Creds.Set("profiles.acme.api_key", "secret")
+	viper.Set("profile", "acme")
+
+	status := GetAuthStatus()
+	assert.Equal(t, false, status["configured"])
+	assert.Equal(t, "missing", status["source"])
+}
+
+// onlyListedProfile runs `auth profile list` and returns its single entry.
+func onlyListedProfile(t *testing.T) map[string]interface{} {
+	t.Helper()
+	decoded := executeJSON(t, "auth profile list -o json")
+	profiles, _ := decoded["profiles"].([]interface{})
+	if !assert.Len(t, profiles, 1) {
+		t.FailNow()
+	}
+	entry, ok := profiles[0].(map[string]interface{})
+	if !assert.True(t, ok) {
+		t.FailNow()
+	}
+	return entry
+}
+
+// What the listing shows must not depend on which handler would authenticate
+// the profile. A stored label is stale rather than wrong, so the handler's
+// fields and the stored ones usually coincide; when the anonymous handler
+// changed scheme between builds they do not, and the credential the listing
+// would have omitted is the one the user is looking for.
+func TestListProfilesShowsEveryStoredFieldWhateverResolves(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T)
+	}{
+		{"a stored label resolves through the sole anonymous handler", func(t *testing.T) {
+			initTestCLI(t, "", stubAuthHandler{})
+		}},
+		{"no handler resolves the stored label", func(t *testing.T) {
+			initTestCLI(t, "apikey", stubAuthHandler{})
+			UseAuth("oauth", stubOptionalKeyHandler{})
+		}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.setup(t)
+			Creds.Set("profiles.acme.type", "legacy")
+			Creds.Set("profiles.acme.api_key", "sk-orq-abcdefghijklmnop")
+			Creds.Set("profiles.acme.stray_field", "not a declared key")
+
+			entry := onlyListedProfile(t)
+			assert.Equal(t, "legacy", entry["type"])
+			assert.Contains(t, entry, "api_key")
+			assert.Contains(t, entry, "stray_field")
+		})
+	}
+}
+
+// A field written by hand under its dashed spelling is a field on disk, and
+// the listing is what someone reads to find it.
+func TestListProfilesShowsAFieldStoredUnderItsDashedSpelling(t *testing.T) {
+	home := resetAuthState(t)
+	writeCredentials(t, home, `{"profiles":{"acme":{"type":"","api-key":"sk-orq-abcdefghijklmnop"}}}`)
+	bootCLI(t, home)
+
+	entry := onlyListedProfile(t)
+	assert.Contains(t, entry, "api_key")
+}
+
+// SetProfile canonicalizes the name it is handed. Viper lower-cases map keys,
+// so an uncanonicalized name misses the profile already stored and then
+// collides with it, dropping one of the two at random.
+func TestSetProfileCanonicalizesTheProfileName(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+	Creds.Set("profiles.acme.type", "apikey")
+	Creds.Set("profiles.acme.server", "https://orq.acme.internal")
+
+	Creds.SetProfile("ACME", map[string]string{"api_key": "secret"})
+
+	stored := Creds.GetStringMapString("profiles.acme")
+	assert.Equal(t, "secret", stored["api_key"])
+	assert.Equal(t, "https://orq.acme.internal", stored["server"], "the stored profile must not be replaced by a differently-cased name")
+	assert.Len(t, Creds.GetStringMap("profiles"), 1, "a differently-cased name must not create a second profile")
+}
+
+func TestAuthProfileRemoveDeletesOnlyThatProfile(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+	execute("auth profile add prod secret-prod")
+	execute("auth profile add scratch secret-scratch")
+
+	out := executeJSON(t, "auth profile remove scratch -o json")
+
+	assert.Equal(t, "scratch", out["removed_profile"])
+	assert.Equal(t, false, out["selection_cleared"])
+	assert.True(t, ProfileExists("prod"), "removing one profile must not drop its siblings")
+	listing := executeJSON(t, "auth profile list -o json")
+	assert.NotContains(t, fmt.Sprint(listing["profiles"]), "scratch")
+	assert.Contains(t, fmt.Sprint(listing["profiles"]), "prod")
+	assert.Equal(t, "prod", ActiveProfileName(), "removing an inactive profile must not touch the selection")
+
+	credentials, err := os.ReadFile(filepath.Join(viper.GetString("config-directory"), "credentials.json"))
+	assert.NoError(t, err)
+	assert.NotContains(t, string(credentials), "secret-scratch", "the removed profile's key must be gone from disk")
+	assert.Contains(t, string(credentials), "secret-prod")
+}
+
+// Removing the profile in force must not leave `auth profile current` pointing
+// at a name `auth profile list` no longer shows. A surviving sibling keeps the
+// assertion honest: with only one profile stored, "the selection was cleared"
+// and "nothing is left to select" are the same observation.
+func TestAuthProfileRemoveClearsActiveSelection(t *testing.T) {
+	home := initTestCLI(t, "", stubAuthHandler{})
+	execute("auth profile add prod secret-prod")
+	execute("auth profile add scratch secret-scratch")
+	execute("auth profile use scratch")
+
+	out := executeJSON(t, "auth profile remove scratch -o json")
+	assert.Equal(t, true, out["selection_cleared"])
+
+	current := executeJSON(t, "auth profile current -o json")
+	assert.Equal(t, "", current["active_profile"])
+	assert.Equal(t, "none", current["source"])
+	assert.Equal(t, false, current["exists"])
+	assert.True(t, ProfileExists("prod"), "the surviving profile must not have been promoted or dropped")
+
+	// The cleared selection must survive a restart: persistProfileSelection
+	// pairs the empty selection with profile-decided precisely so the next
+	// process cannot read it as "never chose one" and adopt something.
+	bootCLI(t, home)
+	assert.Equal(t, "", ActiveProfileName())
+	assert.True(t, ProfileExists("prod"))
+}
+
+// Removal owns the stored choice only. A profile in force through --profile or
+// <PREFIX>_PROFILE outranks that key and is the caller's to stop passing, so
+// `auth profile current` reporting it with exists:false afterwards is the
+// documented outcome, not a regression.
+func TestAuthProfileRemoveLeavesFlagAndEnvSelectionToTheCaller(t *testing.T) {
+	tests := []struct {
+		name    string
+		source  string
+		inForce func(t *testing.T)
+	}{
+		{
+			name:   "flag",
+			source: "flag",
+			inForce: func(t *testing.T) {
+				assert.NoError(t, Root.PersistentFlags().Set("profile", "scratch"))
+			},
+		},
+		{
+			name:    "env",
+			source:  "env",
+			inForce: func(t *testing.T) { t.Setenv("TEST_AUTH_PROFILE", "scratch") },
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			initTestCLI(t, "", stubAuthHandler{})
+			execute("auth profile add scratch secret-scratch")
+			execute("auth profile clear")
+			tc.inForce(t)
+
+			out := executeJSON(t, "auth profile remove scratch -o json")
+			assert.Equal(t, false, out["selection_cleared"], "there was no stored choice to clear")
+
+			current := executeJSON(t, "auth profile current -o json")
+			assert.Equal(t, "scratch", current["active_profile"])
+			assert.Equal(t, tc.source, current["source"])
+			assert.Equal(t, false, current["exists"], "current must report the profile is gone rather than hide it")
+		})
+	}
+}
+
+func TestAuthProfileRemoveRejectsUnknownProfile(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+	execute("auth profile add prod secret-prod")
+
+	path := filepath.Join(viper.GetString("config-directory"), "credentials.json")
+	before, err := os.ReadFile(path)
+	assert.NoError(t, err)
+
+	// executeForExit, not executeStreams: the acceptance criterion is the exit
+	// code, and executeStreams discards it by design.
+	_, stderr, code := executeForExit("auth profile remove nope")
+
+	assert.Equal(t, ExitError, code)
+	assert.Contains(t, stderr, `unknown profile "nope"`)
+	after, err := os.ReadFile(path)
+	assert.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "a rejected removal must not rewrite credentials.json")
+	assert.Equal(t, "prod", ActiveProfileName())
+}
+
+// Cleaning up after a broken selection is exactly when remove is needed, so it
+// must not depend on the selected profile resolving to anything.
+func TestAuthProfileRemoveWorksWhileSelectedProfileIsMissing(t *testing.T) {
+	initTestCLI(t, "", stubAuthHandler{})
+	execute("auth profile add prod secret-prod")
+	execute("auth profile add scratch secret-scratch")
+	execute("auth profile use scratch")
+	Creds.RemoveProfile("scratch")
+	assert.False(t, ProfileExists("scratch"), "the broken-selection premise must hold before the act")
+
+	out := executeJSON(t, "auth profile remove prod -o json")
+
+	assert.Equal(t, "prod", out["removed_profile"])
+	assert.Equal(t, false, out["selection_cleared"], "the dangling selection names scratch, not prod")
+	assert.False(t, ProfileExists("prod"))
+}
+
+func TestAuthProfileRemoveAliases(t *testing.T) {
+	for _, alias := range []string{"rm", "delete"} {
+		t.Run(alias, func(t *testing.T) {
+			initTestCLI(t, "", stubAuthHandler{})
+			execute("auth profile add scratch secret-scratch")
+
+			assert.Equal(t, "scratch", executeJSON(t, "auth profile "+alias+" scratch -o json")["removed_profile"])
+			assert.False(t, ProfileExists("scratch"))
+		})
+	}
+}
+
+// namedStubAuthHandler is a stub whose handlers compare unequal, so a test can
+// tell which registration authHandlerFor resolved.
+type namedStubAuthHandler struct{ name string }
+
+func (namedStubAuthHandler) ProfileKeys() []string                              { return []string{"api-key"} }
+func (namedStubAuthHandler) OnRequest(_ *zerolog.Logger, _ *http.Request) error { return nil }
+
+func TestAuthHandlerForDefaultAuthType(t *testing.T) {
 	AuthHandlers = make(map[string]AuthHandler)
 	defaultAuthType = ""
 	t.Cleanup(func() {
@@ -58,27 +1605,34 @@ func TestResolveAuthHandlerDefault(t *testing.T) {
 		defaultAuthType = ""
 	})
 
-	AuthHandlers["alpha"] = stubAuthHandler{}
-	AuthHandlers["beta"] = stubAuthHandler{}
+	alpha := namedStubAuthHandler{name: "alpha"}
+	beta := namedStubAuthHandler{name: "beta"}
+	AuthHandlers["alpha"] = alpha
+	AuthHandlers["beta"] = beta
 
 	// Two typed handlers, typeless profile, no default → nil (error preserved).
-	if name, handler := resolveAuthHandler(map[string]string{}); handler != nil || name != "" {
-		t.Fatalf("expected nil handler without default, got %q/%v", name, handler)
+	if handler := authHandlerFor(""); handler != nil {
+		t.Fatalf("expected nil handler without default, got %v", handler)
 	}
 
 	// Explicit profile type wins.
-	if name, handler := resolveAuthHandler(map[string]string{"type": "beta"}); name != "beta" || handler == nil {
-		t.Fatalf("expected beta handler for explicit type, got %q/%v", name, handler)
+	if handler := authHandlerFor("beta"); handler != beta {
+		t.Fatalf("expected beta handler for explicit type, got %v", handler)
 	}
 
 	// Default handler used for a typeless profile.
 	SetDefaultAuthType("alpha")
-	if name, handler := resolveAuthHandler(map[string]string{}); name != "alpha" || handler == nil {
-		t.Fatalf("expected alpha handler from default, got %q/%v", name, handler)
+	if handler := authHandlerFor(""); handler != alpha {
+		t.Fatalf("expected alpha handler from default, got %v", handler)
 	}
 
 	// Explicit type still wins over a configured default.
-	if name, handler := resolveAuthHandler(map[string]string{"type": "beta"}); name != "beta" || handler == nil {
-		t.Fatalf("expected explicit type to win over default, got %q/%v", name, handler)
+	if handler := authHandlerFor("beta"); handler != beta {
+		t.Fatalf("expected explicit type to win over default, got %v", handler)
+	}
+
+	// An unknown label never falls back to the default: it names a scheme.
+	if handler := authHandlerFor("gamma"); handler != nil {
+		t.Fatalf("expected nil for an unregistered label, got %v", handler)
 	}
 }
