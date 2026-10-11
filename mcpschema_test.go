@@ -78,7 +78,7 @@ func TestConvertSchemaNullableScalars(t *testing.T) {
     "responses": {"200": {"description": "ok"}}}}}
 }`, "/x")
 
-	out := convertSchema(ref, true)
+	out := convertSchema(ref, schemaInput)
 	props, _ := out["properties"].(map[string]any)
 	for _, tc := range cases {
 		p, _ := props[tc.prop].(map[string]any)
@@ -104,7 +104,7 @@ func TestConvertSchemaEnumsPreserved(t *testing.T) {
     "responses": {"200": {"description": "ok"}}}}}
 }`, "/x")
 
-	out := convertSchema(ref, true)
+	out := convertSchema(ref, schemaInput)
 	props := out["properties"].(map[string]any)
 	color := props["color"].(map[string]any)
 	enum, ok := color["enum"].([]any)
@@ -113,7 +113,7 @@ func TestConvertSchemaEnumsPreserved(t *testing.T) {
 	}
 }
 
-func TestConvertSchemaCompositionsPreserved(t *testing.T) {
+func TestConvertSchemaCompositions(t *testing.T) {
 	ref := bodySchemaRef(t, `{
   "openapi": "3.1.0",
   "info": {"title": "t", "version": "1"},
@@ -127,13 +127,17 @@ func TestConvertSchemaCompositionsPreserved(t *testing.T) {
     "responses": {"200": {"description": "ok"}}}}}
 }`, "/x")
 
-	out := convertSchema(ref, true)
-	branches, ok := out["oneOf"].([]any)
+	// oneOf is folded into anyOf (see convertCompositions).
+	out := convertSchema(ref, schemaInput)
+	branches, ok := out["anyOf"].([]any)
 	if !ok || len(branches) != 2 {
-		t.Fatalf("oneOf not preserved: %#v", out["oneOf"])
+		t.Fatalf("oneOf should become anyOf: %#v", out)
+	}
+	if _, ok := out["oneOf"]; ok {
+		t.Errorf("oneOf should not survive: %#v", out["oneOf"])
 	}
 
-	// anyOf + allOf too.
+	// anyOf + allOf pass through.
 	for _, kw := range []string{"anyOf", "allOf"} {
 		refK := bodySchemaRef(t, `{
   "openapi": "3.1.0",
@@ -147,7 +151,7 @@ func TestConvertSchemaCompositionsPreserved(t *testing.T) {
     }}}},
     "responses": {"200": {"description": "ok"}}}}}
 }`, "/x")
-		o := convertSchema(refK, true)
+		o := convertSchema(refK, schemaInput)
 		b, ok := o[kw].([]any)
 		if !ok || len(b) != 2 {
 			t.Errorf("%s not preserved: %#v", kw, o[kw])
@@ -168,7 +172,7 @@ func TestConvertSchemaRefCycleTerminates(t *testing.T) {
     "responses": {"200": {"description": "ok"}}}}}
 }`, "/n")
 
-	out := convertSchema(ref, true) // must terminate
+	out := convertSchema(ref, schemaInput) // must terminate
 	props := out["properties"].(map[string]any)
 	child, ok := props["child"].(map[string]any)
 	if !ok {
@@ -205,7 +209,7 @@ func TestConvertSchemaReadOnlyWriteOnlyStripping(t *testing.T) {
 }`
 	ref := bodySchemaRef(t, spec, "/x")
 
-	in := convertSchema(ref, true)
+	in := convertSchema(ref, schemaInput)
 	inProps := in["properties"].(map[string]any)
 	if _, ok := inProps["id"]; ok {
 		t.Errorf("readOnly id must be stripped from input")
@@ -218,7 +222,7 @@ func TestConvertSchemaReadOnlyWriteOnlyStripping(t *testing.T) {
 		t.Errorf("readOnly id must be removed from input required: %v", inReq)
 	}
 
-	out := convertSchema(ref, false)
+	out := convertSchema(ref, schemaOutput)
 	outProps := out["properties"].(map[string]any)
 	if _, ok := outProps["secret"]; ok {
 		t.Errorf("writeOnly secret must be stripped from output")
@@ -226,9 +230,9 @@ func TestConvertSchemaReadOnlyWriteOnlyStripping(t *testing.T) {
 	if _, ok := outProps["id"]; !ok {
 		t.Errorf("readOnly id must remain in output")
 	}
-	outReq := toStringSlice(out["required"])
-	if contains(outReq, "secret") {
-		t.Errorf("writeOnly secret must be removed from output required: %v", outReq)
+	// Output schemas describe shape only: no required list at all.
+	if req, ok := out["required"]; ok {
+		t.Errorf("output schema must not carry required: %v", req)
 	}
 }
 
@@ -341,7 +345,7 @@ paths:
 			route = r
 		}
 	}
-	if route.In != "body" || route.Type != "json" {
+	if route.In != "body" || route.WireName != "" {
 		t.Errorf("body route = %+v", route)
 	}
 }
@@ -494,9 +498,9 @@ paths:
 	}{
 		{"/r", "get", true, false, true},
 		{"/h", "head", true, false, true},
-		{"/r", "put", false, false, true},
+		{"/r", "put", false, true, true},
 		{"/r", "post", false, false, false},
-		{"/r", "patch", false, false, false},
+		{"/r", "patch", false, true, false},
 		{"/r", "delete", false, true, true},
 	}
 	for _, tc := range cases {
@@ -718,8 +722,8 @@ paths:
 	for _, r := range op.MCP.Routes {
 		if r.Prop == "limit" {
 			limitRoutes++
-			if r.Type != "int64" {
-				t.Errorf("limit route type = %q, want int64 (op-level schema)", r.Type)
+			if !r.Required || r.In != "query" {
+				t.Errorf("limit route = %+v, want a required query param (op-level)", r)
 			}
 		}
 	}
@@ -799,4 +803,216 @@ func keysOf(m map[string]any) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// schemaOf decodes a compact JSON schema string from the IR.
+func schemaOf(t *testing.T, raw string) map[string]any {
+	t.Helper()
+	var schema map[string]any
+	if err := json.Unmarshal([]byte(raw), &schema); err != nil {
+		t.Fatalf("decode schema: %v", err)
+	}
+	return schema
+}
+
+func propOf(t *testing.T, schema map[string]any, name string) map[string]any {
+	t.Helper()
+	props, _ := schema["properties"].(map[string]any)
+	prop, ok := props[name].(map[string]any)
+	if !ok {
+		t.Fatalf("property %q missing: %v", name, keysOf(props))
+	}
+	return prop
+}
+
+// Clients fail a whole tool call when structuredContent does not match the
+// output schema, after the API call has happened, so output schemas carry
+// shape only and tolerate the drift real APIs show.
+func TestConvertSchemaOutputIsLenient(t *testing.T) {
+	ref := bodySchemaRef(t, `{
+  "openapi": "3.1.0",
+  "info": {"title": "t", "version": "1"},
+  "paths": {"/x": {"post": {"operationId": "X",
+    "requestBody": {"content": {"application/json": {"schema": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": {"type": "string", "enum": ["a", "b"]},
+        "created": {"type": "string", "format": "date-time"},
+        "count": {"type": "integer", "minimum": 0},
+        "kind": {"oneOf": [{"type": "string"}, {"type": "integer"}]}
+      }
+    }}}},
+    "responses": {"200": {"description": "ok"}}}}}
+}`, "/x")
+
+	out := convertSchema(ref, schemaOutput)
+	if out["type"] != "object" {
+		t.Errorf("root type = %v, want object (the root is never widened)", out["type"])
+	}
+	status := propOf(t, out, "status")
+	if _, ok := status["enum"]; ok {
+		t.Errorf("output enum must be dropped: %v", status)
+	}
+	if got, ok := status["type"].([]any); !ok || len(got) != 2 || got[1] != "null" {
+		t.Errorf("nested output type = %v, want [string null]", status["type"])
+	}
+	if _, ok := propOf(t, out, "created")["format"]; ok {
+		t.Errorf("output format must be dropped")
+	}
+	if _, ok := propOf(t, out, "count")["minimum"]; ok {
+		t.Errorf("output minimum must be dropped")
+	}
+	if _, ok := propOf(t, out, "kind")["anyOf"]; !ok {
+		t.Errorf("output oneOf should become anyOf")
+	}
+}
+
+func TestConvertSchemaInputConstraints(t *testing.T) {
+	ref := bodySchemaRef(t, `{
+  "openapi": "3.0.3",
+  "info": {"title": "t", "version": "1"},
+  "paths": {"/x": {"post": {"operationId": "X",
+    "requestBody": {"content": {"application/json": {"schema": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z]+$"},
+        "slug": {"type": "string", "pattern": "^(?!admin).*$"},
+        "tags": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 5, "uniqueItems": true},
+        "score": {"type": "number", "minimum": 0, "exclusiveMinimum": true, "maximum": 1},
+        "mode": {"type": "string", "enum": ["fast"], "nullable": true},
+        "labels": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    }}}},
+    "responses": {"200": {"description": "ok"}}}}}
+}`, "/x")
+
+	out := convertSchema(ref, schemaInput)
+	name := propOf(t, out, "name")
+	if name["minLength"] != uint64(1) || name["maxLength"] != uint64(64) || name["pattern"] != "^[a-z]+$" {
+		t.Errorf("string constraints = %v", name)
+	}
+	if _, ok := propOf(t, out, "slug")["pattern"]; ok {
+		t.Errorf("a pattern RE2 cannot compile must be dropped, or the server would not start")
+	}
+	tags := propOf(t, out, "tags")
+	if tags["minItems"] != uint64(1) || tags["maxItems"] != uint64(5) || tags["uniqueItems"] != true {
+		t.Errorf("array constraints = %v", tags)
+	}
+	score := propOf(t, out, "score")
+	if _, ok := score["minimum"]; ok || score["exclusiveMinimum"] != float64(0) || score["maximum"] != float64(1) {
+		t.Errorf("OpenAPI 3.0 exclusiveMinimum should become numeric: %v", score)
+	}
+	mode := propOf(t, out, "mode")
+	if enum, _ := mode["enum"].([]any); len(enum) != 2 || enum[1] != nil {
+		t.Errorf("a nullable enum must admit null: %v", mode["enum"])
+	}
+	labels := propOf(t, out, "labels")
+	if ap, ok := labels["additionalProperties"].(map[string]any); !ok || ap["type"] != "string" {
+		t.Errorf("map value schema should be kept: %v", labels)
+	}
+
+	resolveSchema(t, "input constraints", mustCompactJSON(out))
+}
+
+func TestBuildMCPToolFreeFormObjectBody(t *testing.T) {
+	api := ProcessAPI("example", loadTestSpec(t, `
+openapi: 3.1.0
+info: {title: t, version: "1"}
+paths:
+  /metadata:
+    patch:
+      operationId: SetMetadata
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: {type: string}
+      responses:
+        "200": {description: ok}
+`))
+	op := findOp(api, "/metadata", "patch")
+	schema := schemaOf(t, op.MCP.InputSchema)
+	if _, ok := propOf(t, schema, "body")["additionalProperties"]; !ok {
+		t.Errorf("a free-form body should travel whole under 'body'")
+	}
+	if len(op.MCP.Routes) != 1 || op.MCP.Routes[0].WireName != "" {
+		t.Errorf("routes = %+v, want one whole-body route", op.MCP.Routes)
+	}
+}
+
+func TestBuildMCPToolParamRouting(t *testing.T) {
+	api := ProcessAPI("example", loadTestSpec(t, `
+openapi: 3.1.0
+info: {title: t, version: "1"}
+paths:
+  /items/{item-id}:
+    get:
+      operationId: GetItem
+      description: The spec description.
+      x-bartolo-description: The curated description.
+      parameters:
+        - {name: item-id, in: path, required: true, schema: {type: string}}
+        - {name: page-size, in: query, schema: {type: integer}, x-bartolo-name: size}
+        - {name: page_size, in: header, schema: {type: integer}}
+        - {name: session, in: cookie, schema: {type: string}}
+      responses:
+        2XX:
+          description: ok
+          content:
+            application/json:
+              schema: {type: array, items: {type: string}}
+`))
+	op := findOp(api, "/items/{item-id}", "get")
+	routes := map[string]MCPArgRoute{}
+	for _, r := range op.MCP.Routes {
+		routes[r.Prop] = r
+	}
+
+	if r := routes["item_id"]; !r.Required || r.In != "path" || r.WireName != "item-id" {
+		t.Errorf("path route = %+v", r)
+	}
+	if r := routes["page_size"]; r.Flag != "size" || r.Required {
+		t.Errorf("an optional param must route to its CLI flag name: %+v", r)
+	}
+	if r := routes["header_page_size"]; r.In != "header" || r.WireName != "page_size" {
+		t.Errorf("a colliding param name should be prefixed by its location: %+v", routes)
+	}
+	if _, ok := routes["session"]; ok {
+		t.Errorf("cookie params cannot be sent by the client func and must be skipped")
+	}
+
+	if !strings.Contains(op.MCP.Description, "The curated description.") {
+		t.Errorf("x-bartolo-description should override the description: %q", op.MCP.Description)
+	}
+
+	if !op.MCP.WrapResult {
+		t.Fatalf("a 2XX array response should produce a wrapped output schema")
+	}
+	result := propOf(t, schemaOf(t, op.MCP.OutputSchema), "result")
+	if got, ok := result["type"].([]any); !ok || got[0] != "array" {
+		t.Errorf("wrapped result type = %v", result["type"])
+	}
+}
+
+func TestBuildMCPToolUntypedJSONBody(t *testing.T) {
+	api := ProcessAPI("example", loadTestSpec(t, `
+openapi: 3.1.0
+info: {title: t, version: "1"}
+paths:
+  /echo:
+    post:
+      operationId: Echo
+      requestBody:
+        content:
+          application/json:
+            example: {hello: world}
+      responses:
+        "200": {description: ok}
+`))
+	op := findOp(api, "/echo", "post")
+	if body := propOf(t, schemaOf(t, op.MCP.InputSchema), "body"); len(body) != 0 {
+		t.Errorf("an untyped JSON body should be a permissive 'body' argument, got %v", body)
+	}
 }

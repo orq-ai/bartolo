@@ -22,17 +22,21 @@ import (
 )
 
 // ArgRoute describes where a single top-level tool input property is sent on
-// the wire when the handler reconstructs the underlying API call.
+// the wire when APITool reconstructs the underlying API call.
 type ArgRoute struct {
 	// Prop is the property name in the tool input schema.
 	Prop string
 	// WireName is the OpenAPI parameter name or request-body property name.
+	// It is empty for a body sent whole (a non-object request body).
 	WireName string
 	// In is one of "path", "query", "header", or "body".
 	In string
-	// Type is the coerced argument type: "string", "int64", "float64", "bool",
-	// or "json" (passthrough).
-	Type string
+	// Flag is the CLI flag name the generated client func reads an optional
+	// parameter from.
+	Flag string
+	// Required marks a parameter the client func takes as a positional
+	// argument (see APIRequest.Arg).
+	Required bool
 }
 
 // ToolDef is the generator-produced description of one MCP tool. Schemas are
@@ -60,6 +64,9 @@ type ToolDef struct {
 
 	// Routes maps each top-level input property to its wire destination.
 	Routes []ArgRoute
+	// WrapResult reports that OutputSchema wraps a non-object response body as
+	// {"result": ...}; APITool wraps the decoded value to match.
+	WrapResult bool
 	// Handler executes the underlying API call. args is the validated,
 	// unmarshaled tool arguments. It returns the decoded response value (any
 	// JSON-serializable value) or an error; a *cli.HTTPError is surfaced as a

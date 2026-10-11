@@ -38,7 +38,7 @@ func echoTools() []ToolDef {
 // server. It fails the test on a build error.
 func newHTTPTestServer(t *testing.T, opts httpServeOptions) *httptest.Server {
 	t.Helper()
-	server, err := buildServer("testapp", "1.0.0", "", echoTools())
+	server, err := buildServer(serverInfo{name: "testapp", version: "1.0.0"}, echoTools())
 	if err != nil {
 		t.Fatalf("buildServer: %v", err)
 	}
@@ -190,6 +190,41 @@ func TestHTTPOriginCheck(t *testing.T) {
 	}
 	if code := post(""); code == http.StatusForbidden {
 		t.Errorf("no-Origin request was forbidden (%d)", code)
+	}
+}
+
+// The spec requires every Streamable HTTP server to validate Origin, so a
+// cross-origin browser request is refused even with no allow-list configured.
+func TestHTTPCrossOriginRejectedByDefault(t *testing.T) {
+	srv := newHTTPTestServer(t, httpServeOptions{addr: "127.0.0.1:0", authMode: authModeNone})
+
+	post := func(header, value string) int {
+		req, _ := http.NewRequest(http.MethodPost, srv.URL, strings.NewReader(`{}`))
+		req.Header.Set(header, value)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if code := post("Origin", "https://evil.example"); code != http.StatusForbidden {
+		t.Errorf("cross-origin status = %d, want 403", code)
+	}
+	if code := post("Sec-Fetch-Site", "same-origin"); code == http.StatusForbidden {
+		t.Errorf("same-origin request was forbidden (%d)", code)
+	}
+}
+
+func TestHTTPRejectsMalformedAllowedOrigin(t *testing.T) {
+	server, err := buildServer(serverInfo{name: "testapp"}, echoTools())
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := httpServeOptions{addr: "127.0.0.1:0", authMode: authModeNone, allowedOrigins: []string{"good.example"}}
+	if _, err := buildHTTPHandler(context.Background(), server, opts); err == nil {
+		t.Error("an origin without a scheme should be rejected at startup")
 	}
 }
 
@@ -364,7 +399,7 @@ func TestHTTPOAuthMetadataEndpoint(t *testing.T) {
 func TestResolveHTTPOptions(t *testing.T) {
 	t.Run("bearer requires env token", func(t *testing.T) {
 		t.Setenv("env-does-not-matter", "")
-		_, err := resolveHTTPOptions("TESTPREFIX", "127.0.0.1:8484", authModeBearer, nil, false, "", "", "", nil)
+		_, err := resolveHTTPOptions("TESTPREFIX", httpFlags{addr: "127.0.0.1:8484", authMode: authModeBearer})
 		if err == nil {
 			t.Fatal("expected error when token env var unset")
 		}
@@ -372,7 +407,7 @@ func TestResolveHTTPOptions(t *testing.T) {
 
 	t.Run("bearer with env token ok", func(t *testing.T) {
 		t.Setenv("TESTPREFIX_MCP_TOKEN", "abc")
-		opts, err := resolveHTTPOptions("TESTPREFIX", "127.0.0.1:8484", authModeBearer, nil, false, "", "", "", nil)
+		opts, err := resolveHTTPOptions("TESTPREFIX", httpFlags{addr: "127.0.0.1:8484", authMode: authModeBearer})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -382,13 +417,13 @@ func TestResolveHTTPOptions(t *testing.T) {
 	})
 
 	t.Run("oauth requires issuer and audience", func(t *testing.T) {
-		if _, err := resolveHTTPOptions("", ":8484", authModeOAuth, nil, false, "", "aud", "", nil); err == nil {
+		if _, err := resolveHTTPOptions("", httpFlags{addr: ":8484", authMode: authModeOAuth, oauthAudience: "aud"}); err == nil {
 			t.Error("expected error when issuer missing")
 		}
-		if _, err := resolveHTTPOptions("", ":8484", authModeOAuth, nil, false, "iss", "", "", nil); err == nil {
+		if _, err := resolveHTTPOptions("", httpFlags{addr: ":8484", authMode: authModeOAuth, oauthIssuer: "iss"}); err == nil {
 			t.Error("expected error when audience missing")
 		}
-		opts, err := resolveHTTPOptions("", ":8484", authModeOAuth, nil, false, "iss", "aud", "jwks", []string{"s"})
+		opts, err := resolveHTTPOptions("", httpFlags{addr: ":8484", authMode: authModeOAuth, oauthIssuer: "iss", oauthAudience: "aud", oauthJWKS: "jwks", oauthScopes: []string{"s"}})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -398,7 +433,7 @@ func TestResolveHTTPOptions(t *testing.T) {
 	})
 
 	t.Run("invalid auth mode", func(t *testing.T) {
-		if _, err := resolveHTTPOptions("", ":8484", "bogus", nil, false, "", "", "", nil); err == nil {
+		if _, err := resolveHTTPOptions("", httpFlags{addr: ":8484", authMode: "bogus"}); err == nil {
 			t.Error("expected error for invalid auth mode")
 		}
 	})

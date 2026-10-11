@@ -29,7 +29,7 @@ func newSession(t *testing.T, defs []ToolDef) *mcp.ClientSession {
 	t.Helper()
 	ctx := context.Background()
 
-	server, err := buildServer("testapp", "1.2.3", "instructions here", defs)
+	server, err := buildServer(serverInfo{name: "testapp", version: "1.2.3", instructions: "instructions here"}, defs)
 	if err != nil {
 		t.Fatalf("buildServer: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestStdioPurity(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- serveStdio(context.Background(), "testapp", "1.0.0", "", defs)
+		done <- serveStdio(context.Background(), serverInfo{name: "testapp", version: "1.0.0"}, defs)
 	}()
 
 	// Drive the protocol manually with newline-delimited JSON-RPC (2026-07-28:
@@ -421,5 +421,90 @@ func TestStdioPurity(t *testing.T) {
 	}
 	if lines == 0 {
 		t.Fatal("no JSON-RPC output captured")
+	}
+}
+
+func TestServerAdvertisesToolsOnlyWithCacheTTL(t *testing.T) {
+	defs := []ToolDef{{
+		Name:        "noop",
+		InputSchema: json.RawMessage(`{"type":"object"}`),
+		Handler:     func(context.Context, map[string]any) (any, error) { return map[string]any{}, nil },
+	}}
+	cs := newSession(t, defs)
+
+	caps := cs.InitializeResult().Capabilities
+	if caps.Logging != nil { //nolint:staticcheck // asserting the deprecated capability is absent
+		t.Errorf("logging is deprecated as of 2026-07-28 and must not be advertised")
+	}
+	if caps.Tools == nil || caps.Tools.ListChanged {
+		t.Errorf("tools capability = %+v, want present without listChanged", caps.Tools)
+	}
+
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TTLMs != int(listTTL/time.Millisecond) || res.CacheScope != "public" {
+		t.Errorf("tools/list cache = %d/%q, want %d/public", res.TTLMs, res.CacheScope, int(listTTL/time.Millisecond))
+	}
+}
+
+func TestStructuredContentShape(t *testing.T) {
+	returning := func(name string, out any, outputSchema string) ToolDef {
+		def := ToolDef{
+			Name:        name,
+			InputSchema: json.RawMessage(`{"type":"object"}`),
+			Handler:     func(context.Context, map[string]any) (any, error) { return out, nil },
+		}
+		if outputSchema != "" {
+			def.OutputSchema = json.RawMessage(outputSchema)
+		}
+		return def
+	}
+	cs := newSession(t, []ToolDef{
+		returning("array_no_schema", []any{float64(1), float64(2)}, ""),
+		returning("object_no_schema", map[string]any{"a": "b"}, ""),
+		returning("empty_with_schema", nil, `{"type":"object"}`),
+	})
+	call := func(name string) *mcp.CallToolResult {
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: name, Arguments: map[string]any{}})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		return res
+	}
+
+	// Clients before 2026-07-28 reject non-object structuredContent.
+	if res := call("array_no_schema"); res.StructuredContent != nil || textOf(t, res) != "[1,2]" {
+		t.Errorf("array result: structured=%v text=%q, want text only", res.StructuredContent, textOf(t, res))
+	}
+	if res := call("object_no_schema"); res.StructuredContent == nil {
+		t.Errorf("an object result should be structured even without an output schema")
+	}
+	// A tool with an output schema must always return structuredContent.
+	if res := call("empty_with_schema"); res.StructuredContent == nil {
+		t.Errorf("an empty body with an output schema should become {}")
+	}
+}
+
+func TestBuildServerRejectsUnregistrableTools(t *testing.T) {
+	handler := func(context.Context, map[string]any) (any, error) { return nil, nil }
+	cases := map[string]ToolDef{
+		"non-object input schema": {Name: "a", InputSchema: json.RawMessage(`{"type":"string"}`), Handler: handler},
+		"no handler":              {Name: "b", InputSchema: json.RawMessage(`{"type":"object"}`)},
+		"invalid output schema":   {Name: "c", OutputSchema: json.RawMessage(`{`), Handler: handler},
+	}
+	for name, def := range cases {
+		t.Run(name, func(t *testing.T) {
+			// The SDK panics on these; the server must report them instead.
+			if _, err := buildServer(serverInfo{name: "t"}, []ToolDef{def}); err == nil {
+				t.Error("expected an error")
+			}
+		})
+	}
+
+	// A tool that declares no input schema takes no arguments.
+	if _, err := buildServer(serverInfo{name: "t"}, []ToolDef{{Name: "d", Handler: handler}}); err != nil {
+		t.Errorf("a missing input schema should default to an empty object: %v", err)
 	}
 }

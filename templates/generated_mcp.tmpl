@@ -4,11 +4,9 @@
 package generated
 
 import (
-	"context"
 	"encoding/json"
 
 	"github.com/orq-ai/bartolo/mcpserver"
-	"github.com/spf13/viper"
 )
 
 // mcpInstructions is the server instructions string surfaced to connected MCP
@@ -16,14 +14,13 @@ import (
 const mcpInstructions = {{ .API.MCPInstructions | printf "%q" }}
 
 // mcpTools returns the MCP tool definitions for every non-excluded operation.
-// Each handler closure reconstructs the underlying API call by routing the
-// validated tool arguments to the existing generated client func.
+// mcpserver.APITool routes each call's validated arguments per Routes, and the
+// closure hands them to the operation's generated client func.
 func mcpTools() []mcpserver.ToolDef {
 	return []mcpserver.ToolDef{
 		{{- range .Tools }}
 		{{- $op := .Op }}
-		{{- $apiPublic := .ApiPublic }}
-		{
+		mcpserver.APITool(mcpserver.ToolDef{
 			Name:        {{ $op.MCP.Name | printf "%q" }},
 			Title:       {{ $op.MCP.Title | printf "%q" }},
 			Description: {{ $op.MCP.Description | printf "%q" }},
@@ -31,61 +28,20 @@ func mcpTools() []mcpserver.ToolDef {
 			InputSchema: json.RawMessage({{ rawJSON $op.MCP.InputSchema }}),
 			{{- if $op.MCP.OutputSchema }}
 			OutputSchema: json.RawMessage({{ rawJSON $op.MCP.OutputSchema }}),
+			WrapResult:   {{ $op.MCP.WrapResult }},
 			{{- end }}
 			ReadOnly:    {{ $op.MCP.ReadOnly }},
 			Destructive: {{ $op.MCP.Destructive }},
 			Idempotent:  {{ $op.MCP.Idempotent }},
 			Routes: []mcpserver.ArgRoute{
 				{{- range $op.MCP.Routes }}
-				{Prop: {{ .Prop | printf "%q" }}, WireName: {{ .WireName | printf "%q" }}, In: {{ .In | printf "%q" }}, Type: {{ .Type | printf "%q" }}},
+				{Prop: {{ .Prop | printf "%q" }}, WireName: {{ .WireName | printf "%q" }}, In: {{ .In | printf "%q" }}{{ if .Flag }}, Flag: {{ .Flag | printf "%q" }}{{ end }}{{ if .Required }}, Required: true{{ end }}},
 				{{- end }}
 			},
-			Handler: func(ctx context.Context, args map[string]any) (any, error) {
-				params := viper.New()
-				{{- range $op.OptionalParams }}
-				if v, ok := args[{{ snakeName .Name | printf "%q" }}]; ok {
-					params.Set({{ .CLIName | printf "%q" }}, v)
-				}
-				{{- end }}
-				{{- if $op.CanHaveBody }}
-				var body string
-				bodyArgs := map[string]any{}
-				{{- range $op.MCP.Routes }}
-				{{- if eq .In "body" }}
-				{{- if eq .WireName "" }}
-				if v, ok := args[{{ .Prop | printf "%q" }}]; ok {
-					encoded, err := json.Marshal(v)
-					if err != nil {
-						return nil, err
-					}
-					body = string(encoded)
-				}
-				{{- else }}
-				if v, ok := args[{{ .Prop | printf "%q" }}]; ok {
-					bodyArgs[{{ .WireName | printf "%q" }}] = v
-				}
-				{{- end }}
-				{{- end }}
-				{{- end }}
-				if body == "" && len(bodyArgs) > 0 {
-					encoded, err := json.Marshal(bodyArgs)
-					if err != nil {
-						return nil, err
-					}
-					body = string(encoded)
-				}
-				{{- end }}
-				_, decoded, err := {{ $apiPublic }}{{ $op.GoName }}({{ range $op.RequiredParams }}mcpserver.CoerceString(args[{{ snakeName .Name | printf "%q" }}]), {{ end }}params{{ if $op.CanHaveBody }}, body{{ end }})
-				if err != nil {
-					return nil, err
-				}
-				{{- if $op.MCP.WrapResult }}
-				return map[string]any{"result": decoded}, nil
-				{{- else }}
-				return decoded, nil
-				{{- end }}
-			},
-		},
+		}, func(req *mcpserver.APIRequest) (any, error) {
+			_, decoded, err := {{ $op.PublicPrefix }}{{ $op.GoName }}({{ range $op.RequiredParams }}req.Arg({{ .In | printf "%q" }}, {{ .Name | printf "%q" }}), {{ end }}req.Params{{ if $op.CanHaveBody }}, req.Body{{ end }})
+			return decoded, err
+		}),
 		{{- end }}
 	}
 }

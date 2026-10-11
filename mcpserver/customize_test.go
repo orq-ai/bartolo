@@ -246,3 +246,18 @@ func TestCustomToolRoundTripOverInMemory(t *testing.T) {
 		t.Fatalf("structured = %v", res.StructuredContent)
 	}
 }
+
+func TestApplyCustomizationsRejectsInvalidCustomTools(t *testing.T) {
+	handler := func(context.Context, map[string]any) (any, error) { return nil, nil }
+	for name, extra := range map[string]ToolDef{
+		"bad name":   {Name: "has space", Handler: handler},
+		"no handler": {Name: "no_handler"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := &config{extra: []ToolDef{extra}}
+			if _, err := applyCustomizations(generatedEchoTools(), cfg); err == nil {
+				t.Error("expected an error naming the invalid tool")
+			}
+		})
+	}
+}

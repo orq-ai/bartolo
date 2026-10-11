@@ -55,8 +55,9 @@ func RemoveTools(names ...string) Option {
 	}
 }
 
-// PatchTool mutates a generated (or previously added) tool by name. The name
-// must exist after RemoveTools; otherwise serve/list fails.
+// PatchTool mutates a generated tool by name. The name must exist after
+// RemoveTools; otherwise serve/list fails. Tools from AddTools are the caller's
+// own and are not patched.
 func PatchTool(name string, fn func(*ToolDef)) Option {
 	return func(c *config) {
 		c.patches = append(c.patches, toolPatch{name: name, fn: fn})
@@ -95,61 +96,87 @@ func mergeConfig(cmdCfg *config) *config {
 }
 
 // applyCustomizations runs RemoveTools, then PatchTool, then AddTools, then
-// WrapAll. It does not apply --tools/--groups/--read-only filters.
+// WrapAll, and validates the result. It does not apply --tools/--groups/
+// --read-only filters.
 func applyCustomizations(defs []ToolDef, cfg *config) ([]ToolDef, error) {
-	removed := make(map[string]bool, len(cfg.remove))
-	for _, name := range cfg.remove {
-		removed[name] = true
+	out := removeTools(defs, cfg.remove)
+	out, err := patchTools(out, cfg.patches)
+	if err != nil {
+		return nil, err
 	}
-
-	out := make([]ToolDef, 0, len(defs)+len(cfg.extra))
-	for _, d := range defs {
-		if removed[d.Name] {
-			continue
-		}
-		out = append(out, d)
+	out, err = addTools(out, cfg.extra)
+	if err != nil {
+		return nil, err
 	}
-
-	index := make(map[string]int, len(out)+len(cfg.extra))
-	for i, d := range out {
-		index[d.Name] = i
+	if err := validateTools(out); err != nil {
+		return nil, err
 	}
+	return wrapTools(out, cfg.wraps), nil
+}
 
-	for _, p := range cfg.patches {
-		i, ok := index[p.name]
-		if !ok {
+// removeTools returns a copy of defs without the named tools.
+func removeTools(defs []ToolDef, names []string) []ToolDef {
+	return slices.DeleteFunc(slices.Clone(defs), func(d ToolDef) bool {
+		return slices.Contains(names, d.Name)
+	})
+}
+
+// patchTools applies each patch to the tool it names, in order. A patch may
+// rename its tool, but not onto another tool's name.
+func patchTools(defs []ToolDef, patches []toolPatch) ([]ToolDef, error) {
+	for _, p := range patches {
+		i := indexTool(defs, p.name)
+		if i < 0 {
 			return nil, fmt.Errorf("patch tool %q: no such tool", p.name)
 		}
-		tool := out[i]
+		tool := defs[i]
 		p.fn(&tool)
-		if tool.Name != p.name {
-			delete(index, p.name)
-			if j, exists := index[tool.Name]; exists && j != i {
-				return nil, fmt.Errorf("patch tool %q: renamed to %q which already exists", p.name, tool.Name)
-			}
-			index[tool.Name] = i
+		if j := indexTool(defs, tool.Name); j >= 0 && j != i {
+			return nil, fmt.Errorf("patch tool %q: renamed to %q which already exists", p.name, tool.Name)
 		}
-		out[i] = tool
+		defs[i] = tool
 	}
+	return defs, nil
+}
 
-	for _, extra := range cfg.extra {
-		if _, exists := index[extra.Name]; exists {
-			return nil, fmt.Errorf("add tool %q: name already exists", extra.Name)
+// addTools appends extra, rejecting any name already in use.
+func addTools(defs, extra []ToolDef) ([]ToolDef, error) {
+	for _, tool := range extra {
+		if indexTool(defs, tool.Name) >= 0 {
+			return nil, fmt.Errorf("add tool %q: name already exists", tool.Name)
 		}
-		index[extra.Name] = len(out)
-		out = append(out, extra)
+		defs = append(defs, tool)
 	}
+	return defs, nil
+}
 
-	if len(cfg.wraps) > 0 {
-		for i := range out {
-			h := out[i].Handler
-			for _, wrap := range cfg.wraps {
-				h = wrap(h)
-			}
-			out[i].Handler = h
+// wrapTools applies every WrapAll wrapper to every handler, in registration
+// order (the last wrapper registered runs outermost).
+func wrapTools(defs []ToolDef, wraps []func(ToolHandler) ToolHandler) []ToolDef {
+	for i := range defs {
+		for _, wrap := range wraps {
+			defs[i].Handler = wrap(defs[i].Handler)
 		}
 	}
-	return out, nil
+	return defs
+}
+
+// validateTools rejects a tool the server could not register: a name outside
+// the MCP tool-name grammar, or no handler.
+func validateTools(defs []ToolDef) error {
+	for _, d := range defs {
+		if !validToolName.MatchString(d.Name) {
+			return fmt.Errorf("tool %q: name must match %s", d.Name, validToolName)
+		}
+		if d.Handler == nil {
+			return fmt.Errorf("tool %q: no handler", d.Name)
+		}
+	}
+	return nil
+}
+
+func indexTool(defs []ToolDef, name string) int {
+	return slices.IndexFunc(defs, func(d ToolDef) bool { return d.Name == name })
 }
 
 // prepareTools materializes generated tools, applies Use() customizations, then

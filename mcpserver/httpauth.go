@@ -79,30 +79,6 @@ func validateBindAddr(addr, authMode string, insecure bool) error {
 	return nil
 }
 
-// originCheckMiddleware rejects requests whose Origin header is not in the
-// allow-list (403). An empty allow-list disables the check. A request with no
-// Origin header is always allowed (non-browser clients don't send one).
-func originCheckMiddleware(allowed []string) func(http.Handler) http.Handler {
-	set := make(map[string]bool, len(allowed))
-	for _, o := range allowed {
-		if o = strings.TrimSpace(o); o != "" {
-			set[o] = true
-		}
-	}
-	return func(next http.Handler) http.Handler {
-		if len(set) == 0 {
-			return next
-		}
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if origin := r.Header.Get("Origin"); origin != "" && !set[origin] {
-				http.Error(w, "forbidden origin", http.StatusForbidden)
-				return
-			}
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
 // bearerAuthMiddleware enforces a static bearer token using a constant-time
 // comparison. Missing/wrong tokens get 401 with a WWW-Authenticate: Bearer
 // challenge. The presented token is discarded after comparison (never stored,

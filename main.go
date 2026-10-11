@@ -3657,7 +3657,6 @@ func commandTemplateFuncs() template.FuncMap {
 		"slug":      slug,
 		"title":     strings.Title,
 		"rawJSON":   rawJSONLiteral,
-		"snakeName": snakeName,
 		"joinComma": func(values []string) string { return strings.Join(values, ", ") },
 	}
 }
