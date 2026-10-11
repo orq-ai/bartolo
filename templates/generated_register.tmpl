@@ -44,6 +44,10 @@ func Register(root *cobra.Command) {
 	// closure sees them regardless of which command parsed them.
 	root.RunE = mcpCommand.RunE
 	root.Flags().AddFlagSet(mcpCommand.Flags())
+	// Filter flags live on mcp as PersistentFlags (so `mcp list --read-only`
+	// works). Mirror them as root local flags so the MCP-first binary accepts
+	// `--read-only` / `--tools` / `--groups` with no subcommand.
+	root.Flags().AddFlagSet(mcpCommand.PersistentFlags())
 	{{- end }}
 	{{- end }}
 }

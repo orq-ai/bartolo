@@ -9,8 +9,9 @@
 // tool: a raw JSON Schema input/output schema, HTTP-derived annotations, a
 // routing table telling the handler where each argument goes, and a handler
 // closure that calls the existing generated client func. This package turns
-// those definitions into a running MCP server (stdio today; HTTP in a later
-// phase) and a `mcp list` manifest command.
+// those definitions into a running MCP server over stdio or Streamable HTTP
+// (spec 2026-07-28) and a `mcp list` manifest command. User-owned extra and
+// patched tools are registered from cli/custom via Use.
 package mcpserver
 
 import (
@@ -63,8 +64,13 @@ type ToolDef struct {
 	// unmarshaled tool arguments. It returns the decoded response value (any
 	// JSON-serializable value) or an error; a *cli.HTTPError is surfaced as a
 	// structured error result.
-	Handler func(ctx context.Context, args map[string]any) (any, error)
+	Handler ToolHandler
 }
+
+// ToolHandler is the business-logic callback for one MCP tool. It runs after
+// JSON Schema validation. Wrappers registered via WrapAll / PatchTool wrap this
+// function, not the protocol handler.
+type ToolHandler func(ctx context.Context, args map[string]any) (any, error)
 
 // annotations builds the MCP tool annotations for this definition. The API
 // domain is closed, so OpenWorldHint is always false.

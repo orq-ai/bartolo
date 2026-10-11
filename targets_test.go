@@ -340,8 +340,8 @@ func replaceStdinWithPipe(t *testing.T) func() {
 	}
 }
 
-// driveStdioToolsList runs bin (with args) from dir, feeds it the MCP stdio
-// initialize/tools-list script, and returns the captured stdout. Stdin is a
+// driveStdioToolsList runs bin (with args) from dir, feeds it a 2026-07-28 MCP
+// stdio discover + tools/list script, and returns the captured stdout. Stdin is a
 // pipe kept open briefly after the requests (mirroring the Makefile smoke's
 // `sleep 2`) so the server flushes the tools/list response before EOF shuts it
 // down.
@@ -349,9 +349,8 @@ func driveStdioToolsList(t *testing.T, dir, bin string, args ...string) string {
 	t.Helper()
 
 	script := strings.Join([]string{
-		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0"}}}`,
-		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
-		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`,
+		`{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"test","version":"0"},"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"test","version":"0"},"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}`,
 		"",
 	}, "\n")
 
@@ -394,7 +393,7 @@ func driveStdioToolsList(t *testing.T, dir, bin string, args ...string) string {
 }
 
 // TestMCPOnlyBareBinaryServesStdio builds the mcp-only scaffold binary and
-// drives it with a stdio initialize/tools-list script — with NO `mcp` argument
+// drives it with a stdio discover/tools-list script — with NO `mcp` argument
 // — to prove the MCP-first binary serves the transport directly. It also runs
 // the bare binary with `--read-only` to prove the mcp command's flags parse at
 // the root (the mcp flag set is mirrored onto root in mcp-only mode).

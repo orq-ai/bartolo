@@ -50,9 +50,8 @@ smoke:
 		test -f "$$SMOKE_DIR/cli/generated/mcp_tools.go"; \
 		"$$SMOKE_DIR/bin/example" mcp list | grep -q '"inputSchema"'; \
 		{ printf '%s\n' \
-			'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
-			'{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-			'{"jsonrpc":"2.0","id":2,"method":"tools/list"}'; sleep 2; } \
+			'{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"smoke","version":"0"},"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}' \
+			'{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"smoke","version":"0"},"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}' ; sleep 2; } \
 			| "$$SMOKE_DIR/bin/example" mcp 2>/dev/null | grep -q '"tools"'; \
 		echo "==> smoke: mcp-only target (--targets mcp)"; \
 		cp "$$ROOT_DIR/example-cli/openapi.yaml" "$$MCP_DIR/openapi.yaml"; \
@@ -64,9 +63,8 @@ smoke:
 		test ! -f "$$MCP_DIR/cli/generated/root_commands.go"; \
 		go build -o "$$MCP_DIR/bin/mcponly" ./cmd/mcponly; \
 		{ printf '%s\n' \
-			'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}' \
-			'{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-			'{"jsonrpc":"2.0","id":2,"method":"tools/list"}'; sleep 2; } \
+			'{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"smoke","version":"0"},"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}' \
+			'{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"smoke","version":"0"},"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}' ; sleep 2; } \
 			| "$$MCP_DIR/bin/mcponly" 2>/dev/null | grep -q '"tools"'
 
 verify: smoke test

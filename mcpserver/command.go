@@ -24,6 +24,11 @@ type Option func(*config)
 type config struct {
 	instructions string
 	envPrefix    string
+
+	extra   []ToolDef
+	remove  []string
+	patches []toolPatch
+	wraps   []func(ToolHandler) ToolHandler
 }
 
 // SetInstructions sets the MCP server instructions surfaced to connected
@@ -138,11 +143,14 @@ func Command(appName, version string, tools func() []ToolDef, opts ...Option) *c
 			"forwarded to the upstream API.\n\n" +
 			"Use `" + appName + " mcp list` to print the tool manifest as JSON.",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			selected := filterTools(tools(), filterOptions{
+			runtime, selected, err := prepareTools(tools, cfg, filterOptions{
 				tools:    flagTools,
 				groups:   flagGroups,
 				readOnly: flagReadOnly,
 			})
+			if err != nil {
+				return err
+			}
 
 			if flagHTTP == "" {
 				for _, name := range httpFlagNames {
@@ -150,21 +158,21 @@ func Command(appName, version string, tools func() []ToolDef, opts ...Option) *c
 						return fmt.Errorf("--%s requires --http", name)
 					}
 				}
-				return serveStdio(cmd.Context(), appName, version, cfg.instructions, selected)
+				return serveStdio(cmd.Context(), appName, version, runtime.instructions, selected)
 			}
 
-			opts, err := resolveHTTPOptions(cfg.envPrefix, flagHTTP, flagHTTPAuth, flagAllowedOrigins, flagInsecure,
+			opts, err := resolveHTTPOptions(runtime.envPrefix, flagHTTP, flagHTTPAuth, flagAllowedOrigins, flagInsecure,
 				flagOAuthIssuer, flagOAuthAudience, flagOAuthJWKS, flagOAuthScopes)
 			if err != nil {
 				return err
 			}
-			return serveHTTP(cmd.Context(), appName, version, cfg.instructions, selected, opts)
+			return serveHTTP(cmd.Context(), appName, version, runtime.instructions, selected, opts)
 		},
 	}
 
-	cmd.Flags().StringSliceVar(&flagTools, "tools", nil, "Only expose these tools (comma-separated exact names)")
-	cmd.Flags().StringSliceVar(&flagGroups, "groups", nil, "Only expose tools in these groups (comma-separated)")
-	cmd.Flags().BoolVar(&flagReadOnly, "read-only", false, "Only expose read-only (safe) tools")
+	cmd.PersistentFlags().StringSliceVar(&flagTools, "tools", nil, "Only expose these tools (comma-separated exact names)")
+	cmd.PersistentFlags().StringSliceVar(&flagGroups, "groups", nil, "Only expose tools in these groups (comma-separated)")
+	cmd.PersistentFlags().BoolVar(&flagReadOnly, "read-only", false, "Only expose read-only (safe) tools")
 	cmd.Flags().StringVar(&flagHTTP, "http", "", "Serve over Streamable HTTP at this address (e.g. 127.0.0.1:8484)")
 	cmd.Flags().StringVar(&flagHTTPAuth, "http-auth", authModeNone, "Inbound HTTP auth mode: none|bearer|oauth (requires --http)")
 	cmd.Flags().StringSliceVar(&flagAllowedOrigins, "http-allowed-origins", nil, "Allowed Origin header values, comma-separated (requires --http)")
@@ -178,17 +186,17 @@ func Command(appName, version string, tools func() []ToolDef, opts ...Option) *c
 		Use:   "list",
 		Short: "Print the MCP tool manifest as JSON",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			selected := filterTools(tools(), filterOptions{
+			_, selected, err := prepareTools(tools, cfg, filterOptions{
 				tools:    flagTools,
 				groups:   flagGroups,
 				readOnly: flagReadOnly,
 			})
+			if err != nil {
+				return err
+			}
 			return writeManifest(cmd.OutOrStdout(), selected)
 		},
 	}
-	listCmd.Flags().StringSliceVar(&flagTools, "tools", nil, "Only list these tools (comma-separated exact names)")
-	listCmd.Flags().StringSliceVar(&flagGroups, "groups", nil, "Only list tools in these groups (comma-separated)")
-	listCmd.Flags().BoolVar(&flagReadOnly, "read-only", false, "Only list read-only (safe) tools")
 
 	cmd.AddCommand(listCmd)
 	return cmd

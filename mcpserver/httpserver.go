@@ -31,10 +31,11 @@ type httpServeOptions struct {
 // serveHTTP builds the shared MCP server and serves it over Streamable HTTP with
 // the configured inbound auth, until the context is cancelled by SIGINT/SIGTERM.
 //
-// A single *mcp.Server is shared across all client sessions: the generated tools
-// are stateless closures, so no per-session server state is required. The inbound
-// bearer/JWT is used only to authorize the request and is never forwarded to the
-// upstream API (confused-deputy prevention; see httpauth.go).
+// A single *mcp.Server is shared across all requests: generated tools are
+// stateless closures, and Streamable HTTP is served with
+// StreamableHTTPOptions.Stateless so clients negotiate MCP 2026-07-28. The
+// inbound bearer/JWT is used only to authorize the request and is never
+// forwarded to the upstream API (confused-deputy prevention; see httpauth.go).
 func serveHTTP(ctx context.Context, appName, version, instructions string, defs []ToolDef, opts httpServeOptions) error {
 	// stdout hygiene: keep stdout clean even in HTTP mode (some formatter paths
 	// still target cli.Stdout). Redirect stray output to stderr.
@@ -92,7 +93,15 @@ func serveHTTP(ctx context.Context, appName, version, instructions string, defs 
 // separated from serveHTTP so tests can drive it via httptest without binding a
 // socket.
 func buildHTTPHandler(ctx context.Context, server *mcp.Server, opts httpServeOptions) (http.Handler, error) {
-	streamable := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil)
+	// Stateless is required for protocol 2026-07-28 over Streamable HTTP; without
+	// it the SDK negotiates clients down to 2025-11-25.
+	streamable := mcp.NewStreamableHTTPHandler(
+		func(*http.Request) *mcp.Server { return server },
+		&mcp.StreamableHTTPOptions{
+			Stateless:                    true,
+			PropagateRequestCancellation: true,
+		},
+	)
 
 	mux := http.NewServeMux()
 

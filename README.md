@@ -73,7 +73,7 @@ Every generated CLI starts with a useful operator surface:
 
 ## MCP
 
-Every generated CLI is also a [Model Context Protocol](https://modelcontextprotocol.io) server. Running `generate` emits an `mcp` subcommand that exposes the API's operations as MCP tools for clients such as Claude Code, Claude Desktop, and Cursor.
+Every generated CLI is also a [Model Context Protocol](https://modelcontextprotocol.io) server. Running `generate` emits an `mcp` subcommand that exposes the API's operations as MCP tools for clients such as Claude Code, Claude Desktop, and Cursor. Generated servers speak MCP **2026-07-28** (stdio and stateless Streamable HTTP). Older clients still connect via SDK protocol negotiation.
 
 What gets generated:
 
@@ -118,7 +118,7 @@ Replace `MY_CLI_API_KEY` with the auth env var your CLI reports under `my-cli do
 
 ### HTTP mode
 
-Serve over Streamable HTTP instead of stdio:
+Serve over Streamable HTTP instead of stdio. HTTP is **stateless** (MCP 2026-07-28): each request is self-describing and does not require a session handshake.
 
 ```sh
 my-cli mcp --http 127.0.0.1:8484
@@ -141,6 +141,30 @@ Large APIs produce many tools. Narrow the exposed set with:
 - `--read-only` — expose only tools annotated `readOnlyHint`.
 
 The flags compose, so `--groups files --read-only` exposes the read-only tools within the `files` group. They apply to both `mcp` and `mcp list`.
+
+### Custom MCP tools
+
+Generated `cli/generated/mcp_tools.go` is overwritten on every `generate`. User-owned extras live in `cli/custom/Register`, which is never overwritten:
+
+```go
+import "github.com/orq-ai/bartolo/mcpserver"
+
+func Register(root *cobra.Command) {
+    mcpserver.Use(
+        mcpserver.AddTools(searchCodebase),          // extra tool
+        mcpserver.RemoveTools("legacy_delete"),      // drop a generated tool
+        mcpserver.PatchTool("echo_echo", func(t *mcpserver.ToolDef) {
+            t.Description = "Echo with extra logging"
+            next := t.Handler
+            t.Handler = func(ctx context.Context, args map[string]any) (any, error) {
+                return next(ctx, args)
+            }
+        }),
+    )
+}
+```
+
+`Use` is applied when the server starts (and for `mcp list`), so it works for both stdio and `--http`. Wrappers run after JSON Schema validation. Name collisions on `AddTools` fail at serve time.
 
 ### Excluded operations
 

@@ -4,6 +4,12 @@ All notable changes to Bartolo will be documented in this file.
 
 The project was restarted on 2026-04-09 as a new public release stream under the Bartolo name.
 
+## 2026-08-26
+
+- Upgraded generated MCP servers to spec `2026-07-28` via `github.com/modelcontextprotocol/go-sdk` v1.7.0. Streamable HTTP is served in stateless mode so clients negotiate the new protocol instead of falling back to `2025-11-25`.
+- Added a regeneration-safe MCP customization API: `mcpserver.Use` with `AddTools`, `RemoveTools`, `PatchTool`, and `WrapAll`, called from user-owned `cli/custom.Register`. The same tool set is served over stdio, Streamable HTTP, and `mcp list`.
+- `--tools`, `--groups`, and `--read-only` are now persistent flags on `mcp`, so they apply to `mcp list` without being redeclared.
+
 ## 2026-07-12
 
 - Added MCP (Model Context Protocol) server generation. Every generated CLI now has an `mcp` subcommand that exposes the API's operations as MCP tools for clients like Claude Code, Claude Desktop, and Cursor.

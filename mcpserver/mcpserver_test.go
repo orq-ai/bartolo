@@ -367,12 +367,13 @@ func TestStdioPurity(t *testing.T) {
 		done <- serveStdio(context.Background(), "testapp", "1.0.0", "", defs)
 	}()
 
-	// Drive the protocol manually with newline-delimited JSON-RPC.
+	// Drive the protocol manually with newline-delimited JSON-RPC (2026-07-28:
+	// no initialize handshake; each request carries _meta).
+	const meta = `"_meta":{"io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"t","version":"0"},"io.modelcontextprotocol/protocolVersion":"2026-07-28"}`
 	requests := []string{
-		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}`,
-		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
-		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`,
-		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"noisy","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{` + meta + `}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{` + meta + `}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"noisy","arguments":{},` + meta + `}}`,
 	}
 	if _, err := io.WriteString(stdinW, strings.Join(requests, "\n")+"\n"); err != nil {
 		t.Fatal(err)
@@ -395,7 +396,7 @@ func TestStdioPurity(t *testing.T) {
 
 	// cli.Stdout redirect must have caught the junk on stderr, not stdout.
 	if !strings.Contains(stderrBuf.String(), junk) {
-		t.Errorf("expected handler junk on redirected cli.Stderr, not found")
+		t.Errorf("expected handler junk on redirected cli.Stderr, not found; stderr=%q stdout=%q", stderrBuf.String(), string(data))
 	}
 
 	scanner := bufio.NewScanner(bytes.NewReader(data))

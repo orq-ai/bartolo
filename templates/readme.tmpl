@@ -86,7 +86,7 @@ The following schemes require manual configuration:
 {{- if not .TargetCLI }}
 ## MCP Server
 
-This project generates an **MCP-first** binary. Running `{{ .CommandName }}` with no arguments serves the API's operations as [Model Context Protocol](https://modelcontextprotocol.io) tools over stdio — the transport MCP clients spawn directly. Results are returned as structured content, and upstream API errors surface as structured tool errors.
+This project generates an **MCP-first** binary speaking spec `2026-07-28`. Running `{{ .CommandName }}` with no arguments serves the API's operations as [Model Context Protocol](https://modelcontextprotocol.io) tools over stdio — the transport MCP clients spawn directly. Results are returned as structured content, and upstream API errors surface as structured tool errors.
 
 Add it to Claude Code:
 
@@ -120,7 +120,7 @@ Print the tool manifest as JSON (handy for debugging):
 {{ .CommandName }} mcp list
 ```
 
-Filter the exposed tools with `--tools`, `--groups`, or `--read-only`. Serve over Streamable HTTP instead of stdio:
+Filter the exposed tools with `--tools`, `--groups`, or `--read-only`. Serve over Streamable HTTP (stateless, spec 2026-07-28) instead of stdio:
 
 ```sh
 {{ .CommandName }} mcp --http 127.0.0.1:8484
@@ -151,7 +151,7 @@ This CLI exposes operations directly at the root level. Use `{{ .CommandName }} 
 
 ## MCP Server
 
-This CLI is also an MCP (Model Context Protocol) server. `{{ .CommandName }} mcp` exposes the API operations as tools for clients such as Claude Code, Claude Desktop, and Cursor. Results are returned as structured content, and upstream API errors surface as structured tool errors.
+This CLI is also an MCP (Model Context Protocol) server speaking spec `2026-07-28`. `{{ .CommandName }} mcp` exposes the API operations as tools for clients such as Claude Code, Claude Desktop, and Cursor. Results are returned as structured content, and upstream API errors surface as structured tool errors.
 
 Add it to Claude Code:
 
@@ -185,7 +185,7 @@ Print the tool manifest as JSON (handy for debugging):
 {{ .CommandName }} mcp list
 ```
 
-Filter the exposed tools with `--tools`, `--groups`, or `--read-only`. Serve over Streamable HTTP instead of stdio:
+Filter the exposed tools with `--tools`, `--groups`, or `--read-only`. Serve over Streamable HTTP (stateless, spec 2026-07-28) instead of stdio:
 
 ```sh
 {{ .CommandName }} mcp --http 127.0.0.1:8484
@@ -224,6 +224,7 @@ Bartolo keeps generated and user-owned code separate:
 - Generated API code: `cli/generated/`
 - User-owned extensions: `cli/custom/`
 - Add your own commands or hook registrations inside `cli/custom/Register(...)` so regeneration does not overwrite your work.
+- MCP extras: call `mcpserver.Use(mcpserver.AddTools(...), mcpserver.PatchTool(...), mcpserver.RemoveTools(...))` from `Register` so custom tools apply to both stdio and HTTP.
 
 ## Output Conventions
 

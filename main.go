@@ -2947,6 +2947,19 @@ import "github.com/spf13/cobra"
 func Register(root *cobra.Command) {
 	_ = root
 	// Add your own commands and middleware registrations here.
+	//
+	// To add or patch MCP tools (survives bartolo generate), call mcpserver.Use
+	// from this function. Example:
+	//
+	//   import "github.com/orq-ai/bartolo/mcpserver"
+	//
+	//   mcpserver.Use(
+	//     mcpserver.AddTools(myTool),
+	//     mcpserver.RemoveTools("legacy_delete"),
+	//     mcpserver.PatchTool("echo_echo", func(t *mcpserver.ToolDef) {
+	//         t.Description = "Custom description"
+	//     }),
+	//   )
 }
 `
 

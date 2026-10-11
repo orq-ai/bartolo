@@ -12,7 +12,7 @@ require (
 	github.com/jmespath/go-jmespath v0.4.0
 	github.com/mattn/go-colorable v0.1.2
 	github.com/mattn/go-isatty v0.0.8
-	github.com/modelcontextprotocol/go-sdk v1.6.1
+	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/olekukonko/tablewriter v0.0.0-20180912035003-be2c049b30cc
 	github.com/pkg/errors v0.8.1
 	github.com/rs/zerolog v1.11.0
@@ -64,8 +64,9 @@ require (
 	github.com/woodsbury/decimal128 v1.3.0 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/net v0.38.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/term v0.30.0 // indirect
 	golang.org/x/text v0.23.0 // indirect
-	golang.org/x/time v0.9.0 // indirect
+	golang.org/x/time v0.15.0 // indirect
 )
