@@ -185,6 +185,8 @@ Filter the exposed tools with `--tools`, `--groups`, or `--read-only`. Serve ove
 {{ .CommandName }} mcp --http 127.0.0.1:8484
 ```
 
+Cross-origin browser requests are refused unless their origin is listed in `--http-allowed-origins`. See `{{ .CommandName }} mcp --help` for inbound auth (`--http-auth bearer|oauth`).
+
 Verify config, auth source, and selected server before connecting a client:
 
 ```sh
@@ -249,6 +251,8 @@ Filter the exposed tools with `--tools`, `--groups`, or `--read-only`. Serve ove
 ```sh
 {{ .CommandName }} mcp --http 127.0.0.1:8484
 ```
+
+Cross-origin browser requests are refused unless their origin is listed in `--http-allowed-origins`. See `{{ .CommandName }} mcp --help` for inbound auth (`--http-auth bearer|oauth`).
 {{- end }}
 
 ## Examples

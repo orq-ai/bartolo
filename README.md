@@ -91,15 +91,17 @@ Every generated CLI starts with a useful operator surface:
 
 ## MCP
 
-Every generated CLI is also a [Model Context Protocol](https://modelcontextprotocol.io) server. Running `generate` emits an `mcp` subcommand that exposes the API's operations as MCP tools for clients such as Claude Code, Claude Desktop, and Cursor. Generated servers speak MCP **2026-07-28** (stdio and stateless Streamable HTTP). Older clients still connect via SDK protocol negotiation.
+Every generated CLI is also a [Model Context Protocol](https://modelcontextprotocol.io) server. Running `generate` emits an `mcp` subcommand that exposes the API's operations as MCP tools for clients such as Claude Code, Claude Desktop, and Cursor. Generated servers speak MCP **2026-07-28** (stdio and stateless Streamable HTTP) through the official Go SDK. Older clients still connect via SDK protocol negotiation.
 
 What gets generated:
 
 - An `mcp` subcommand on the CLI (`my-cli mcp`) that serves over stdio by default.
 - One tool per eligible operation, named `<group>_<leaf>` (or just the leaf for ungrouped ops).
-- A JSON Schema (2020-12) input schema per tool, derived from the operation's path/query/header params and JSON request body, plus an output schema from the first 2xx JSON response.
-- Results returned as `structuredContent` (plus a JSON text block). Upstream API errors surface as `isError` tool results with a structured `{status, body}` payload rather than protocol errors.
-- Tool annotations derived from the HTTP method: `readOnlyHint` for GET/HEAD, `destructiveHint` for DELETE, `idempotentHint` for GET/HEAD/PUT/DELETE.
+- A JSON Schema (2020-12) input schema per tool, derived from the operation's path/query/header params and JSON request body. Arguments are validated against it before any request is sent. `oneOf` is emitted as `anyOf`: OpenAPI unions rarely make their branches mutually exclusive, and several model providers accept only `anyOf`.
+- An output schema from the first 2xx JSON response. Clients fail a tool call whose result does not match its output schema, after the API call has already happened, so the output schema describes shape only: no `required`, `enum`, `format`, or bounds, and nested values may be `null`.
+- Results returned as `structuredContent` (plus a JSON text block). A non-object response is wrapped as `{"result": ...}`. Upstream API errors surface as `isError` tool results with a structured `{status, body}` payload (body redacted like the CLI's) rather than protocol errors.
+- Tool annotations derived from the HTTP method: `readOnlyHint` for GET/HEAD, `destructiveHint` for PUT/PATCH/DELETE, `idempotentHint` for GET/HEAD/PUT/DELETE.
+- Cancelling a tool call (or dropping its HTTP request) aborts the upstream API request.
 - Outbound auth reuses the CLI's existing runtime, so the same env vars and profiles authenticate MCP tool calls.
 
 Inspect the tool manifest without a client:
@@ -136,7 +138,7 @@ Replace `MY_CLI_API_KEY` with the auth env var your CLI reports under `my-cli do
 
 ### HTTP mode
 
-Serve over Streamable HTTP instead of stdio. HTTP is **stateless** (MCP 2026-07-28): each request is self-describing and does not require a session handshake.
+Serve over Streamable HTTP instead of stdio. HTTP is **stateless** (MCP 2026-07-28): each request is self-describing and there is no session, so any number of replicas can run behind a plain load balancer. `server/discover` and `tools/list` results carry a five-minute `ttlMs`, with `cacheScope: private` whenever inbound auth is on.
 
 ```sh
 my-cli mcp --http 127.0.0.1:8484
@@ -149,6 +151,8 @@ Inbound auth for HTTP is selected with `--http-auth`:
 - `oauth` — an OAuth 2.1 resource server that validates JWTs against the authorization server's JWKS (`--http-oauth-issuer`, `--http-oauth-audience`, and optional `--http-oauth-jwks`/`--http-oauth-scopes`) and serves RFC 9728 protected-resource metadata at `/.well-known/oauth-protected-resource`.
 
 The inbound HTTP credential only authorizes the request; it is never forwarded to the upstream API.
+
+Cross-origin browser requests are refused with 403 unless their origin is listed in `--http-allowed-origins` (full origins, e.g. `https://app.example.com`). Same-origin requests and non-browser clients, which send no `Origin`, are unaffected.
 
 ### Filtering tools
 
@@ -182,7 +186,7 @@ func Register(root *cobra.Command) {
 }
 ```
 
-`Use` is applied when the server starts (and for `mcp list`), so it works for both stdio and `--http`. Wrappers run after JSON Schema validation. Name collisions on `AddTools` fail at serve time.
+`Use` is applied when the server starts (and for `mcp list`), so it works for both stdio and `--http`. Wrappers run after JSON Schema validation. An `AddTools` name collision, an invalid tool name, a missing handler, or a non-object input schema fails `mcp` and `mcp list` with an error naming the tool. A tool with no `InputSchema` takes no arguments.
 
 ### Excluded operations
 
@@ -193,7 +197,7 @@ Some operations are not bridged as tools and are reported (with reasons) in the 
 - `deprecated: true` operations.
 - Operations marked `x-bartolo-mcp-ignore` (or the legacy `x-mcp-ignore`).
 
-Known v1 limitation: optional query/header parameters equal to their zero value (`false`, `0`, `""`) are dropped by the generated client runtime, so an MCP caller cannot send an explicit `false`/`0`/`""` for an optional param. Required params and body fields are unaffected.
+Cookie parameters are not exposed as tool arguments, since generated clients cannot send them.
 
 ## Generation Targets
 

@@ -1,5 +1,12 @@
 # Bartolo MCP Generation — Implementation Plan
 
+> **Superseded in places (2026-10).** The shipped runtime targets MCP `2026-07-28` on go-sdk v1.8.0 and
+> differs from this plan in a few deliberate ways: Streamable HTTP is stateless; `oneOf` is emitted as
+> `anyOf`; output schemas describe shape only (no `required`/`enum`/`format`/bounds, nested values
+> nullable) because clients fail calls whose results mismatch; argument routing lives in
+> `mcpserver.APITool` (explicit zero values are sent, cancellation reaches the upstream request); and
+> PUT/PATCH carry `destructiveHint`. The README's MCP section is the current reference.
+
 Status: validated against the codebase at v0.4.3, against a compile-and-run spike of
 `github.com/modelcontextprotocol/go-sdk` v1.6.1, and adversarially reviewed against the source
 (all mechanical claims carry verified file:line evidence; refuted claims were corrected).
