@@ -1,13 +1,18 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+	zlog "github.com/rs/zerolog/log"
 	"github.com/spf13/viper"
 	gentleman "gopkg.in/h2non/gentleman.v2"
 )
@@ -86,5 +91,50 @@ func TestResponseErrorIsTyped(t *testing.T) {
 	}
 	if httpErr.StatusCode != http.StatusUnprocessableEntity || string(httpErr.Body) != `{"error":"bad name"}` {
 		t.Errorf("HTTPError = %d %q", httpErr.StatusCode, httpErr.Body)
+	}
+}
+
+// syncBuffer is a bytes.Buffer safe to write from the abandoned read's
+// goroutine while the test reads it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// A read abandoned after the grace period finishes whenever the pipe closes,
+// long after the caller moved on. It must not log then: the line would report a
+// body nobody used, written concurrently with whatever logs next.
+func TestAbandonedStdinReadDoesNotLog(t *testing.T) {
+	logged := &syncBuffer{}
+	previous := zlog.Logger
+	zlog.Logger = zerolog.New(logged).Level(zerolog.DebugLevel)
+	t.Cleanup(func() { zlog.Logger = previous })
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+
+	if _, ok, err := readStdinWithin(reader, 10*time.Millisecond); ok || err != nil {
+		t.Fatalf("idle pipe: ok=%v err=%v, want the grace period to expire", ok, err)
+	}
+	writer.Close() // the parked read now returns EOF
+
+	time.Sleep(100 * time.Millisecond)
+	if got := logged.String(); got != "" {
+		t.Errorf("the abandoned read logged after the caller moved on: %s", got)
 	}
 }
