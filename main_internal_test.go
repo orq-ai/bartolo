@@ -2739,3 +2739,51 @@ paths:
 		t.Fatal("x-cli-list: false should suppress paginated inference")
 	}
 }
+
+// Waiters come out of a map in the spec, so ProcessAPI orders them by name:
+// otherwise two waiters would render in a different order on every generate.
+func TestProcessAPIOrdersWaitersByName(t *testing.T) {
+	spec := `
+openapi: 3.0.3
+info: {title: t, version: "1"}
+x-bartolo-waiters:
+  zeta-ready: {operationId: GetThing, matchers: [{select: response.body.ok, expected: true}]}
+  alpha-ready: {operationId: GetThing, matchers: [{select: response.body.ok, expected: true}]}
+  mid-ready: {operationId: GetThing, matchers: [{select: response.body.ok, expected: true}]}
+paths:
+  /things/{id}:
+    get:
+      operationId: GetThing
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok}}
+`
+	for range 5 {
+		api := ProcessAPI("t", loadTestSpec(t, spec))
+		var names []string
+		for _, w := range api.Waiters {
+			names = append(names, w.CLIName)
+		}
+		if strings.Join(names, ",") != "alpha-ready,mid-ready,zeta-ready" {
+			t.Fatalf("waiters = %v, want name order", names)
+		}
+	}
+}
+
+func TestProcessAPIRejectsWaiterForUnknownOperation(t *testing.T) {
+	spec := `
+openapi: 3.0.3
+info: {title: t, version: "1"}
+x-bartolo-waiters:
+  ready: {operationId: Missing}
+paths:
+  /things:
+    get: {operationId: ListThings, responses: {"200": {description: ok}}}
+`
+	defer func() {
+		err, _ := recover().(error)
+		if err == nil || !strings.Contains(err.Error(), "Unknown waiter operation Missing") {
+			t.Errorf("recovered %v, want a named unknown-operation error", err)
+		}
+	}()
+	ProcessAPI("t", loadTestSpec(t, spec))
+}
