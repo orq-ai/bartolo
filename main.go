@@ -1980,137 +1980,43 @@ func unionHasStringBranch(schema *openapi3.Schema) bool {
 // branch enums instead of just the first branch's values. Returns the schema
 // unchanged when there is nothing to merge.
 func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
-	if schema == nil {
-		return schema
-	}
-	if len(schema.AllOf) == 0 && len(schema.OneOf) == 0 && len(schema.AnyOf) == 0 {
+	if schema == nil || (len(schema.AllOf) == 0 && len(schema.OneOf) == 0 && len(schema.AnyOf) == 0) {
 		return schema
 	}
 
-	merged := &openapi3.Schema{
-		Type:       &openapi3.Types{"object"},
-		Properties: openapi3.Schemas{},
-	}
-
-	// Properties collected from the host schema or an `allOf` branch are
-	// authoritative constraints and are never widened by union branches.
-	protected := map[string]struct{}{}
-
-	collectProps := func(src *openapi3.Schema) {
-		if src == nil {
-			return
-		}
-		for name, ref := range src.Properties {
-			if _, exists := merged.Properties[name]; !exists {
-				merged.Properties[name] = ref
-				protected[name] = struct{}{}
-			}
-		}
-		if src.AdditionalProperties.Schema != nil && merged.AdditionalProperties.Schema == nil {
-			merged.AdditionalProperties.Schema = src.AdditionalProperties.Schema
-		}
-		if src.AdditionalProperties.Has != nil && merged.AdditionalProperties.Has == nil {
-			merged.AdditionalProperties.Has = src.AdditionalProperties.Has
-		}
-	}
-
-	// collectUnionProps is collectProps for `oneOf`/`anyOf` branches: a value
-	// only has to satisfy one branch, so when the same property collides
-	// across branches its string enums are unioned rather than first-wins.
-	collectUnionProps := func(src *openapi3.Schema) {
-		if src == nil {
-			return
-		}
-		for name, ref := range src.Properties {
-			existing, exists := merged.Properties[name]
-			if !exists {
-				merged.Properties[name] = ref
-				continue
-			}
-			if _, ok := protected[name]; ok {
-				continue
-			}
-			if widened := unionEnumSchema(existing, ref); widened != nil {
-				merged.Properties[name] = widened
-			}
-		}
-		if src.AdditionalProperties.Schema != nil && merged.AdditionalProperties.Schema == nil {
-			merged.AdditionalProperties.Schema = src.AdditionalProperties.Schema
-		}
-		if src.AdditionalProperties.Has != nil && merged.AdditionalProperties.Has == nil {
-			merged.AdditionalProperties.Has = src.AdditionalProperties.Has
-		}
+	m := &schemaMerger{
+		merged: &openapi3.Schema{
+			Type:       &openapi3.Types{"object"},
+			Properties: openapi3.Schemas{},
+		},
+		protected: map[string]bool{},
 	}
 
 	// Host's own properties win on conflict.
-	collectProps(schema)
-
-	requiredAll := map[string]struct{}{}
-	for _, name := range schema.Required {
-		requiredAll[name] = struct{}{}
-	}
+	m.collect(schema)
+	required := nameSet(schema.Required)
 
 	// `allOf` branches: union properties + union required.
 	for _, branch := range schema.AllOf {
-		if branch == nil || branch.Value == nil {
-			continue
-		}
-		flat := mergeAllOf(branch.Value)
-		collectProps(flat)
-		if flat != nil {
+		if flat := flattenBranch(branch); flat != nil {
+			m.collect(flat)
 			for _, name := range flat.Required {
-				requiredAll[name] = struct{}{}
+				required[name] = true
 			}
 		}
 	}
 
 	// `oneOf`/`anyOf` branches: union properties + intersection of required
 	// (only fields required by every branch are universally required).
-	unionBranches := append([]*openapi3.SchemaRef{}, schema.OneOf...)
-	unionBranches = append(unionBranches, schema.AnyOf...)
-
-	var requiredIntersection map[string]struct{}
-	for _, branch := range unionBranches {
-		if branch == nil || branch.Value == nil {
-			continue
-		}
-		flat := mergeAllOf(branch.Value)
-		// Skip pure null branches so they don't wipe out the required set.
-		if flat != nil && flat.Type != nil && flat.Type.Is("null") {
-			continue
-		}
-		collectUnionProps(flat)
-
-		branchRequired := map[string]struct{}{}
-		if flat != nil {
-			for _, name := range flat.Required {
-				branchRequired[name] = struct{}{}
-			}
-		}
-		if requiredIntersection == nil {
-			requiredIntersection = branchRequired
-			continue
-		}
-		for name := range requiredIntersection {
-			if _, ok := branchRequired[name]; !ok {
-				delete(requiredIntersection, name)
-			}
-		}
+	union := append(append(openapi3.SchemaRefs{}, schema.OneOf...), schema.AnyOf...)
+	for name := range m.collectUnion(union) {
+		required[name] = true
 	}
 
-	for name := range requiredIntersection {
-		requiredAll[name] = struct{}{}
+	merged := m.merged
+	if len(required) > 0 {
+		merged.Required = slices.Sorted(maps.Keys(required))
 	}
-
-	if len(requiredAll) > 0 {
-		required := make([]string, 0, len(requiredAll))
-		for name := range requiredAll {
-			required = append(required, name)
-		}
-		sort.Strings(required)
-		merged.Required = required
-	}
-
 	if schema.Description != "" {
 		merged.Description = schema.Description
 	}
@@ -2119,6 +2025,104 @@ func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 	}
 
 	return merged
+}
+
+// schemaMerger accumulates the flattened object schema for mergeAllOf.
+type schemaMerger struct {
+	merged *openapi3.Schema
+	// protected holds properties collected from the host schema or an `allOf`
+	// branch: authoritative constraints that union branches never widen.
+	protected map[string]bool
+}
+
+// collect adds src's properties that are not already present (first wins) and
+// protects them.
+func (m *schemaMerger) collect(src *openapi3.Schema) {
+	for name, ref := range src.Properties {
+		if _, exists := m.merged.Properties[name]; !exists {
+			m.merged.Properties[name] = ref
+			m.protected[name] = true
+		}
+	}
+	m.collectAdditionalProperties(src)
+}
+
+// collectUnion adds the `oneOf`/`anyOf` branches and returns the properties
+// every branch requires. A value only has to satisfy one branch, so when the
+// same property collides across branches its string enums are unioned rather
+// than first-wins. Pure null branches are skipped so they don't wipe out the
+// required set.
+func (m *schemaMerger) collectUnion(branches openapi3.SchemaRefs) map[string]bool {
+	var required map[string]bool
+	for _, branch := range branches {
+		flat := flattenBranch(branch)
+		if flat == nil || flat.Type.Is("null") {
+			continue
+		}
+		m.collectBranch(flat)
+		required = intersectNames(required, flat.Required)
+	}
+	return required
+}
+
+// collectBranch is collect for a union branch: a new property is added
+// unprotected, and an unprotected collision is widened by unionEnumSchema.
+func (m *schemaMerger) collectBranch(src *openapi3.Schema) {
+	for name, ref := range src.Properties {
+		existing, exists := m.merged.Properties[name]
+		switch {
+		case !exists:
+			m.merged.Properties[name] = ref
+		case !m.protected[name]:
+			if widened := unionEnumSchema(existing, ref); widened != nil {
+				m.merged.Properties[name] = widened
+			}
+		}
+	}
+	m.collectAdditionalProperties(src)
+}
+
+// collectAdditionalProperties keeps the first additionalProperties schema and
+// the first explicit allow/deny seen.
+func (m *schemaMerger) collectAdditionalProperties(src *openapi3.Schema) {
+	ap := &m.merged.AdditionalProperties
+	if ap.Schema == nil {
+		ap.Schema = src.AdditionalProperties.Schema
+	}
+	if ap.Has == nil {
+		ap.Has = src.AdditionalProperties.Has
+	}
+}
+
+// flattenBranch merges one composition branch, or returns nil for an empty one.
+func flattenBranch(branch *openapi3.SchemaRef) *openapi3.Schema {
+	if branch == nil || branch.Value == nil {
+		return nil
+	}
+	return mergeAllOf(branch.Value)
+}
+
+func nameSet(names []string) map[string]bool {
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	return set
+}
+
+// intersectNames narrows set to the names also in names. A nil set (no branch
+// seen yet) starts from names.
+func intersectNames(set map[string]bool, names []string) map[string]bool {
+	branch := nameSet(names)
+	if set == nil {
+		return branch
+	}
+	for name := range set {
+		if !branch[name] {
+			delete(set, name)
+		}
+	}
+	return set
 }
 
 // unionEnumSchema resolves a property collision between two `oneOf`/`anyOf`
@@ -2135,10 +2139,7 @@ func unionEnumSchema(existing, incoming *openapi3.SchemaRef) *openapi3.SchemaRef
 	}
 	exEff, exNullable := effectiveBodySchema(existing.Value)
 	inEff, inNullable := effectiveBodySchema(incoming.Value)
-	if exEff == nil || inEff == nil {
-		return nil
-	}
-	if exEff.Type == nil || !exEff.Type.Is("string") || inEff.Type == nil || !inEff.Type.Is("string") {
+	if exEff == nil || inEff == nil || !exEff.Type.Is("string") || !inEff.Type.Is("string") {
 		return nil
 	}
 	if len(exEff.Enum) == 0 {
@@ -2147,42 +2148,36 @@ func unionEnumSchema(existing, incoming *openapi3.SchemaRef) *openapi3.SchemaRef
 	}
 
 	clone := *exEff
-	if exNullable || inNullable {
-		clone.Nullable = true
-	}
-	if clone.Description == "" {
-		clone.Description = inEff.Description
-	}
+	clone.Nullable = clone.Nullable || exNullable || inNullable
+	clone.Description = cmp.Or(clone.Description, inEff.Description)
 
 	if len(inEff.Enum) == 0 {
 		clone.Enum = nil
 		return &openapi3.SchemaRef{Value: &clone}
 	}
 
-	seen := map[string]struct{}{}
-	union := make([]interface{}, 0, len(exEff.Enum)+len(inEff.Enum))
-	for _, raw := range exEff.Enum {
-		key := fmt.Sprintf("%T:%v", raw, raw)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		union = append(union, raw)
-	}
-	for _, raw := range inEff.Enum {
-		key := fmt.Sprintf("%T:%v", raw, raw)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		union = append(union, raw)
-	}
+	union := uniqueEnumValues(slices.Concat(exEff.Enum, inEff.Enum))
 	if len(union) == len(exEff.Enum) {
 		// No new values; keep the existing ref untouched.
 		return nil
 	}
 	clone.Enum = union
 	return &openapi3.SchemaRef{Value: &clone}
+}
+
+// uniqueEnumValues drops repeated enum values, keeping first occurrences. Values
+// compare by type and printed form, so 1 and "1" stay distinct.
+func uniqueEnumValues(values []interface{}) []interface{} {
+	seen := map[string]bool{}
+	out := make([]interface{}, 0, len(values))
+	for _, raw := range values {
+		key := fmt.Sprintf("%T:%v", raw, raw)
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, raw)
+		}
+	}
+	return out
 }
 
 func bodyFieldEnum(schema *openapi3.Schema, fieldType string) []string {
