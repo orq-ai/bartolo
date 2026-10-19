@@ -523,9 +523,16 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 			// its own description (its Long) needs the marker there too, or its own
 			// --help page would omit it while the parent's command list shows it.
 			// The empty-description case is covered below, where Long falls back to
-			// the already-marked short.
+			// the already-marked short. Put the marker at the end of the first line
+			// (the summary), not after the body-fields and renamed-flags sections
+			// already appended above, so it reads as "<summary> (beta)" rather than
+			// landing mid-document before the ## Arguments section.
 			if betaSfx != "" && description != "" {
-				description += betaSfx
+				if nl := strings.IndexByte(description, '\n'); nl >= 0 {
+					description = description[:nl] + betaSfx + description[nl:]
+				} else {
+					description += betaSfx
+				}
 			}
 
 			if args := requiredArgsHelp(requiredParams); args != "" {
@@ -735,12 +742,7 @@ func extStr(i interface{}) (decoded string) {
 // and the generated README. Readable at group, operation, and flag level, the
 // same levels as the other x-cli-* extensions.
 func betaSuffix(exts map[string]interface{}) string {
-	if exts == nil || exts[ExtBeta] == nil {
-		return ""
-	}
-	var beta bool
-	mustDecodeExt(exts[ExtBeta], &beta)
-	if beta {
+	if extBool(exts[ExtBeta]) {
 		return " (beta)"
 	}
 	return ""
@@ -929,7 +931,15 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		if tagDef.Extensions[ExtHidden] != nil {
 			mustDecodeExt(tagDef.Extensions[ExtHidden], &hidden)
 		}
-		short += betaSuffix(tagDef.Extensions)
+		sfx := betaSuffix(tagDef.Extensions)
+		short += sfx
+		// Long and Description both come from `long`, and the group/readme
+		// templates render them. Mark them too, so a beta group shows "(beta)" on
+		// its help page and in the README, not only in the parent command list.
+		// When long is empty the templates fall back to the already-marked short.
+		if sfx != "" && long != "" {
+			long += sfx
+		}
 		section = getPreferredStringExt(tagDef.Extensions, ExtHelpSection)
 	}
 
@@ -1647,6 +1657,11 @@ func getBodyFields(schema *openapi3.Schema) []*BodyField {
 		if ref.Value.Extensions != nil && ref.Value.Extensions[ExtDescription] != nil {
 			description = extStr(ref.Value.Extensions[ExtDescription])
 		}
+		// A body property becomes a flag, so x-cli-beta on it marks that flag's
+		// help, the same as it does for a parameter. Without this the extension is
+		// read at group, operation and parameter level but silently ignored on a
+		// body-property flag.
+		description = strings.TrimSpace(description + betaSuffix(ref.Value.Extensions))
 
 		fields = append(fields, &BodyField{
 			Name:        name,
