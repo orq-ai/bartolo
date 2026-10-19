@@ -96,6 +96,7 @@ func buildRevision(settings []debug.BuildSetting) string {
 // OpenAPI Extensions
 const (
 	ExtAliases     = "x-cli-aliases"
+	ExtBeta        = "x-cli-beta"
 	ExtDescription = "x-cli-description"
 	ExtGroup       = "x-cli-group"
 	ExtIgnore      = "x-cli-ignore"
@@ -516,6 +517,24 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 				}
 			}
 
+			betaSfx := betaSuffix(operation.Extensions)
+			short += betaSfx
+			// Cobra prints Long or Short, never both, so a beta operation that has
+			// its own description (its Long) needs the marker there too, or its own
+			// --help page would omit it while the parent's command list shows it.
+			// The empty-description case is covered below, where Long falls back to
+			// the already-marked short. Put the marker at the end of the first line
+			// (the summary), not after the body-fields and renamed-flags sections
+			// already appended above, so it reads as "<summary> (beta)" rather than
+			// landing mid-document before the ## Arguments section.
+			if betaSfx != "" && description != "" {
+				if nl := strings.IndexByte(description, '\n'); nl >= 0 {
+					description = description[:nl] + betaSfx + description[nl:]
+				} else {
+					description += betaSfx
+				}
+			}
+
 			if args := requiredArgsHelp(requiredParams); args != "" {
 				// Cobra prints Long or Short, never both, so a Long that exists
 				// only for this section still has to carry the summary.
@@ -717,6 +736,18 @@ func extStr(i interface{}) (decoded string) {
 	return
 }
 
+// betaSuffix returns " (beta)" when x-cli-beta is set truthy on the given
+// extensions, else "". Appended to the Short/description text so the marker
+// shows wherever that text is rendered: command list, command help, flag help,
+// and the generated README. Readable at group, operation, and flag level, the
+// same levels as the other x-cli-* extensions.
+func betaSuffix(exts map[string]interface{}) string {
+	if extBool(exts[ExtBeta]) {
+		return " (beta)"
+	}
+	return ""
+}
+
 func mustDecodeExt(input interface{}, target interface{}) {
 	switch value := input.(type) {
 	case json.RawMessage:
@@ -899,6 +930,15 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		}
 		if tagDef.Extensions[ExtHidden] != nil {
 			mustDecodeExt(tagDef.Extensions[ExtHidden], &hidden)
+		}
+		sfx := betaSuffix(tagDef.Extensions)
+		short += sfx
+		// Long and Description both come from `long`, and the group/readme
+		// templates render them. Mark them too, so a beta group shows "(beta)" on
+		// its help page and in the README, not only in the parent command list.
+		// When long is empty the templates fall back to the already-marked short.
+		if sfx != "" && long != "" {
+			long += sfx
 		}
 		section = getPreferredStringExt(tagDef.Extensions, ExtHelpSection)
 	}
@@ -1372,6 +1412,7 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 			// usage or one bullet of the Arguments section, so a spec's
 			// paragraph breaks would split the line or start a second bullet.
 			description = strings.Join(strings.Fields(description), " ")
+			description = strings.TrimSpace(description + betaSuffix(p.Value.Extensions))
 
 			allParams = append(allParams, &Param{
 				Name:        p.Value.Name,
@@ -1616,6 +1657,11 @@ func getBodyFields(schema *openapi3.Schema) []*BodyField {
 		if ref.Value.Extensions != nil && ref.Value.Extensions[ExtDescription] != nil {
 			description = extStr(ref.Value.Extensions[ExtDescription])
 		}
+		// A body property becomes a flag, so x-cli-beta on it marks that flag's
+		// help, the same as it does for a parameter. Without this the extension is
+		// read at group, operation and parameter level but silently ignored on a
+		// body-property flag.
+		description = strings.TrimSpace(description + betaSuffix(ref.Value.Extensions))
 
 		fields = append(fields, &BodyField{
 			Name:        name,

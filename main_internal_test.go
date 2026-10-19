@@ -2495,3 +2495,185 @@ paths:
 		t.Fatal("x-cli-list: false should suppress paginated inference")
 	}
 }
+
+// TestBetaMarker pins that x-cli-beta renders a "(beta)" marker at each level it
+// is read: a tagged group, an operation, and a flag; and that an untagged
+// sibling stays unmarked (ENG-2958).
+func TestBetaMarker(t *testing.T) {
+	const spec = `
+openapi: 3.0.3
+info:
+  title: Beta API
+  version: "1"
+tags:
+  - name: things
+    description: Thing management.
+    x-cli-beta: true
+  - name: stable
+    description: Stable things.
+    x-cli-beta: false
+paths:
+  /things:
+    get:
+      operationId: ListThings
+      summary: List things
+      tags: [things]
+      responses:
+        "200": {description: ok}
+  /stable:
+    get:
+      operationId: GetStable
+      summary: Get stable
+      tags: [stable]
+      x-cli-beta: false
+      parameters:
+        - {name: falseflag, in: query, x-cli-beta: false, schema: {type: boolean}}
+      responses:
+        "200": {description: ok}
+  /plain:
+    get:
+      operationId: GetPlain
+      summary: Get plain
+      x-cli-beta: true
+      parameters:
+        - {name: extraflag, in: query, x-cli-beta: true, schema: {type: boolean}}
+        - {name: plainflag, in: query, schema: {type: boolean}}
+      responses:
+        "200": {description: ok}
+  /described:
+    get:
+      operationId: GetDescribed
+      summary: Get described
+      description: A longer help body for the described operation.
+      x-cli-beta: true
+      responses:
+        "200": {description: ok}
+  /bodybeta:
+    post:
+      operationId: CreateBodyBeta
+      summary: Create body beta
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                betafield: {type: string, x-cli-beta: true}
+                plainfield: {type: string}
+      responses:
+        "200": {description: ok}
+`
+	api := ProcessAPI("beta", loadTestSpec(t, spec))
+
+	groupByName := func(name string) *CommandGroup {
+		for _, g := range api.Groups {
+			if g.CLIName == name {
+				return g
+			}
+		}
+		return nil
+	}
+	allOps := append([]*Operation{}, api.Operations...)
+	for _, g := range api.Groups {
+		allOps = append(allOps, g.Operations...)
+	}
+	opByPath := func(path string) *Operation {
+		for _, o := range allOps {
+			if o.Path == path {
+				return o
+			}
+		}
+		return nil
+	}
+
+	// A beta tag: the marker reaches Short, and Long/Description (rendered on the
+	// group's own help page and in the README), not just the parent list.
+	group := groupByName("things")
+	if group == nil {
+		t.Fatal("things group not found")
+	}
+	if !strings.Contains(group.Short, "(beta)") {
+		t.Errorf("beta group short missing marker: %q", group.Short)
+	}
+	if !strings.Contains(group.Long, "(beta)") || !strings.Contains(group.Description, "(beta)") {
+		t.Errorf("beta group Long/Description missing marker: Long=%q Description=%q", group.Long, group.Description)
+	}
+
+	// x-cli-beta: false is explicitly not beta, at every level, so the marker must
+	// be absent even though the key is present.
+	stable := groupByName("stable")
+	if stable == nil {
+		t.Fatal("stable group not found")
+	}
+	if strings.Contains(stable.Short, "(beta)") || strings.Contains(stable.Long, "(beta)") {
+		t.Errorf("x-cli-beta:false group must have no marker: Short=%q Long=%q", stable.Short, stable.Long)
+	}
+	if stableOp := opByPath("/stable"); stableOp == nil {
+		t.Fatal("GetStable operation not found")
+	} else if strings.Contains(stableOp.Short, "(beta)") {
+		t.Errorf("x-cli-beta:false operation must have no marker: %q", stableOp.Short)
+	} else {
+		for _, p := range stableOp.AllParams {
+			if p.CLIName == "falseflag" && strings.Contains(p.Description, "(beta)") {
+				t.Errorf("x-cli-beta:false flag must have no marker: %q", p.Description)
+			}
+		}
+	}
+
+	op := opByPath("/plain")
+	if op == nil {
+		t.Fatal("GetPlain operation not found")
+	}
+	if !strings.Contains(op.Short, "(beta)") {
+		t.Errorf("beta operation short missing marker: %q", op.Short)
+	}
+
+	var betaFlag, plainFlag *Param
+	for _, p := range op.AllParams {
+		switch p.CLIName {
+		case "extraflag":
+			betaFlag = p
+		case "plainflag":
+			plainFlag = p
+		}
+	}
+	if betaFlag == nil || !strings.Contains(betaFlag.Description, "(beta)") {
+		t.Errorf("beta flag missing marker: %+v", betaFlag)
+	}
+	if plainFlag == nil || strings.Contains(plainFlag.Description, "(beta)") {
+		t.Errorf("non-beta flag should have no marker: %+v", plainFlag)
+	}
+
+	// An operation with its own description renders that as cobra's Long; the
+	// marker must reach it too, since cobra shows Long instead of Short on the
+	// command's own --help page.
+	described := opByPath("/described")
+	if described == nil {
+		t.Fatal("GetDescribed operation not found")
+	}
+	if !strings.Contains(described.Long, "(beta)") {
+		t.Errorf("beta operation Long (help body) missing marker: %q", described.Long)
+	}
+
+	// A request-body property becomes a flag, so x-cli-beta on it marks that
+	// flag's help; a sibling property with no tag stays unmarked.
+	body := opByPath("/bodybeta")
+	if body == nil {
+		t.Fatal("CreateBodyBeta operation not found")
+	}
+	var betaField, plainField *BodyField
+	for _, f := range body.BodyFields {
+		switch f.CLIName {
+		case "betafield":
+			betaField = f
+		case "plainfield":
+			plainField = f
+		}
+	}
+	if betaField == nil || !strings.Contains(betaField.Description, "(beta)") {
+		t.Errorf("beta body-field flag missing marker: %+v", betaField)
+	}
+	if plainField == nil || strings.Contains(plainField.Description, "(beta)") {
+		t.Errorf("non-beta body-field flag should have no marker: %+v", plainField)
+	}
+}
