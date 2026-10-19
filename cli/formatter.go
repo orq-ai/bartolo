@@ -319,7 +319,7 @@ func checkColumns(requestedColumns []string, rows []map[string]interface{}, user
 		for _, row := range rows {
 			_, resolution := resolveTableField(row, column)
 			switch resolution {
-			case tableFieldResolved:
+			case tableFieldResolved, tableFieldLiteral:
 				found = true
 			case tableFieldEmptyProjection:
 				emptyProjection = true
@@ -372,6 +372,9 @@ type tableFieldResolution uint8
 const (
 	tableFieldMissing tableFieldResolution = iota
 	tableFieldResolved
+	// tableFieldLiteral is a resolved column found as an exact flat key, so
+	// its dots are part of one name rather than a path.
+	tableFieldLiteral
 	tableFieldEmptyProjection
 	tableFieldUnresolvedPopulatedProjection
 	tableFieldPrefixNotAnArray
@@ -412,7 +415,7 @@ func parseTableProjection(column string) (arrayPath, elementPath string, state t
 // list, not to a missing field, so the row renders a blank cell.
 func resolveTableField(row map[string]interface{}, column string) (interface{}, tableFieldResolution) {
 	if value, ok := row[column]; ok {
-		return value, tableFieldResolved
+		return value, tableFieldLiteral
 	}
 
 	prefix, suffix, projection := parseTableProjection(column)
@@ -520,11 +523,13 @@ func renderTable(data interface{}, requestedColumns []string, userColumns bool) 
 		return true, nil
 	}
 
+	literal := make([]bool, len(headers))
 	values := make([][]string, 0, len(rows))
 	for _, row := range rows {
 		cells := make([]string, len(headers))
 		for i, key := range headers {
-			rawValue, _ := resolveTableField(row, key)
+			rawValue, resolution := resolveTableField(row, key)
+			literal[i] = literal[i] || resolution == tableFieldLiteral
 			value, err := tableValue(rawValue)
 			if err != nil {
 				return false, err
@@ -534,9 +539,11 @@ func renderTable(data interface{}, requestedColumns []string, userColumns bool) 
 		values = append(values, cells)
 	}
 
+	// Labels before fitting, so widths are budgeted on what is printed.
+	labels := tableHeaders(headers, literal)
 	// Columns someone asked for — by spec or on the command line — are never dropped.
 	if len(requestedColumns) == 0 {
-		headers, values = fitColumns(headers, values, terminalWidth())
+		labels, values = fitColumns(labels, values, terminalWidth())
 	}
 
 	table := tablewriter.NewTable(Stdout,
@@ -544,11 +551,7 @@ func renderTable(data interface{}, requestedColumns []string, userColumns bool) 
 		tablewriter.WithHeaderAutoWrap(tw.WrapNone),
 		tablewriter.WithRowAutoWrap(tw.WrapNone),
 	)
-	renderedHeaders := make([]string, len(headers))
-	for i, header := range headers {
-		renderedHeaders[i] = tableHeader(header)
-	}
-	table.Header(renderedHeaders)
+	table.Header(labels)
 	for _, cells := range values {
 		if err := table.Append(cells); err != nil {
 			return false, err
@@ -568,23 +571,69 @@ func renderTable(data interface{}, requestedColumns []string, userColumns bool) 
 	return true, nil
 }
 
-// tableHeader preserves tablewriter's whole-header formatting except for one
-// valid array projection, whose [] marker stays joined to the array path it
-// belongs to, ahead of the projected field: settings.tools[].key renders as
-// SETTINGS . TOOLS[] . KEY. The format closure is tablewriter's own AutoFormat
-// expression (tablewriter.go:987), reproduced here because turning AutoFormat
-// off is what keeps the marker attached.
-func tableHeader(header string) string {
-	format := func(value string) string {
-		return tw.Title(strings.Join(tw.SplitCamelCase(value), tw.Space))
+// tableHeaders labels each column by its shortest unique suffix of path
+// segments: metadata.context_window renders as CONTEXT WINDOW, while
+// pricing.input.cost and pricing.output.cost extend to INPUT . COST and
+// OUTPUT . COST. Array markers are dropped, so settings.tools[].key is KEY.
+// A literal column is one segment and keeps its whole name. Columns equal at
+// full length keep equal headers.
+func tableHeaders(columns []string, literal []bool) []string {
+	segments := make([][]string, len(columns))
+	used := make([]int, len(columns))
+	for i, column := range columns {
+		segments[i] = tableHeaderSegments(column, literal[i])
+		used[i] = 1
 	}
 
-	prefix, suffix, projection := parseTableProjection(header)
-	if projection != tableProjectionValid {
-		return format(header)
-	}
+	headers := make([]string, len(columns))
+	for {
+		groups := make(map[string][]int, len(columns))
+		for i, parts := range segments {
+			suffix := parts[len(parts)-used[i]:]
+			formatted := make([]string, len(suffix))
+			for j, part := range suffix {
+				formatted[j] = formatTableHeader(part)
+			}
+			headers[i] = strings.Join(formatted, " . ")
+			groups[headers[i]] = append(groups[headers[i]], i)
+		}
 
-	return format(prefix) + "[] . " + format(suffix)
+		extended := false
+		for _, members := range groups {
+			if len(members) < 2 {
+				continue
+			}
+			for _, i := range members {
+				if used[i] < len(segments[i]) {
+					used[i]++
+					extended = true
+				}
+			}
+		}
+		if !extended {
+			return headers
+		}
+	}
+}
+
+// tableHeaderSegments splits a column into its path segments, without the []
+// projection marker. A literal key is a single segment.
+func tableHeaderSegments(column string, literal bool) []string {
+	if literal {
+		return []string{column}
+	}
+	arrayPath, elementPath, projection := parseTableProjection(column)
+	if projection == tableProjectionValid {
+		return append(strings.Split(arrayPath, "."), strings.Split(elementPath, ".")...)
+	}
+	return strings.Split(column, ".")
+}
+
+// formatTableHeader is tablewriter's own AutoFormat expression
+// (tablewriter.go:987), reproduced here because header AutoFormat is off so
+// that suffixes are formatted per segment and joined with " . ".
+func formatTableHeader(value string) string {
+	return tw.Title(strings.Join(tw.SplitCamelCase(value), tw.Space))
 }
 
 // tableFooter summarizes the envelope in one line below the table: how many

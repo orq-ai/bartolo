@@ -853,10 +853,21 @@ func Register(root *cobra.Command) {
 	if err != nil {
 		t.Fatalf("run generated list command: %v\n%s", err, string(out))
 	}
-	if !strings.Contains(string(out), "SETTINGS . TOOLS[] . KEY") ||
+	// The first bordered row is the header; compare cells, not padding.
+	var header []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if !strings.HasPrefix(line, "│") {
+			continue
+		}
+		for _, cell := range strings.Split(strings.Trim(line, "│"), "│") {
+			header = append(header, strings.TrimSpace(cell))
+		}
+		break
+	}
+	if !reflect.DeepEqual(header, []string{"ID", "MODEL . ID", "KEY"}) ||
 		!strings.Contains(string(out), "lookup, refund, policy, …") ||
 		!strings.Contains(string(out), "model_1") {
-		t.Fatalf("generated list command returned unexpected table: %s", out)
+		t.Fatalf("generated list command returned unexpected table (header %q): %s", header, out)
 	}
 
 	// Decoding rather than substring-matching is what catches a projection
