@@ -17,10 +17,97 @@ import (
 	survey "github.com/AlecAivazis/survey/v2"
 	isatty "github.com/mattn/go-isatty"
 	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"gopkg.in/h2non/gentleman.v2/context"
 )
+
+// apiKeyField is the profile field holding the workspace API key. Once that key
+// has been moved to the OS secure store, apiKeyStoreField is left in
+// credentials.json in its place: a non-secret marker (its value is the store's
+// name, so status output can say where the key lives). Only api_key is ever
+// moved; every other profile field stays in the file. See credstore.go.
+const (
+	apiKeyField      = "api_key"
+	apiKeyStoreField = "api_key_store"
+)
+
+// storeProfileAPIKey moves fields[apiKeyField] into the secure store under the
+// profile name and replaces it with the marker, so what SetProfile persists is
+// the marker, never the secret. A store that is absent (file fallback, no
+// Secret Service, Windows) or that fails leaves the key in fields unchanged, so
+// the profile still authenticates from the 0600 file: moving a key must never be
+// able to lose it.
+func storeProfileAPIKey(name string, fields map[string]interface{}) {
+	key, ok := fields[apiKeyField].(string)
+	if !ok || key == "" {
+		return
+	}
+	store := resolveSecretStore()
+	if store == nil {
+		return
+	}
+	if err := store.Save(sanitizeProfileName(name), key); err != nil {
+		log.Warn().Err(err).Msg("could not store the API key securely; keeping it in credentials.json")
+		return
+	}
+	delete(fields, apiKeyField)
+	fields[apiKeyStoreField] = store.Name()
+}
+
+// hydrateProfileAPIKey returns profile with its api_key present: loaded from the
+// secure store when the profile carries the marker, or migrated out of a legacy
+// plaintext file on first read. It never removes a usable key — a store that
+// cannot answer leaves a marked profile without api_key (the caller reports "no
+// key" rather than the wrong one), and a failed migration keeps the plaintext.
+func hydrateProfileAPIKey(name string, profile map[string]string) map[string]string {
+	if profile == nil {
+		return profile
+	}
+	if _, marked := profile[apiKeyStoreField]; marked {
+		if _, present := profile[apiKeyField]; !present {
+			if store := resolveSecretStore(); store != nil {
+				if secret, ok, err := store.Load(sanitizeProfileName(name)); err == nil && ok {
+					profile[apiKeyField] = secret
+				}
+			}
+		}
+		return profile
+	}
+	// Legacy plaintext key: move it to the store on first read, best-effort, and
+	// strip it from the file so it is not left in two places.
+	if key := profile[apiKeyField]; key != "" {
+		if store := resolveSecretStore(); store != nil {
+			if err := store.Save(sanitizeProfileName(name), key); err == nil {
+				Creds.migrateProfileToStore(name, store.Name())
+				if err := Creds.Save(credentialsFile()); err != nil {
+					log.Warn().Err(err).Msg("moved the API key to the secure store but could not rewrite credentials.json")
+				}
+			}
+		}
+	}
+	return profile
+}
+
+// migrateProfileToStore rewrites one profile in place: drops the plaintext
+// api_key and adds the store marker. Used on read when a legacy key is moved to
+// the secure store; the whole profiles map is rewritten for the same reason
+// SetProfile does it (a viper override on a nested key hides its siblings).
+func (c *CredentialsFile) migrateProfileToStore(name, storeName string) {
+	name = sanitizeProfileName(name)
+	profiles := c.viper.GetStringMap("profiles")
+	existing, ok := profiles[name].(map[string]interface{})
+	if !ok {
+		return
+	}
+	merged := map[string]interface{}{}
+	maps.Copy(merged, existing)
+	delete(merged, apiKeyField)
+	merged[apiKeyStoreField] = storeName
+	profiles[name] = merged
+	c.viper.Set("profiles", profiles)
+}
 
 // Save atomically replaces filename with the whole in-memory tree, so an
 // instance built outside NewCredentialsFile drops every profile it never read.
@@ -1182,6 +1269,10 @@ func (c *CredentialsFile) SetProfile(name string, fields map[string]string) {
 		merged[key] = value
 	}
 
+	// Keep the API key out of credentials.json: move it to the secure store and
+	// leave the marker. A no-op when there is no key or no store.
+	storeProfileAPIKey(name, merged)
+
 	profiles[name] = merged
 	c.viper.Set("profiles", profiles)
 }
@@ -1190,6 +1281,16 @@ func (c *CredentialsFile) SetProfile(name string, fields map[string]string) {
 // rewritten rather than the entry deleted in place.
 func (c *CredentialsFile) RemoveProfile(name string) {
 	name = sanitizeProfileName(name)
+
+	// Clear any API key this profile moved to the secure store, so removing a
+	// profile does not orphan its secret in the OS keychain. Best-effort: a
+	// profile that never stored a key is a no-op, and a store that cannot answer
+	// is logged with the by-hand command rather than blocking the removal.
+	if store := resolveSecretStore(); store != nil {
+		if err := store.Delete(name); err != nil {
+			log.Warn().Err(err).Msgf("could not remove the stored API key for profile %q; clear it by hand: %s", name, manualClearHint(store, name))
+		}
+	}
 
 	profiles := c.viper.GetStringMap("profiles")
 	delete(profiles, name)
@@ -1244,7 +1345,7 @@ func GetProfile() map[string]string {
 		return nil
 	}
 
-	return Creds.GetStringMapString("profiles." + name)
+	return hydrateProfileAPIKey(name, Creds.GetStringMapString("profiles."+name))
 }
 
 // ProfileExists reports whether a profile of that name is configured. name is
