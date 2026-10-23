@@ -2787,3 +2787,37 @@ paths:
 	}()
 	ProcessAPI("t", loadTestSpec(t, spec))
 }
+
+// The scaffolded .env.example names the bearer-token variable the generated MCP
+// server actually reads: <PREFIX>_MCP_TOKEN.
+func TestEnvExampleNamesThePrefixedMCPToken(t *testing.T) {
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(repoRoot)
+
+	config := &ProjectConfig{
+		AppName:             "acme",
+		ModulePath:          "github.com/acme/acme",
+		BartoloReplacePath:  repoRoot,
+		EnvPrefix:           "ACME",
+		SerializationFormat: "json",
+		APIKeyEnvVar:        "ACME_API_KEY",
+		Targets:             []string{targetMCP},
+	}
+	if err := writeProjectScaffold(config, false); err != nil {
+		t.Fatalf("writeProjectScaffold: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(tmp, ".env.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "# ACME_MCP_TOKEN=replace-me") {
+		t.Errorf(".env.example does not name ACME_MCP_TOKEN:\n%s", data)
+	}
+}
