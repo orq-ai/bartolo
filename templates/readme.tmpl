@@ -47,6 +47,14 @@ Check the generated setup before making requests:
 {{- if .AuthDoc.Enabled }}
 
 {{ .AuthDoc.Summary }}
+{{- if .AuthDoc.Schemes }}
+
+Security schemes:
+{{- range .AuthDoc.Schemes }}
+- `{{ .Name }}` — {{ .Kind }}{{ if .Default }} (default){{ end }}{{ if .TokenURL }}; token endpoint `{{ .TokenURL }}`{{ end }}
+{{- end }}
+{{- end }}
+{{- if .AuthDoc.EnvVars }}
 
 Environment variables:
 {{- range .AuthDoc.EnvVars }}
@@ -73,6 +81,8 @@ config-file equivalent, deliberately. When it is enabled:
   empty; a file never overwrites an `export`.
 - `{{ .CommandName }} doctor` reports a `dotenv` source and names the file, so a
   key from a file is never mistaken for one you exported.
+{{- end }}
+{{- if .AuthDoc.ProfileCommand }}
 
 Profile setup:
 
@@ -119,11 +129,72 @@ profile's bound server, the `<PREFIX>_SERVER` environment variable (same prefix
 as the variables above), a persisted `server set` default, then the generated
 server default. `auth profile list` shows the server bound to each profile, and
 `doctor` shows the one the active profile resolves to.
+{{- end }}
+{{- if .AuthDoc.ManualNotes }}
+
+The following schemes require manual configuration:
+{{- range .AuthDoc.ManualNotes }}
+- {{ . }}
+{{- end }}
+{{- end }}
 {{- else }}
 
 {{ .AuthDoc.Summary }}
 {{- end }}
 
+{{- if not .TargetCLI }}
+## MCP Server
+
+This project generates an **MCP-first** binary speaking spec `2026-07-28`. Running `{{ .CommandName }}` with no arguments serves the API's operations as [Model Context Protocol](https://modelcontextprotocol.io) tools over stdio — the transport MCP clients spawn directly. Results are returned as structured content, and upstream API errors surface as structured tool errors.
+
+Add it to Claude Code:
+
+```sh
+claude mcp add {{ .CommandName }} -- {{ .CommandName }}
+```
+
+Or configure Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "{{ .CommandName }}": {
+      "command": "{{ .CommandName }}",
+      "args": []{{ if and .AuthDoc.Enabled .AuthDoc.EnvVars }},
+      "env": {
+        "{{ index .AuthDoc.EnvVars 0 }}": "your-token"
+      }{{ end }}
+    }
+  }
+}
+```
+{{- if and .AuthDoc.Enabled .AuthDoc.ProfileCommand }}
+
+Alternatively, bootstrap credentials with a stored profile via `{{ .AuthDoc.ProfileCommand }}` before wiring the server into a client.
+{{- end }}
+
+Print the tool manifest as JSON (handy for debugging):
+
+```sh
+{{ .CommandName }} mcp list
+```
+
+Filter the exposed tools with `--tools`, `--groups`, or `--read-only`. Serve over Streamable HTTP (stateless, spec 2026-07-28) instead of stdio:
+
+```sh
+{{ .CommandName }} mcp --http 127.0.0.1:8484
+```
+
+Cross-origin browser requests are refused unless their origin is listed in `--http-allowed-origins`. See `{{ .CommandName }} mcp --help` for inbound auth (`--http-auth bearer|oauth`).
+
+Verify config, auth source, and selected server before connecting a client:
+
+```sh
+{{ .CommandName }} doctor
+```
+
+## Custom Commands
+{{- else }}
 ## Command Surface
 {{- if .Groups }}
 
@@ -136,6 +207,52 @@ This CLI groups commands by product/resource noun inferred from the OpenAPI tags
 {{- else }}
 
 This CLI exposes operations directly at the root level. Use `{{ .CommandName }} --help` to inspect the available commands.
+{{- end }}
+{{- if .HasMCPTools }}
+
+## MCP Server
+
+This CLI is also an MCP (Model Context Protocol) server speaking spec `2026-07-28`. `{{ .CommandName }} mcp` exposes the API operations as tools for clients such as Claude Code, Claude Desktop, and Cursor. Results are returned as structured content, and upstream API errors surface as structured tool errors.
+
+Add it to Claude Code:
+
+```sh
+claude mcp add {{ .CommandName }} -- {{ .CommandName }} mcp
+```
+
+Or configure Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "{{ .CommandName }}": {
+      "command": "{{ .CommandName }}",
+      "args": ["mcp"]{{ if and .AuthDoc.Enabled .AuthDoc.EnvVars }},
+      "env": {
+        "{{ index .AuthDoc.EnvVars 0 }}": "your-token"
+      }{{ end }}
+    }
+  }
+}
+```
+{{- if and .AuthDoc.Enabled .AuthDoc.ProfileCommand }}
+
+Alternatively, authenticate with a stored profile via `{{ .AuthDoc.ProfileCommand }}` before wiring the server into a client.
+{{- end }}
+
+Print the tool manifest as JSON (handy for debugging):
+
+```sh
+{{ .CommandName }} mcp list
+```
+
+Filter the exposed tools with `--tools`, `--groups`, or `--read-only`. Serve over Streamable HTTP (stateless, spec 2026-07-28) instead of stdio:
+
+```sh
+{{ .CommandName }} mcp --http 127.0.0.1:8484
+```
+
+Cross-origin browser requests are refused unless their origin is listed in `--http-allowed-origins`. See `{{ .CommandName }} mcp --help` for inbound auth (`--http-auth bearer|oauth`).
 {{- end }}
 
 ## Examples
@@ -162,6 +279,7 @@ Use the built-in raw request command when a high-level command is missing:
 ```
 
 ## Custom Commands
+{{- end }}
 
 Bartolo keeps generated and user-owned code separate:
 
@@ -169,6 +287,7 @@ Bartolo keeps generated and user-owned code separate:
 - Generated API code: `cli/generated/`
 - User-owned extensions: `cli/custom/`
 - Add your own commands or hook registrations inside `cli/custom/Register(...)` so regeneration does not overwrite your work.
+- MCP extras: call `mcpserver.Use(mcpserver.AddTools(...), mcpserver.PatchTool(...), mcpserver.RemoveTools(...))` from `Register` so custom tools apply to both stdio and HTTP.
 
 ## Output Conventions
 

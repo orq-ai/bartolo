@@ -464,8 +464,8 @@ func TestProcessAPIClassifiesOrqNonGetListsExactly(t *testing.T) {
 		if item == nil || item.Post == nil {
 			t.Fatal("the chunks route is missing from the fixture")
 		}
-		delete(item.Post.Extensions, ExtList)
-		delete(item.Post.Extensions, ExtListFields)
+		delete(item.Post.Extensions, "x-cli-list")
+		delete(item.Post.Extensions, "x-cli-list-fields")
 
 		op, ok := operationsByRoute(ProcessAPI("orq", doc))[chunksRoute]
 		if !ok {
@@ -614,6 +614,248 @@ paths:
 	}
 }
 
+// specWithNameExt renders a one-op spec applying the given extension key to the
+// operation with the given value, for canonical-vs-legacy comparison.
+func specWithOpExt(ext, value string) string {
+	return `
+openapi: 3.0.3
+info:
+  title: Ext API
+  version: "1"
+paths:
+  /widgets/{widget_id}:
+    get:
+      operationId: WidgetGet
+      summary: Get widget
+      ` + ext + `: ` + value + `
+      parameters:
+        - in: path
+          name: widget_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+`
+}
+
+func TestProcessAPICanonicalNameMatchesLegacy(t *testing.T) {
+	legacy := ProcessAPI("example", loadTestSpec(t, specWithOpExt("x-cli-name", "fetch")))
+	canonical := ProcessAPI("example", loadTestSpec(t, specWithOpExt("x-bartolo-name", "fetch")))
+
+	legacyOp := findOp(legacy, "/widgets/{widget_id}", "get")
+	canonicalOp := findOp(canonical, "/widgets/{widget_id}", "get")
+	if legacyOp == nil || canonicalOp == nil {
+		t.Fatalf("expected op in both, legacy=%v canonical=%v", legacyOp, canonicalOp)
+	}
+	if legacyOp.LeafName != "fetch" || canonicalOp.LeafName != "fetch" {
+		t.Fatalf("expected leaf fetch, legacy=%q canonical=%q", legacyOp.LeafName, canonicalOp.LeafName)
+	}
+	if legacyOp.CommandPath != canonicalOp.CommandPath {
+		t.Fatalf("canonical command path %q != legacy %q", canonicalOp.CommandPath, legacyOp.CommandPath)
+	}
+}
+
+func TestProcessAPICanonicalGroupMatchesLegacy(t *testing.T) {
+	legacy := ProcessAPI("example", loadTestSpec(t, specWithOpExt("x-cli-group", "admin")))
+	canonical := ProcessAPI("example", loadTestSpec(t, specWithOpExt("x-bartolo-group", "admin")))
+
+	if len(legacy.Groups) != 1 || len(canonical.Groups) != 1 {
+		t.Fatalf("expected 1 group each, legacy=%d canonical=%d", len(legacy.Groups), len(canonical.Groups))
+	}
+	if canonical.Groups[0].CLIName != "admin" || legacy.Groups[0].CLIName != "admin" {
+		t.Fatalf("expected group admin, legacy=%q canonical=%q", legacy.Groups[0].CLIName, canonical.Groups[0].CLIName)
+	}
+}
+
+func TestProcessAPISharedIgnoreCanonicalMatchesLegacy(t *testing.T) {
+	legacy := ProcessAPI("example", loadTestSpec(t, specWithOpExt("x-cli-ignore", "true")))
+	canonical := ProcessAPI("example", loadTestSpec(t, specWithOpExt("x-bartolo-ignore", "true")))
+
+	if findOp(legacy, "/widgets/{widget_id}", "get") != nil {
+		t.Fatalf("legacy x-cli-ignore op should be absent from the IR")
+	}
+	if findOp(canonical, "/widgets/{widget_id}", "get") != nil {
+		t.Fatalf("canonical x-bartolo-ignore op should be absent from the IR")
+	}
+}
+
+func TestProcessAPICanonicalWinsOverLegacy(t *testing.T) {
+	// Both keys present on the same element: canonical x-bartolo-name must win.
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info:
+  title: Ext API
+  version: "1"
+paths:
+  /widgets/{widget_id}:
+    get:
+      operationId: WidgetGet
+      summary: Get widget
+      x-cli-name: legacyname
+      x-bartolo-name: canonname
+      parameters:
+        - in: path
+          name: widget_id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: ok
+`)
+	api := ProcessAPI("example", doc)
+	op := findOp(api, "/widgets/{widget_id}", "get")
+	if op == nil {
+		t.Fatal("expected op present")
+	}
+	if op.LeafName != "canonname" {
+		t.Fatalf("expected canonical name to win, got leaf %q", op.LeafName)
+	}
+}
+
+func TestProcessAPICLIIgnoreKeepsOpInIRButExcludesFromCLI(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.1.0
+info: {title: t, version: "1"}
+paths:
+  /internal:
+    get:
+      operationId: InternalThing
+      x-bartolo-cli-ignore: true
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: object, properties: {ok: {type: boolean}}}
+`)
+	api := ProcessAPI("example", doc)
+	op := findOp(api, "/internal", "get")
+	if op == nil {
+		t.Fatal("cli-ignored op must still enter the IR")
+	}
+	if !op.CLIExcluded {
+		t.Fatal("cli-ignored op must be marked CLIExcluded")
+	}
+	// Excluded from the CLI command registration data (root and any group)...
+	cliOps := len(cliVisibleOperations(api.Operations))
+	for _, g := range api.Groups {
+		cliOps += len(cliVisibleOperations(g.Operations))
+	}
+	if cliOps != 0 {
+		t.Fatalf("cli-ignored op must not appear in CLI registration data, got %d", cliOps)
+	}
+	// ...but still exposed as an MCP tool.
+	if op.MCP == nil || op.MCP.Excluded {
+		t.Fatalf("cli-ignored op must still be an MCP tool, got %+v", op.MCP)
+	}
+	if !api.HasMCPTools() {
+		t.Fatal("expected the cli-ignored op to keep MCP tools present")
+	}
+}
+
+func TestProcessAPICLIIgnoreEmptyGroupNotRegistered(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.1.0
+info: {title: t, version: "1"}
+paths:
+  /secret/thing:
+    get:
+      operationId: SecretThing
+      tags: [Secret]
+      x-bartolo-cli-ignore: true
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: object, properties: {ok: {type: boolean}}}
+`)
+	api := ProcessAPI("example", doc)
+	if len(api.Groups) != 1 {
+		t.Fatalf("expected the group to remain in the IR, got %d", len(api.Groups))
+	}
+	if api.Groups[0].HasCLICommands() {
+		t.Fatal("group with only cli-ignored ops must report no CLI commands")
+	}
+	op := findOp(api, "/secret/thing", "get")
+	if op == nil || op.MCP == nil || op.MCP.Excluded {
+		t.Fatalf("grouped cli-ignored op must still be an MCP tool, got %+v", op)
+	}
+}
+
+func TestProcessAPISharedIgnoreBeatsScopedIncludes(t *testing.T) {
+	// x-bartolo-ignore excludes everywhere regardless of any scoped flag also
+	// present on the element.
+	doc := loadTestSpec(t, `
+openapi: 3.1.0
+info: {title: t, version: "1"}
+paths:
+  /gone:
+    get:
+      operationId: GoneThing
+      x-bartolo-ignore: true
+      x-bartolo-cli-ignore: true
+      x-bartolo-mcp-ignore: true
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {type: object, properties: {ok: {type: boolean}}}
+`)
+	api := ProcessAPI("example", doc)
+	if findOp(api, "/gone", "get") != nil {
+		t.Fatal("shared ignore must drop the op from the IR entirely")
+	}
+	if api.HasMCPTools() {
+		t.Fatal("shared-ignored op must not produce an MCP tool")
+	}
+}
+
+func TestGetParamsCanonicalParameterIgnore(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info: {title: t, version: "1"}
+paths:
+  /widgets:
+    get:
+      operationId: WidgetList
+      parameters:
+        - in: query
+          name: keep
+          schema: {type: string}
+        - in: query
+          name: drop
+          x-bartolo-ignore: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: ok
+`)
+	api := ProcessAPI("example", doc)
+	op := findOp(api, "/widgets", "get")
+	if op == nil {
+		t.Fatal("expected op present")
+	}
+	for _, p := range op.AllParams {
+		if p.Name == "drop" {
+			t.Fatalf("parameter with x-bartolo-ignore must be dropped, got %+v", op.AllParams)
+		}
+	}
+	found := false
+	for _, p := range op.AllParams {
+		if p.Name == "keep" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected the non-ignored parameter to survive, got %+v", op.AllParams)
+	}
+}
+
 func TestResolveInitConfigUsesFlagsWithoutPrompting(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().Bool("interactive", false, "")
@@ -705,6 +947,7 @@ func TestGenerateFromJSONFixtureBuildsCLI(t *testing.T) {
 		EnvPrefix:           "ORQ",
 		SerializationFormat: "json",
 		APIKeyEnvVar:        "ORQ_API_KEY",
+		Targets:             []string{"cli", "mcp"},
 	}
 	if err := writeProjectScaffold(config, false); err != nil {
 		t.Fatalf("writeProjectScaffold: %v", err)
@@ -769,6 +1012,7 @@ func TestGeneratedListCommandRendersArrayElementPath(t *testing.T) {
 		BartoloVersion:      bartoloVersion,
 		EnvPrefix:           "NESTED",
 		SerializationFormat: "json",
+		Targets:             []string{targetCLI},
 	}
 	if err := writeProjectScaffold(config, false); err != nil {
 		t.Fatalf("writeProjectScaffold: %v", err)
@@ -2493,5 +2737,111 @@ paths:
 	}
 	if op.IsList {
 		t.Fatal("x-cli-list: false should suppress paginated inference")
+	}
+}
+
+// Waiters come out of a map in the spec, so ProcessAPI orders them by name:
+// otherwise two waiters would render in a different order on every generate.
+func TestProcessAPIOrdersWaitersByName(t *testing.T) {
+	spec := `
+openapi: 3.0.3
+info: {title: t, version: "1"}
+x-bartolo-waiters:
+  zeta-ready: {operationId: GetThing, matchers: [{select: response.body.ok, expected: true}]}
+  alpha-ready: {operationId: GetThing, matchers: [{select: response.body.ok, expected: true}]}
+  mid-ready: {operationId: GetThing, matchers: [{select: response.body.ok, expected: true}]}
+paths:
+  /things/{id}:
+    get:
+      operationId: GetThing
+      parameters: [{name: id, in: path, required: true, schema: {type: string}}]
+      responses: {"200": {description: ok}}
+`
+	for range 5 {
+		api := ProcessAPI("t", loadTestSpec(t, spec))
+		var names []string
+		for _, w := range api.Waiters {
+			names = append(names, w.CLIName)
+		}
+		if strings.Join(names, ",") != "alpha-ready,mid-ready,zeta-ready" {
+			t.Fatalf("waiters = %v, want name order", names)
+		}
+	}
+}
+
+func TestProcessAPIRejectsWaiterForUnknownOperation(t *testing.T) {
+	spec := `
+openapi: 3.0.3
+info: {title: t, version: "1"}
+x-bartolo-waiters:
+  ready: {operationId: Missing}
+paths:
+  /things:
+    get: {operationId: ListThings, responses: {"200": {description: ok}}}
+`
+	defer func() {
+		err, _ := recover().(error)
+		if err == nil || !strings.Contains(err.Error(), "Unknown waiter operation Missing") {
+			t.Errorf("recovered %v, want a named unknown-operation error", err)
+		}
+	}()
+	ProcessAPI("t", loadTestSpec(t, spec))
+}
+
+// The scaffolded .env.example names the bearer-token variable the generated MCP
+// server actually reads: <PREFIX>_MCP_TOKEN.
+func TestEnvExampleNamesThePrefixedMCPToken(t *testing.T) {
+	repoRoot, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmp := t.TempDir()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(repoRoot)
+
+	config := &ProjectConfig{
+		AppName:             "acme",
+		ModulePath:          "github.com/acme/acme",
+		BartoloReplacePath:  repoRoot,
+		EnvPrefix:           "ACME",
+		SerializationFormat: "json",
+		APIKeyEnvVar:        "ACME_API_KEY",
+		Targets:             []string{targetMCP},
+	}
+	if err := writeProjectScaffold(config, false); err != nil {
+		t.Fatalf("writeProjectScaffold: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(tmp, ".env.example"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "# ACME_MCP_TOKEN=replace-me") {
+		t.Errorf(".env.example does not name ACME_MCP_TOKEN:\n%s", data)
+	}
+}
+
+// An MCP-only binary has no per-operation commands, so its examples show the
+// server instead of `<group> --help` invocations that would not exist.
+func TestExamplesForMCPOnlyProjects(t *testing.T) {
+	api := ProcessAPI("acme", loadTestSpec(t, `
+openapi: 3.1.0
+info: {title: Acme API, version: "1"}
+paths:
+  /widgets:
+    get: {operationId: ListWidgets, tags: [widgets], responses: {"200": {description: ok}}}
+`))
+	api.CommandName = "acme"
+
+	api.TargetCLI = false
+	mcpOnly := renderTemplate("templates/examples_readme.tmpl", nil, api)
+	if !strings.Contains(mcpOnly, "acme mcp list") || strings.Contains(mcpOnly, "--help") {
+		t.Errorf("MCP-only examples should show the server, not CLI commands:\n%s", mcpOnly)
+	}
+
+	api.TargetCLI = true
+	if cli := renderTemplate("templates/examples_readme.tmpl", nil, api); !strings.Contains(cli, "acme widgets --help") {
+		t.Errorf("CLI examples lost the group command:\n%s", cli)
 	}
 }

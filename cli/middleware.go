@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -54,6 +55,7 @@ func commandPath(cmd *cobra.Command) string {
 
 // HandleBefore runs any registered pre-request handlers for the given command.
 func HandleBefore(path string, params *viper.Viper, r *gentleman.Request) {
+	bindRequestContext(params, r)
 	if handlers, ok := beforeRegistry[path]; ok {
 		for _, handler := range handlers {
 			handler(path, params, r)
@@ -71,4 +73,47 @@ func HandleAfter(path string, params *viper.Viper, resp *gentleman.Response, dat
 	}
 
 	return tmp
+}
+
+// requestContextKey holds the context an operation's request is bound to. Like
+// passedFlagsKey it is spelled with underscores so no parameter can collide.
+const requestContextKey = "__request_context"
+
+// SetRequestContext binds the requests a generated operation sends with params
+// to ctx, so cancelling ctx aborts the in-flight HTTP call. The MCP server uses
+// it to stop the upstream request when its client cancels a tool call.
+func SetRequestContext(params *viper.Viper, ctx context.Context) {
+	if params == nil || ctx == nil {
+		return
+	}
+	params.Set(requestContextKey, ctx)
+}
+
+// bindRequestContext applies the context SetRequestContext stored, if any.
+func bindRequestContext(params *viper.Viper, r *gentleman.Request) {
+	if params == nil || r == nil || r.Context == nil {
+		return
+	}
+	if ctx, ok := params.Get(requestContextKey).(context.Context); ok {
+		r.Context.SetCancelContext(ctx)
+	}
+}
+
+// requestCredentialKey carries the credential of the caller a request acts for.
+type requestCredentialKey struct{}
+
+// WithRequestCredential returns a context whose generated requests send
+// authorization as their Authorization header in place of the configured
+// profile or environment credentials, which are then never consulted. A hosted
+// MCP server uses it to call the API as each of its callers. Bind the context
+// with SetRequestContext.
+func WithRequestCredential(ctx context.Context, authorization string) context.Context {
+	return context.WithValue(ctx, requestCredentialKey{}, authorization)
+}
+
+// RequestCredential returns the caller credential WithRequestCredential put on
+// ctx, for custom code that calls an API outside the generated client.
+func RequestCredential(ctx context.Context) (string, bool) {
+	authorization, _ := ctx.Value(requestCredentialKey{}).(string)
+	return authorization, authorization != ""
 }

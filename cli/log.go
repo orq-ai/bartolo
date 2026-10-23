@@ -26,6 +26,10 @@ var (
 	cYellow    = 222
 )
 
+// consoleOutMu serializes ConsoleWriter output. The MCP HTTP server handles
+// tool calls concurrently, and Out need not be safe for concurrent writes.
+var consoleOutMu sync.Mutex
+
 var consoleBufPool = sync.Pool{
 	New: func() interface{} {
 		return bytes.NewBuffer(make([]byte, 0, 100))
@@ -99,7 +103,9 @@ func (w ConsoleWriter) Write(p []byte) (n int, err error) {
 	if errorField != "" {
 		buf.Write([]byte(errorField))
 	}
+	consoleOutMu.Lock()
 	buf.WriteTo(w.Out)
+	consoleOutMu.Unlock()
 	n = len(p)
 	return
 }

@@ -1,12 +1,14 @@
 package main
 
 import (
+	"cmp"
 	"embed"
 	"encoding/json"
 	"fmt"
 	"go/format"
 	"io/ioutil"
 	"log"
+	"maps"
 	"os"
 	"os/exec"
 	"path"
@@ -93,20 +95,9 @@ func buildRevision(settings []debug.BuildSetting) string {
 	return ""
 }
 
-// OpenAPI Extensions
-const (
-	ExtAliases     = "x-cli-aliases"
-	ExtDescription = "x-cli-description"
-	ExtGroup       = "x-cli-group"
-	ExtIgnore      = "x-cli-ignore"
-	ExtHidden      = "x-cli-hidden"
-	ExtList        = "x-cli-list"
-	ExtListFields  = "x-cli-list-fields"
-	ExtName        = "x-cli-name"
-	ExtHelpSection = "x-cli-help-section"
-	ExtNoValidate  = "x-cli-no-validate"
-	ExtWaiters     = "x-cli-waiters"
-)
+// OpenAPI vendor extensions are resolved through the helpers in extensions.go,
+// which walk the canonical x-bartolo-* namespace and its legacy x-cli-*/x-mcp-*
+// aliases. See extensions.go for the full key map and precedence rules.
 
 // Param describes an OpenAPI parameter (path, query, header, etc)
 type Param struct {
@@ -156,6 +147,11 @@ type Operation struct {
 	HelpSection    string
 	CommandPath    string
 	LeafName       string
+	MCP            *MCPTool
+	// CLIExcluded marks an operation that must not generate a CLI command
+	// (x-bartolo-cli-ignore) while still entering the IR so it can be exposed
+	// as an MCP tool and have its generated client func emitted.
+	CLIExcluded bool
 }
 
 // BodyField describes a generated request-body flag for a simple top-level
@@ -181,6 +177,32 @@ type CommandGroup struct {
 	HelpSection string
 	Operations  []*Operation
 	Description string
+}
+
+// cliVisibleOperations returns the operations that generate a CLI command,
+// dropping any marked CLIExcluded (x-bartolo-cli-ignore). CLI-excluded ops still
+// exist in the IR so they can be exposed as MCP tools.
+func cliVisibleOperations(ops []*Operation) []*Operation {
+	out := make([]*Operation, 0, len(ops))
+	for _, op := range ops {
+		if op.CLIExcluded {
+			continue
+		}
+		out = append(out, op)
+	}
+	return out
+}
+
+// HasCLICommands reports whether the group has at least one operation that
+// generates a CLI command. Groups whose operations are all CLI-excluded emit no
+// group command file and are not registered.
+func (g *CommandGroup) HasCLICommands() bool {
+	for _, op := range g.Operations {
+		if !op.CLIExcluded {
+			return true
+		}
+	}
+	return false
 }
 
 // Waiter describes a special command that blocks until a condition has been
@@ -246,6 +268,75 @@ type ProjectConfig struct {
 	LegacyDefaultOutputFormat string `json:"default_output_format,omitempty"`
 	APIKeyEnvVar              string `json:"api_key_env_var,omitempty"`
 	LastSpecPath              string `json:"last_spec_path,omitempty"`
+	// Targets records which surfaces the project generates: "cli" and/or "mcp".
+	// When absent (legacy configs), both surfaces are generated. See
+	// defaultTargets / effectiveTargets.
+	Targets []string `json:"targets,omitempty"`
+}
+
+// defaultTargets is the surface set used when a project does not record an
+// explicit choice: both the CLI commands and the MCP server.
+func defaultTargets() []string {
+	return []string{targetCLI, targetMCP}
+}
+
+const (
+	targetCLI = "cli"
+	targetMCP = "mcp"
+)
+
+// normalizeTargets validates and de-duplicates a list of generation targets,
+// preserving order. Members must be "cli" or "mcp" and the result must be
+// non-empty.
+func normalizeTargets(parts []string) ([]string, error) {
+	seen := make(map[string]bool, len(parts))
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p == "" {
+			continue
+		}
+		if p != targetCLI && p != targetMCP {
+			return nil, fmt.Errorf("invalid target %q (valid targets: %s, %s)", p, targetCLI, targetMCP)
+		}
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("targets cannot be empty (valid targets: %s, %s)", targetCLI, targetMCP)
+	}
+	return out, nil
+}
+
+// parseTargetsFlag parses the scripted `--targets` comma list. An empty value
+// selects the default (both surfaces).
+func parseTargetsFlag(raw string) ([]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return defaultTargets(), nil
+	}
+	return normalizeTargets(strings.Split(raw, ","))
+}
+
+// effectiveTargets returns the recorded targets, defaulting to both surfaces
+// for a nil config or a config without an explicit targets list.
+func (c *ProjectConfig) effectiveTargets() []string {
+	if c == nil || len(c.Targets) == 0 {
+		return defaultTargets()
+	}
+	return c.Targets
+}
+
+// TargetCLI reports whether the CLI command surface should be generated.
+func (c *ProjectConfig) TargetCLI() bool {
+	return containsString(c.effectiveTargets(), targetCLI)
+}
+
+// TargetMCP reports whether the MCP server surface should be generated.
+func (c *ProjectConfig) TargetMCP() bool {
+	return containsString(c.effectiveTargets(), targetMCP)
 }
 
 // AuthDoc describes auth setup to show in a generated README.
@@ -257,6 +348,21 @@ type AuthDoc struct {
 	ProfileCommand  string
 	Summary         string
 	ProfileRequired bool
+	// Schemes documents each recognized security scheme (populated for
+	// multi-scheme and OAuth2 specs). When empty, the single-scheme fields
+	// above drive the README auth section.
+	Schemes []*AuthDocScheme
+	// ManualNotes lists schemes that could not be auto-wired and need manual
+	// setup (openIdConnect, http basic, etc.).
+	ManualNotes []string
+}
+
+// AuthDocScheme documents a single security scheme in a generated README.
+type AuthDocScheme struct {
+	Name     string
+	Kind     string
+	TokenURL string
+	Default  bool
 }
 
 // READMEExample is a copy-pasteable command example for a generated CLI.
@@ -285,9 +391,32 @@ type OpenAPI struct {
 	Operations   []*Operation
 	Waiters      []*Waiter
 	AuthInit     string
-	AuthDoc      *AuthDoc
-	CommandName  string
-	Examples     []*READMEExample
+	// NeedsAPIKeyImport / NeedsOAuthImport tell the client template which auth
+	// runtime packages the emitted AuthInit lines actually reference.
+	NeedsAPIKeyImport bool
+	NeedsOAuthImport  bool
+	// AuthSchemes captures the recognized security schemes emitted into
+	// AuthInit so README generation can document each one.
+	AuthSchemes []*AuthScheme
+	AuthDoc     *AuthDoc
+	CommandName string
+	Examples    []*READMEExample
+	// TargetCLI / TargetMCP select which surfaces the generator emits. Both
+	// default to true (see ProcessAPI) and are overridden from ProjectConfig at
+	// render time. TargetMCP additionally gates HasMCPTools.
+	TargetCLI bool
+	TargetMCP bool
+}
+
+// AuthScheme is a recognized (or explicitly unsupported) OpenAPI security
+// scheme captured during generation for README documentation.
+type AuthScheme struct {
+	Name      string // OpenAPI security scheme name
+	Kind      string // human-readable kind, e.g. "Bearer token", "OAuth2 client credentials"
+	TokenURL  string // OAuth2 token endpoint, when applicable
+	Default   bool   // true for the scheme registered as the default auth type
+	Supported bool   // false → documented as requiring manual setup
+	Manual    string // reason/instructions when unsupported
 }
 
 // CommandsTemplateData describes a generated commands file for either the
@@ -303,23 +432,48 @@ type CommandsTemplateData struct {
 // ProcessAPI returns the API description to be used with the commands template
 // for a loaded and dereferenced OpenAPI 3 document.
 func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
+	b := newIRBuilder(newOpenAPI(shortName, api), api.Tags)
+
+	paths := slices.Sorted(maps.Keys(api.Paths.Map()))
+	for _, path := range paths {
+		b.addPath(path, api.Paths.Value(path))
+	}
+	b.collectGroups()
+
+	assignMCPToolNames(b.result)
+	b.addWaiters(api.Extensions)
+
+	return b.result
+}
+
+// newOpenAPI builds the API-level part of the IR: names, description, auth,
+// and servers.
+func newOpenAPI(shortName string, api *openapi3.T) *OpenAPI {
 	apiName := shortName
-	if api.Info.Extensions[ExtName] != nil {
-		apiName = extStr(api.Info.Extensions[ExtName])
+	if name := extString(api.Info.Extensions, extKeyName); name != "" {
+		apiName = name
 	}
 
 	apiDescription := api.Info.Description
-	if api.Info.Extensions[ExtDescription] != nil {
-		apiDescription = extStr(api.Info.Extensions[ExtDescription])
+	if description, ok := extValue(api.Info.Extensions, extKeyDescription); ok {
+		apiDescription = extStr(description)
 	}
 
+	authInit, needsAPIKey, needsOAuth, authSchemes := buildAuthInit(api)
 	result := &OpenAPI{
-		Name:         apiName,
-		GoName:       toGoName(shortName, false),
-		PublicGoName: toGoName(shortName, true),
-		Title:        api.Info.Title,
-		Description:  escapeString(apiDescription),
-		AuthInit:     getAuthInit(api),
+		Name:              apiName,
+		GoName:            toGoName(shortName, false),
+		PublicGoName:      toGoName(shortName, true),
+		Title:             api.Info.Title,
+		Description:       escapeString(apiDescription),
+		AuthInit:          authInit,
+		NeedsAPIKeyImport: needsAPIKey,
+		NeedsOAuthImport:  needsOAuth,
+		AuthSchemes:       authSchemes,
+		// Both surfaces default on; generateFromSpec overrides these from the
+		// project's recorded targets before rendering.
+		TargetCLI: true,
+		TargetMCP: true,
 	}
 
 	for _, s := range api.Servers {
@@ -328,368 +482,450 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 			URL:         s.URL,
 		})
 	}
+	return result
+}
 
-	// Convenience map for operation ID -> operation
-	operationMap := make(map[string]*Operation)
-	usedGoNames := make(map[string]bool)
-	tagDefs := make(map[string]*openapi3.Tag)
-	groupMap := make(map[string]*CommandGroup)
-	groupOrder := make([]string, 0)
+// irBuilder accumulates operations and groups into an OpenAPI IR while
+// ProcessAPI walks the paths.
+type irBuilder struct {
+	result *OpenAPI
+	// operations maps operation IDs to operations, for waiters.
+	operations  map[string]*Operation
+	usedGoNames map[string]bool
+	tagDefs     map[string]*openapi3.Tag
+	groups      map[string]*CommandGroup
+	groupOrder  []string
+}
 
-	for _, tag := range api.Tags {
-		if tag == nil {
-			continue
-		}
-		tagDefs[tag.Name] = tag
+func newIRBuilder(result *OpenAPI, tags openapi3.Tags) *irBuilder {
+	b := &irBuilder{
+		result:      result,
+		operations:  make(map[string]*Operation),
+		usedGoNames: make(map[string]bool),
+		tagDefs:     make(map[string]*openapi3.Tag),
+		groups:      make(map[string]*CommandGroup),
 	}
-
-	var keys []string
-	for path := range api.Paths.Map() {
-		keys = append(keys, path)
-	}
-	sort.Strings(keys)
-
-	for _, path := range keys {
-		item := api.Paths.Value(path)
-
-		if item.Extensions[ExtIgnore] != nil {
-			// Ignore this path.
-			continue
-		}
-
-		pathHidden := false
-		if item.Extensions[ExtHidden] != nil {
-			mustDecodeExt(item.Extensions[ExtHidden], &pathHidden)
-		}
-
-		methods := make([]string, 0, len(item.Operations()))
-		for method := range item.Operations() {
-			methods = append(methods, method)
-		}
-		sort.Strings(methods)
-
-		for _, method := range methods {
-			operation := item.Operations()[method]
-			if operation.Extensions[ExtIgnore] != nil {
-				// Ignore this operation.
-				continue
-			}
-
-			name := operation.OperationID
-			if name == "" {
-				// Generate a name from the method and path when operationId is missing
-				name = strings.ToLower(method) + strings.Replace(strings.Replace(path, "/", "-", -1), "{", "", -1)
-				name = strings.Replace(name, "}", "", -1)
-				name = strings.Trim(name, "-")
-			}
-			explicitLeafName := getPreferredStringExt(operation.Extensions, ExtName)
-			leafName := explicitLeafName
-			if leafName == "" {
-				leafName = name
-			}
-
-			var aliases []string
-			if operation.Extensions[ExtAliases] != nil {
-				// We need to decode the extension value into our string slice.
-				mustDecodeExt(operation.Extensions[ExtAliases], &aliases)
-			}
-
-			var listFields []string
-			if operation.Extensions[ExtListFields] != nil {
-				mustDecodeExt(operation.Extensions[ExtListFields], &listFields)
-			}
-			listOverride := extBool(operation.Extensions[ExtList])
-			hasListOverride := operation.Extensions[ExtList] != nil
-			if hasListOverride && !listOverride && len(listFields) > 0 {
-				panic(fmt.Errorf("%s %s: %s is false but %s declares columns; remove one of them",
-					strings.ToUpper(method), path, ExtList, ExtListFields))
-			}
-			markedList := len(listFields) > 0 || listOverride
-			inferenceDisabled := hasListOverride && !listOverride
-			isList := markedList || (!inferenceDisabled && isInferredList(method, path, operation))
-
-			params := getParams(item, method)
-			requiredParams := getRequiredParams(params)
-			optionalParams := getOptionalParams(params)
-			short := operation.Summary
-			shortExplicit := short != ""
-
-			description := operation.Description
-			if operation.Extensions[ExtDescription] != nil {
-				description = extStr(operation.Extensions[ExtDescription])
-			}
-
-			reqInfo := getRequestInfo(operation)
-			reqMt, reqSchema, reqExamples, bodyFields := reqInfo.mediaType, reqInfo.summary, reqInfo.examples, reqInfo.bodyFields
-
-			renamedFlags := reserveGeneratedFlagNames(bodyFields, optionalParams)
-			for _, r := range renamedFlags {
-				kind, _ := bartolocli.ReservedFlagName(r.From)
-				if kind == "" {
-					kind = "another flag on this command"
-				}
-				log.Printf("warning: %s %s: --%s collides with %s, exposing it as --%s", method, path, r.From, kind, r.To)
-			}
-
-			var examples []string
-			if len(reqExamples) > 0 {
-				wroteHeader := false
-				for _, ex := range reqExamples {
-					if _, ok := ex.(string); !ok {
-						// Not a string, so it's structured data. Let's marshal it to the
-						// shorthand syntax if we can.
-						if m, ok := ex.(map[string]interface{}); ok {
-							ex = shorthand.Get(m)
-							examples = append(examples, ex.(string))
-							continue
-						}
-
-						b, _ := json.Marshal(ex)
-
-						if !wroteHeader {
-							description += "\n## Input Example\n\n"
-							wroteHeader = true
-						}
-
-						description += "\n" + string(b) + "\n"
-						continue
-					}
-
-					if !wroteHeader {
-						description += "\n## Input Example\n\n"
-						wroteHeader = true
-					}
-
-					description += "\n" + ex.(string) + "\n"
-				}
-			}
-
-			if reqSchema != "" {
-				description += "\n\n" + reqSchema
-			}
-			if len(bodyFields) > 0 {
-				description += "\n\nAll top-level body fields are exposed as flags for this command. " +
-					"Scalar, nullable scalar (pass `null` for JSON null), enum, repeatable list (`--field a --field b`), " +
-					"and string map (`--field key=value`) fields use typed flags. " +
-					"Nested objects, arrays of objects, and polymorphic unions accept a JSON string (e.g. `--field '{\"k\":1}'`)."
-				// An enum or array date-time keeps its own flag type and is sent
-				// as typed, so the syntax must not be promised there.
-				if slices.ContainsFunc(bodyFields, func(f *BodyField) bool {
-					return f != nil && (f.Type == "datetime" || f.Type == "datetime-nullable")
-				}) {
-					description += " Timestamp fields (`format: date-time`) also accept a bare date or a relative value such as `24h`, `7d` or `now-24h`."
-				}
-			}
-			if len(renamedFlags) > 0 {
-				description += "\n\nRenamed flags (the original names belong to global flags):\n"
-				for _, r := range renamedFlags {
-					description += fmt.Sprintf("- `%s` is `--%s` (not `--%s`)\n", r.Field, r.To, r.From)
-				}
-			}
-
-			method := strings.Title(strings.ToLower(method))
-
-			hidden := pathHidden
-			if operation.Extensions[ExtHidden] != nil {
-				mustDecodeExt(operation.Extensions[ExtHidden], &hidden)
-			}
-
-			group := resolveCommandGroup(path, operation, tagDefs)
-			if group != nil {
-				if existing := groupMap[group.CLIName]; existing != nil {
-					group = existing
-				} else {
-					groupMap[group.CLIName] = group
-					groupOrder = append(groupOrder, group.CLIName)
-				}
-
-				leafName = inferGroupedLeafName(leafName, strings.ToLower(method), path, group.CLIName, explicitLeafName != "")
-				if leafName == "" {
-					leafName = slug(method)
-				}
-			}
-
-			if !shortExplicit {
-				short = displayNameFromSlug(leafName)
-				if short == "" {
-					short = leafName
-				}
-			}
-
-			if args := requiredArgsHelp(requiredParams); args != "" {
-				// Cobra prints Long or Short, never both, so a Long that exists
-				// only for this section still has to carry the summary.
-				if description == "" {
-					description = short
-				}
-				description += args
-			}
-
-			use := usage(leafName, requiredParams)
-			commandPath := use
-			if group != nil {
-				commandPath = group.CLIName + " " + use
-			}
-
-			returnType := "interface{}"
-		returnTypeLoop:
-			for code, ref := range operation.Responses.Map() {
-				if num, err := strconv.Atoi(code); err != nil || num < 200 || num >= 300 {
-					// Skip invalid responses
-					continue
-				}
-
-				if ref.Value != nil {
-					for _, content := range ref.Value.Content {
-						if _, ok := content.Example.(map[string]interface{}); ok {
-							returnType = "map[string]interface{}"
-							break returnTypeLoop
-						}
-
-						if content.Schema != nil && content.Schema.Value != nil {
-							if content.Schema.Value.Type.Is("object") || len(content.Schema.Value.Properties) != 0 {
-								returnType = "map[string]interface{}"
-								break returnTypeLoop
-							}
-						}
-					}
-				}
-			}
-
-			// Two operations can share an operationId.
-			goName := toGoName(name, true)
-			for suffix := 2; usedGoNames[goName]; suffix++ {
-				goName = toGoName(name, true) + strconv.Itoa(suffix)
-			}
-			usedGoNames[goName] = true
-
-			o := &Operation{
-				HandlerName:    commandPath,
-				GoName:         goName,
-				PublicPrefix:   result.PublicGoName,
-				Use:            use,
-				Aliases:        aliases,
-				Short:          short,
-				Long:           escapeString(description),
-				Method:         method,
-				CanHaveBody:    operation.RequestBody != nil && operation.RequestBody.Value != nil,
-				ReturnType:     returnType,
-				Path:           path,
-				AllParams:      params,
-				RequiredParams: requiredParams,
-				OptionalParams: optionalParams,
-				MediaType:      reqMt,
-				Examples:       examples,
-				BodyExample:    reqInfo.exampleBody,
-				BodyFields:     bodyFields,
-				Hidden:         hidden,
-				IsList:         isList,
-				ListFields:     listFields,
-				Group:          group,
-				HelpSection:    getPreferredStringExt(operation.Extensions, ExtHelpSection),
-				CommandPath:    commandPath,
-				LeafName:       leafName,
-			}
-
-			operationMap[operation.OperationID] = o
-			if group != nil {
-				group.Operations = append(group.Operations, o)
-			} else {
-				result.Operations = append(result.Operations, o)
-			}
-
-			for _, p := range params {
-				if p.In == "path" {
-					result.Imports.Strings = true
-					result.Imports.Url = true
-				}
-			}
-
-			for _, p := range optionalParams {
-				if p.In == "query" || p.In == "header" {
-					result.Imports.Fmt = true
-				}
-			}
+	for _, tag := range tags {
+		if tag != nil {
+			b.tagDefs[tag.Name] = tag
 		}
 	}
+	return b
+}
 
-	for _, key := range groupOrder {
-		group := groupMap[key]
+// pathScope is what a path item contributes to each of its operations.
+type pathScope struct {
+	path string
+	item *openapi3.PathItem
+	// hidden is the path-level x-bartolo-hidden default.
+	hidden bool
+	// cliExcluded is the path-level x-bartolo-cli-ignore: every operation under
+	// the path stays out of the CLI while still allowing MCP tools.
+	cliExcluded bool
+}
+
+// addPath adds the operations under one path, in sorted method order.
+func (b *irBuilder) addPath(path string, item *openapi3.PathItem) {
+	if sharedIgnored(item.Extensions) {
+		// Ignore this path everywhere (CLI and MCP).
+		return
+	}
+
+	scope := pathScope{path: path, item: item, cliExcluded: cliIgnored(item.Extensions)}
+	if hidden, ok := extValue(item.Extensions, extKeyHidden); ok {
+		mustDecodeExt(hidden, &scope.hidden)
+	}
+
+	operations := item.Operations()
+	for _, method := range slices.Sorted(maps.Keys(operations)) {
+		b.addOperation(scope, method, operations[method])
+	}
+}
+
+// addOperation builds one operation's IR and files it under its group (or the
+// root). httpMethod is the method as the path item keys it.
+func (b *irBuilder) addOperation(scope pathScope, httpMethod string, operation *openapi3.Operation) {
+	if sharedIgnored(operation.Extensions) {
+		// Ignore this operation everywhere (CLI and MCP).
+		return
+	}
+	path := scope.path
+
+	name := operationName(httpMethod, path, operation)
+	explicitLeafName := extString(operation.Extensions, extKeyName)
+	leafName := cmp.Or(explicitLeafName, name)
+
+	var aliases []string
+	if a, ok := extValue(operation.Extensions, extKeyAliases); ok {
+		mustDecodeExt(a, &aliases)
+	}
+	listFields, isList := classifyList(httpMethod, path, operation)
+
+	params := getParams(scope.item, httpMethod)
+	requiredParams := getRequiredParams(params)
+	optionalParams := getOptionalParams(params)
+
+	reqInfo := getRequestInfo(operation)
+	renamedFlags := reserveGeneratedFlagNames(reqInfo.bodyFields, optionalParams)
+	warnRenamedFlags(httpMethod, path, renamedFlags)
+	description, examples := operationDescription(operation, reqInfo, renamedFlags)
+
+	method := strings.Title(strings.ToLower(httpMethod))
+	group, leafName := b.resolveGroup(path, operation, leafName, method, explicitLeafName != "")
+	short := operationShort(operation.Summary, leafName)
+	if args := requiredArgsHelp(requiredParams); args != "" {
+		// Cobra prints Long or Short, never both, so a Long that exists
+		// only for this section still has to carry the summary.
+		description = cmp.Or(description, short) + args
+	}
+
+	use := usage(leafName, requiredParams)
+	commandPath := use
+	if group != nil {
+		commandPath = group.CLIName + " " + use
+	}
+
+	o := &Operation{
+		HandlerName:    commandPath,
+		GoName:         b.uniqueGoName(name),
+		PublicPrefix:   b.result.PublicGoName,
+		Use:            use,
+		Aliases:        aliases,
+		Short:          short,
+		Long:           escapeString(description),
+		Method:         method,
+		CanHaveBody:    operation.RequestBody != nil && operation.RequestBody.Value != nil,
+		ReturnType:     operationReturnType(operation),
+		Path:           path,
+		AllParams:      params,
+		RequiredParams: requiredParams,
+		OptionalParams: optionalParams,
+		MediaType:      reqInfo.mediaType,
+		Examples:       examples,
+		BodyExample:    reqInfo.exampleBody,
+		BodyFields:     reqInfo.bodyFields,
+		Hidden:         operationHidden(scope.hidden, operation),
+		IsList:         isList,
+		ListFields:     listFields,
+		Group:          group,
+		HelpSection:    extString(operation.Extensions, extKeyHelpSection),
+		CommandPath:    commandPath,
+		LeafName:       leafName,
+		// The op still enters the IR (so it can become an MCP tool) but is
+		// excluded from CLI command generation.
+		CLIExcluded: scope.cliExcluded || cliIgnored(operation.Extensions),
+	}
+	o.MCP = buildMCPTool(o, operation, scope.item)
+
+	b.register(o, operation.OperationID)
+}
+
+// register files an operation under its group (or the root), indexes it by
+// operation ID, and records the imports its client func needs.
+func (b *irBuilder) register(o *Operation, operationID string) {
+	b.operations[operationID] = o
+	if o.Group != nil {
+		o.Group.Operations = append(o.Group.Operations, o)
+	} else {
+		b.result.Operations = append(b.result.Operations, o)
+	}
+
+	if slices.ContainsFunc(o.AllParams, func(p *Param) bool { return p.In == "path" }) {
+		b.result.Imports.Strings = true
+		b.result.Imports.Url = true
+	}
+	if slices.ContainsFunc(o.OptionalParams, func(p *Param) bool { return p.In == "query" || p.In == "header" }) {
+		b.result.Imports.Fmt = true
+	}
+}
+
+// resolveGroup finds the operation's command group, reusing the group already
+// built for the same CLI name, and infers the leaf name within it.
+func (b *irBuilder) resolveGroup(path string, operation *openapi3.Operation, leafName, method string, explicit bool) (*CommandGroup, string) {
+	group := resolveCommandGroup(path, operation, b.tagDefs)
+	if group == nil {
+		return nil, leafName
+	}
+	if existing := b.groups[group.CLIName]; existing != nil {
+		group = existing
+	} else {
+		b.groups[group.CLIName] = group
+		b.groupOrder = append(b.groupOrder, group.CLIName)
+	}
+
+	leafName = inferGroupedLeafName(leafName, strings.ToLower(method), path, group.CLIName, explicit)
+	if leafName == "" {
+		leafName = slug(method)
+	}
+	return group, leafName
+}
+
+// collectGroups appends the groups in first-seen order, each with its
+// operations sorted by command path.
+func (b *irBuilder) collectGroups() {
+	for _, key := range b.groupOrder {
+		group := b.groups[key]
 		sort.Slice(group.Operations, func(i, j int) bool {
 			return group.Operations[i].CommandPath < group.Operations[j].CommandPath
 		})
-		result.Groups = append(result.Groups, group)
+		b.result.Groups = append(b.result.Groups, group)
+	}
+}
+
+// uniqueGoName returns the exported Go name for an operation, numbered when
+// two operations share an operationId.
+func (b *irBuilder) uniqueGoName(name string) string {
+	goName := toGoName(name, true)
+	for suffix := 2; b.usedGoNames[goName]; suffix++ {
+		goName = toGoName(name, true) + strconv.Itoa(suffix)
+	}
+	b.usedGoNames[goName] = true
+	return goName
+}
+
+// operationName is the operationId, or one generated from the method and path
+// when it is missing.
+func operationName(httpMethod, path string, operation *openapi3.Operation) string {
+	if operation.OperationID != "" {
+		return operation.OperationID
+	}
+	name := strings.ToLower(httpMethod) + strings.Replace(strings.Replace(path, "/", "-", -1), "{", "", -1)
+	name = strings.Replace(name, "}", "", -1)
+	return strings.Trim(name, "-")
+}
+
+// classifyList returns the declared list columns and whether the operation
+// renders as a collection: marked by x-bartolo-list or x-bartolo-list-fields,
+// or inferred, unless x-bartolo-list: false turns inference off.
+func classifyList(httpMethod, path string, operation *openapi3.Operation) ([]string, bool) {
+	var listFields []string
+	if fields, ok := extValue(operation.Extensions, extKeyListFields); ok {
+		mustDecodeExt(fields, &listFields)
 	}
 
-	if api.Extensions[ExtWaiters] != nil {
-		var waiters map[string]*Waiter
+	listExt, hasOverride := extValue(operation.Extensions, extKeyList)
+	override := extBool(listExt)
+	if hasOverride && !override {
+		if len(listFields) > 0 {
+			panic(fmt.Errorf("%s %s: %s is false but %s declares columns; remove one of them",
+				strings.ToUpper(httpMethod), path, "x-bartolo-list", "x-bartolo-list-fields"))
+		}
+		return listFields, false
+	}
+	return listFields, len(listFields) > 0 || override || isInferredList(httpMethod, path, operation)
+}
 
-		mustDecodeExt(api.Extensions[ExtWaiters], &waiters)
+func warnRenamedFlags(httpMethod, path string, renamed []renamedFlag) {
+	for _, r := range renamed {
+		kind, _ := bartolocli.ReservedFlagName(r.From)
+		if kind == "" {
+			kind = "another flag on this command"
+		}
+		log.Printf("warning: %s %s: --%s collides with %s, exposing it as --%s", httpMethod, path, r.From, kind, r.To)
+	}
+}
 
-		for name, waiter := range waiters {
-			waiter.CLIName = slug(name)
-			waiter.GoName = toGoName(name+"-waiter", true)
-			waiter.Operation = operationMap[waiter.OperationID]
-			waiter.Use = usage(name, waiter.Operation.RequiredParams)
+// operationDescription assembles the command's long help: the description (or
+// its x-bartolo-description override), input examples, the request schema
+// summary, and notes on body-field flags and renamed flags. Structured
+// examples become shorthand examples instead.
+func operationDescription(operation *openapi3.Operation, reqInfo requestInfo, renamed []renamedFlag) (string, []string) {
+	description := operation.Description
+	if d, ok := extValue(operation.Extensions, extKeyDescription); ok {
+		description = extStr(d)
+	}
 
-			for _, matcher := range waiter.Matchers {
-				if matcher.Test == "" {
-					matcher.Test = "equal"
-				}
-			}
+	description, examples := appendInputExamples(description, reqInfo.examples)
+	if reqInfo.summary != "" {
+		description += "\n\n" + reqInfo.summary
+	}
+	description += bodyFieldsHelp(reqInfo.bodyFields)
+	description += renamedFlagsHelp(renamed)
+	return description, examples
+}
 
-			for operationID, waitOpParams := range waiter.After {
-				op := operationMap[operationID]
-				if op == nil {
-					panic(fmt.Errorf("Unknown waiter operation %s", operationID))
-				}
-
-				var args []string
-				for _, p := range op.RequiredParams {
-					selector := waitOpParams[p.Name]
-					if selector == "" {
-						panic(fmt.Errorf("Missing required parameter %s", p.Name))
-					}
-					delete(waitOpParams, p.Name)
-
-					args = append(args, selector)
-
-					result.Imports.Fmt = true
-					op.NeedsResponse = true
-				}
-
-				// Transform from OpenAPI param names to CLI names
-				wParams := make(map[string]string)
-				for p, s := range waitOpParams {
-					found := false
-					for _, optional := range op.OptionalParams {
-						if optional.Name == p {
-							wParams[optional.CLIName] = s
-							found = true
-							break
-						}
-					}
-					if !found {
-						panic(fmt.Errorf("Unknown parameter %s for waiter %s", p, name))
-					}
-				}
-
-				op.Waiters = append(op.Waiters, &WaiterParams{
-					Waiter: waiter,
-					Args:   args,
-					Params: wParams,
-				})
-			}
-
-			result.Waiters = append(result.Waiters, waiter)
+// appendInputExamples turns object examples into shorthand examples and
+// appends every other example to the description under an Input Example
+// heading.
+func appendInputExamples(description string, examples []interface{}) (string, []string) {
+	var shorthandExamples []string
+	wroteHeader := false
+	for _, ex := range examples {
+		if m, ok := ex.(map[string]interface{}); ok {
+			shorthandExamples = append(shorthandExamples, shorthand.Get(m))
+			continue
 		}
 
-		if len(waiters) > 0 {
-			result.Imports.Time = true
+		text, ok := ex.(string)
+		if !ok {
+			b, _ := json.Marshal(ex)
+			text = string(b)
+		}
+		if !wroteHeader {
+			description += "\n## Input Example\n\n"
+			wroteHeader = true
+		}
+		description += "\n" + text + "\n"
+	}
+	return description, shorthandExamples
+}
+
+func bodyFieldsHelp(bodyFields []*BodyField) string {
+	if len(bodyFields) == 0 {
+		return ""
+	}
+	help := "\n\nAll top-level body fields are exposed as flags for this command. " +
+		"Scalar, nullable scalar (pass `null` for JSON null), enum, repeatable list (`--field a --field b`), " +
+		"and string map (`--field key=value`) fields use typed flags. " +
+		"Nested objects, arrays of objects, and polymorphic unions accept a JSON string (e.g. `--field '{\"k\":1}'`)."
+	// An enum or array date-time keeps its own flag type and is sent
+	// as typed, so the syntax must not be promised there.
+	if slices.ContainsFunc(bodyFields, func(f *BodyField) bool {
+		return f != nil && (f.Type == "datetime" || f.Type == "datetime-nullable")
+	}) {
+		help += " Timestamp fields (`format: date-time`) also accept a bare date or a relative value such as `24h`, `7d` or `now-24h`."
+	}
+	return help
+}
+
+func renamedFlagsHelp(renamed []renamedFlag) string {
+	if len(renamed) == 0 {
+		return ""
+	}
+	help := "\n\nRenamed flags (the original names belong to global flags):\n"
+	for _, r := range renamed {
+		help += fmt.Sprintf("- `%s` is `--%s` (not `--%s`)\n", r.Field, r.To, r.From)
+	}
+	return help
+}
+
+// operationShort is the summary, or a display name derived from the leaf name.
+func operationShort(summary, leafName string) string {
+	if summary != "" {
+		return summary
+	}
+	return cmp.Or(displayNameFromSlug(leafName), leafName)
+}
+
+// operationHidden applies an operation's x-bartolo-hidden over the path's.
+func operationHidden(pathHidden bool, operation *openapi3.Operation) bool {
+	hidden := pathHidden
+	if h, ok := extValue(operation.Extensions, extKeyHidden); ok {
+		mustDecodeExt(h, &hidden)
+	}
+	return hidden
+}
+
+// operationReturnType is map[string]interface{} when any 2xx response carries
+// an object (by example or schema), else interface{}.
+func operationReturnType(operation *openapi3.Operation) string {
+	for code, ref := range operation.Responses.Map() {
+		if num, err := strconv.Atoi(code); err != nil || num < 200 || num >= 300 || ref.Value == nil {
+			continue
+		}
+		if slices.ContainsFunc(slices.Collect(maps.Values(ref.Value.Content)), mediaTypeIsObject) {
+			return "map[string]interface{}"
+		}
+	}
+	return "interface{}"
+}
+
+func mediaTypeIsObject(content *openapi3.MediaType) bool {
+	if _, ok := content.Example.(map[string]interface{}); ok {
+		return true
+	}
+	schema := content.Schema
+	return schema != nil && schema.Value != nil && (schema.Value.Type.Is("object") || len(schema.Value.Properties) != 0)
+}
+
+// addWaiters wires the x-bartolo-waiters extension: each waiter command, and
+// the follow-up flags on the operations it runs after. Waiters are processed in
+// name order so the generated output is reproducible.
+func (b *irBuilder) addWaiters(ext map[string]interface{}) {
+	w, ok := extValue(ext, extKeyWaiters)
+	if !ok {
+		return
+	}
+
+	var waiters map[string]*Waiter
+	mustDecodeExt(w, &waiters)
+	for _, name := range slices.Sorted(maps.Keys(waiters)) {
+		b.result.Waiters = append(b.result.Waiters, b.buildWaiter(name, waiters[name]))
+	}
+	if len(waiters) > 0 {
+		b.result.Imports.Time = true
+	}
+}
+
+func (b *irBuilder) buildWaiter(name string, waiter *Waiter) *Waiter {
+	waiter.CLIName = slug(name)
+	waiter.GoName = toGoName(name+"-waiter", true)
+	waiter.Operation = b.operations[waiter.OperationID]
+	if waiter.Operation == nil {
+		panic(fmt.Errorf("Unknown waiter operation %s", waiter.OperationID))
+	}
+	waiter.Use = usage(name, waiter.Operation.RequiredParams)
+
+	for _, matcher := range waiter.Matchers {
+		if matcher.Test == "" {
+			matcher.Test = "equal"
 		}
 	}
 
-	return result
+	for _, operationID := range slices.Sorted(maps.Keys(waiter.After)) {
+		b.attachWaiter(name, waiter, operationID, waiter.After[operationID])
+	}
+	return waiter
+}
+
+// attachWaiter adds the follow-up waiter to the operation it runs after.
+// selectors map that operation's parameter names to response selectors: the
+// required ones become the waiter's arguments, the rest its flags.
+func (b *irBuilder) attachWaiter(name string, waiter *Waiter, operationID string, selectors map[string]string) {
+	op := b.operations[operationID]
+	if op == nil {
+		panic(fmt.Errorf("Unknown waiter operation %s", operationID))
+	}
+
+	args := waiterArgs(op, selectors)
+	if len(args) > 0 {
+		b.result.Imports.Fmt = true
+		op.NeedsResponse = true
+	}
+
+	op.Waiters = append(op.Waiters, &WaiterParams{
+		Waiter: waiter,
+		Args:   args,
+		Params: waiterFlags(name, op, selectors),
+	})
+}
+
+// waiterArgs consumes the selectors for op's required parameters, in order.
+func waiterArgs(op *Operation, selectors map[string]string) []string {
+	var args []string
+	for _, p := range op.RequiredParams {
+		selector := selectors[p.Name]
+		if selector == "" {
+			panic(fmt.Errorf("Missing required parameter %s", p.Name))
+		}
+		delete(selectors, p.Name)
+		args = append(args, selector)
+	}
+	return args
+}
+
+// waiterFlags maps the remaining selectors from OpenAPI parameter names to the
+// CLI names of op's optional parameters.
+func waiterFlags(name string, op *Operation, selectors map[string]string) map[string]string {
+	flags := make(map[string]string)
+	for param, selector := range selectors {
+		i := slices.IndexFunc(op.OptionalParams, func(optional *Param) bool { return optional.Name == param })
+		if i < 0 {
+			panic(fmt.Errorf("Unknown parameter %s for waiter %s", param, name))
+		}
+		flags[op.OptionalParams[i].CLIName] = selector
+	}
+	return flags
 }
 
 // extBool returns the boolean value of an OpenAPI extension. A missing
@@ -842,19 +1078,8 @@ func normalizeSpecName(filename string) string {
 	return slug(stem)
 }
 
-func getPreferredStringExt(extensions map[string]interface{}, keys ...string) string {
-	for _, key := range keys {
-		if extensions == nil || extensions[key] == nil {
-			continue
-		}
-		return extStr(extensions[key])
-	}
-
-	return ""
-}
-
 func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map[string]*openapi3.Tag) *CommandGroup {
-	groupName := getPreferredStringExt(operation.Extensions, ExtGroup)
+	groupName := extString(operation.Extensions, extKeyGroup)
 	var tagDef *openapi3.Tag
 
 	if groupName == "" && len(operation.Tags) > 0 {
@@ -880,10 +1105,10 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 	hidden := false
 
 	if tagDef != nil {
-		if override := getPreferredStringExt(tagDef.Extensions, ExtName); override != "" {
+		if override := extString(tagDef.Extensions, extKeyName); override != "" {
 			cliName = slug(override)
 		}
-		if description := getPreferredStringExt(tagDef.Extensions, ExtDescription); description != "" {
+		if description := extString(tagDef.Extensions, extKeyDescription); description != "" {
 			long = description
 		} else {
 			long = tagDef.Description
@@ -894,20 +1119,20 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		if tagDef.Name != "" {
 			short = tagDef.Name
 		}
-		if tagDef.Extensions[ExtAliases] != nil {
-			mustDecodeExt(tagDef.Extensions[ExtAliases], &aliases)
+		if a, ok := extValue(tagDef.Extensions, extKeyAliases); ok {
+			mustDecodeExt(a, &aliases)
 		}
-		if tagDef.Extensions[ExtHidden] != nil {
-			mustDecodeExt(tagDef.Extensions[ExtHidden], &hidden)
+		if h, ok := extValue(tagDef.Extensions, extKeyHidden); ok {
+			mustDecodeExt(h, &hidden)
 		}
-		section = getPreferredStringExt(tagDef.Extensions, ExtHelpSection)
+		section = extString(tagDef.Extensions, extKeyHelpSection)
 	}
 
-	if override := getPreferredStringExt(operation.Extensions, ExtGroup); override != "" {
+	if override := extString(operation.Extensions, extKeyGroup); override != "" {
 		cliName = slug(override)
 	}
 
-	if override := getPreferredStringExt(operation.Extensions, ExtHelpSection); override != "" {
+	if override := extString(operation.Extensions, extKeyHelpSection); override != "" {
 		section = override
 	}
 
@@ -1326,7 +1551,7 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 	total = append(total, operation.Parameters...)
 
 	for _, p := range total {
-		if p.Value != nil && p.Value.Extensions[ExtIgnore] == nil {
+		if p.Value != nil && !sharedIgnored(p.Value.Extensions) {
 			t := "string"
 			tn := "\"\""
 			if p.Value.Schema != nil && p.Value.Schema.Value != nil && p.Value.Schema.Value.Type != nil {
@@ -1346,7 +1571,7 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 			var enum []string
 			var format string
 			if t == "string" && p.Value.Schema != nil {
-				noValidate := extBool(p.Value.Extensions[ExtNoValidate])
+				noValidate := extBool(extValueOrNil(p.Value.Extensions, extKeyNoValidate))
 				if !noValidate {
 					enum = enumStrings(p.Value.Schema.Value)
 				}
@@ -1360,13 +1585,13 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 			}
 
 			cliName := slug(p.Value.Name)
-			if p.Value.Extensions[ExtName] != nil {
-				cliName = extStr(p.Value.Extensions[ExtName])
+			if name := extString(p.Value.Extensions, extKeyName); name != "" {
+				cliName = name
 			}
 
 			description := p.Value.Description
-			if p.Value.Extensions[ExtDescription] != nil {
-				description = extStr(p.Value.Extensions[ExtDescription])
+			if d, ok := extValue(p.Value.Extensions, extKeyDescription); ok {
+				description = extStr(d)
 			}
 			// A parameter description reaches the user as one line of flag
 			// usage or one bullet of the Arguments section, so a spec's
@@ -1599,7 +1824,7 @@ func getBodyFields(schema *openapi3.Schema) []*BodyField {
 		if ref == nil || ref.Value == nil {
 			continue
 		}
-		if ref.Value.Extensions != nil && ref.Value.Extensions[ExtIgnore] != nil {
+		if sharedIgnored(ref.Value.Extensions) {
 			continue
 		}
 
@@ -1609,12 +1834,12 @@ func getBodyFields(schema *openapi3.Schema) []*BodyField {
 		}
 
 		cliName := slug(name)
-		if ref.Value.Extensions != nil && ref.Value.Extensions[ExtName] != nil {
-			cliName = extStr(ref.Value.Extensions[ExtName])
+		if name := extString(ref.Value.Extensions, extKeyName); name != "" {
+			cliName = name
 		}
 		description := ref.Value.Description
-		if ref.Value.Extensions != nil && ref.Value.Extensions[ExtDescription] != nil {
-			description = extStr(ref.Value.Extensions[ExtDescription])
+		if d, ok := extValue(ref.Value.Extensions, extKeyDescription); ok {
+			description = extStr(d)
 		}
 
 		fields = append(fields, &BodyField{
@@ -1755,137 +1980,43 @@ func unionHasStringBranch(schema *openapi3.Schema) bool {
 // branch enums instead of just the first branch's values. Returns the schema
 // unchanged when there is nothing to merge.
 func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
-	if schema == nil {
-		return schema
-	}
-	if len(schema.AllOf) == 0 && len(schema.OneOf) == 0 && len(schema.AnyOf) == 0 {
+	if schema == nil || (len(schema.AllOf) == 0 && len(schema.OneOf) == 0 && len(schema.AnyOf) == 0) {
 		return schema
 	}
 
-	merged := &openapi3.Schema{
-		Type:       &openapi3.Types{"object"},
-		Properties: openapi3.Schemas{},
-	}
-
-	// Properties collected from the host schema or an `allOf` branch are
-	// authoritative constraints and are never widened by union branches.
-	protected := map[string]struct{}{}
-
-	collectProps := func(src *openapi3.Schema) {
-		if src == nil {
-			return
-		}
-		for name, ref := range src.Properties {
-			if _, exists := merged.Properties[name]; !exists {
-				merged.Properties[name] = ref
-				protected[name] = struct{}{}
-			}
-		}
-		if src.AdditionalProperties.Schema != nil && merged.AdditionalProperties.Schema == nil {
-			merged.AdditionalProperties.Schema = src.AdditionalProperties.Schema
-		}
-		if src.AdditionalProperties.Has != nil && merged.AdditionalProperties.Has == nil {
-			merged.AdditionalProperties.Has = src.AdditionalProperties.Has
-		}
-	}
-
-	// collectUnionProps is collectProps for `oneOf`/`anyOf` branches: a value
-	// only has to satisfy one branch, so when the same property collides
-	// across branches its string enums are unioned rather than first-wins.
-	collectUnionProps := func(src *openapi3.Schema) {
-		if src == nil {
-			return
-		}
-		for name, ref := range src.Properties {
-			existing, exists := merged.Properties[name]
-			if !exists {
-				merged.Properties[name] = ref
-				continue
-			}
-			if _, ok := protected[name]; ok {
-				continue
-			}
-			if widened := unionEnumSchema(existing, ref); widened != nil {
-				merged.Properties[name] = widened
-			}
-		}
-		if src.AdditionalProperties.Schema != nil && merged.AdditionalProperties.Schema == nil {
-			merged.AdditionalProperties.Schema = src.AdditionalProperties.Schema
-		}
-		if src.AdditionalProperties.Has != nil && merged.AdditionalProperties.Has == nil {
-			merged.AdditionalProperties.Has = src.AdditionalProperties.Has
-		}
+	m := &schemaMerger{
+		merged: &openapi3.Schema{
+			Type:       &openapi3.Types{"object"},
+			Properties: openapi3.Schemas{},
+		},
+		protected: map[string]bool{},
 	}
 
 	// Host's own properties win on conflict.
-	collectProps(schema)
-
-	requiredAll := map[string]struct{}{}
-	for _, name := range schema.Required {
-		requiredAll[name] = struct{}{}
-	}
+	m.collect(schema)
+	required := nameSet(schema.Required)
 
 	// `allOf` branches: union properties + union required.
 	for _, branch := range schema.AllOf {
-		if branch == nil || branch.Value == nil {
-			continue
-		}
-		flat := mergeAllOf(branch.Value)
-		collectProps(flat)
-		if flat != nil {
+		if flat := flattenBranch(branch); flat != nil {
+			m.collect(flat)
 			for _, name := range flat.Required {
-				requiredAll[name] = struct{}{}
+				required[name] = true
 			}
 		}
 	}
 
 	// `oneOf`/`anyOf` branches: union properties + intersection of required
 	// (only fields required by every branch are universally required).
-	unionBranches := append([]*openapi3.SchemaRef{}, schema.OneOf...)
-	unionBranches = append(unionBranches, schema.AnyOf...)
-
-	var requiredIntersection map[string]struct{}
-	for _, branch := range unionBranches {
-		if branch == nil || branch.Value == nil {
-			continue
-		}
-		flat := mergeAllOf(branch.Value)
-		// Skip pure null branches so they don't wipe out the required set.
-		if flat != nil && flat.Type != nil && flat.Type.Is("null") {
-			continue
-		}
-		collectUnionProps(flat)
-
-		branchRequired := map[string]struct{}{}
-		if flat != nil {
-			for _, name := range flat.Required {
-				branchRequired[name] = struct{}{}
-			}
-		}
-		if requiredIntersection == nil {
-			requiredIntersection = branchRequired
-			continue
-		}
-		for name := range requiredIntersection {
-			if _, ok := branchRequired[name]; !ok {
-				delete(requiredIntersection, name)
-			}
-		}
+	union := append(append(openapi3.SchemaRefs{}, schema.OneOf...), schema.AnyOf...)
+	for name := range m.collectUnion(union) {
+		required[name] = true
 	}
 
-	for name := range requiredIntersection {
-		requiredAll[name] = struct{}{}
+	merged := m.merged
+	if len(required) > 0 {
+		merged.Required = slices.Sorted(maps.Keys(required))
 	}
-
-	if len(requiredAll) > 0 {
-		required := make([]string, 0, len(requiredAll))
-		for name := range requiredAll {
-			required = append(required, name)
-		}
-		sort.Strings(required)
-		merged.Required = required
-	}
-
 	if schema.Description != "" {
 		merged.Description = schema.Description
 	}
@@ -1894,6 +2025,104 @@ func mergeAllOf(schema *openapi3.Schema) *openapi3.Schema {
 	}
 
 	return merged
+}
+
+// schemaMerger accumulates the flattened object schema for mergeAllOf.
+type schemaMerger struct {
+	merged *openapi3.Schema
+	// protected holds properties collected from the host schema or an `allOf`
+	// branch: authoritative constraints that union branches never widen.
+	protected map[string]bool
+}
+
+// collect adds src's properties that are not already present (first wins) and
+// protects them.
+func (m *schemaMerger) collect(src *openapi3.Schema) {
+	for name, ref := range src.Properties {
+		if _, exists := m.merged.Properties[name]; !exists {
+			m.merged.Properties[name] = ref
+			m.protected[name] = true
+		}
+	}
+	m.collectAdditionalProperties(src)
+}
+
+// collectUnion adds the `oneOf`/`anyOf` branches and returns the properties
+// every branch requires. A value only has to satisfy one branch, so when the
+// same property collides across branches its string enums are unioned rather
+// than first-wins. Pure null branches are skipped so they don't wipe out the
+// required set.
+func (m *schemaMerger) collectUnion(branches openapi3.SchemaRefs) map[string]bool {
+	var required map[string]bool
+	for _, branch := range branches {
+		flat := flattenBranch(branch)
+		if flat == nil || flat.Type.Is("null") {
+			continue
+		}
+		m.collectBranch(flat)
+		required = intersectNames(required, flat.Required)
+	}
+	return required
+}
+
+// collectBranch is collect for a union branch: a new property is added
+// unprotected, and an unprotected collision is widened by unionEnumSchema.
+func (m *schemaMerger) collectBranch(src *openapi3.Schema) {
+	for name, ref := range src.Properties {
+		existing, exists := m.merged.Properties[name]
+		switch {
+		case !exists:
+			m.merged.Properties[name] = ref
+		case !m.protected[name]:
+			if widened := unionEnumSchema(existing, ref); widened != nil {
+				m.merged.Properties[name] = widened
+			}
+		}
+	}
+	m.collectAdditionalProperties(src)
+}
+
+// collectAdditionalProperties keeps the first additionalProperties schema and
+// the first explicit allow/deny seen.
+func (m *schemaMerger) collectAdditionalProperties(src *openapi3.Schema) {
+	ap := &m.merged.AdditionalProperties
+	if ap.Schema == nil {
+		ap.Schema = src.AdditionalProperties.Schema
+	}
+	if ap.Has == nil {
+		ap.Has = src.AdditionalProperties.Has
+	}
+}
+
+// flattenBranch merges one composition branch, or returns nil for an empty one.
+func flattenBranch(branch *openapi3.SchemaRef) *openapi3.Schema {
+	if branch == nil || branch.Value == nil {
+		return nil
+	}
+	return mergeAllOf(branch.Value)
+}
+
+func nameSet(names []string) map[string]bool {
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	return set
+}
+
+// intersectNames narrows set to the names also in names. A nil set (no branch
+// seen yet) starts from names.
+func intersectNames(set map[string]bool, names []string) map[string]bool {
+	branch := nameSet(names)
+	if set == nil {
+		return branch
+	}
+	for name := range set {
+		if !branch[name] {
+			delete(set, name)
+		}
+	}
+	return set
 }
 
 // unionEnumSchema resolves a property collision between two `oneOf`/`anyOf`
@@ -1910,10 +2139,7 @@ func unionEnumSchema(existing, incoming *openapi3.SchemaRef) *openapi3.SchemaRef
 	}
 	exEff, exNullable := effectiveBodySchema(existing.Value)
 	inEff, inNullable := effectiveBodySchema(incoming.Value)
-	if exEff == nil || inEff == nil {
-		return nil
-	}
-	if exEff.Type == nil || !exEff.Type.Is("string") || inEff.Type == nil || !inEff.Type.Is("string") {
+	if exEff == nil || inEff == nil || !exEff.Type.Is("string") || !inEff.Type.Is("string") {
 		return nil
 	}
 	if len(exEff.Enum) == 0 {
@@ -1922,42 +2148,36 @@ func unionEnumSchema(existing, incoming *openapi3.SchemaRef) *openapi3.SchemaRef
 	}
 
 	clone := *exEff
-	if exNullable || inNullable {
-		clone.Nullable = true
-	}
-	if clone.Description == "" {
-		clone.Description = inEff.Description
-	}
+	clone.Nullable = clone.Nullable || exNullable || inNullable
+	clone.Description = cmp.Or(clone.Description, inEff.Description)
 
 	if len(inEff.Enum) == 0 {
 		clone.Enum = nil
 		return &openapi3.SchemaRef{Value: &clone}
 	}
 
-	seen := map[string]struct{}{}
-	union := make([]interface{}, 0, len(exEff.Enum)+len(inEff.Enum))
-	for _, raw := range exEff.Enum {
-		key := fmt.Sprintf("%T:%v", raw, raw)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		union = append(union, raw)
-	}
-	for _, raw := range inEff.Enum {
-		key := fmt.Sprintf("%T:%v", raw, raw)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
-		union = append(union, raw)
-	}
+	union := uniqueEnumValues(slices.Concat(exEff.Enum, inEff.Enum))
 	if len(union) == len(exEff.Enum) {
 		// No new values; keep the existing ref untouched.
 		return nil
 	}
 	clone.Enum = union
 	return &openapi3.SchemaRef{Value: &clone}
+}
+
+// uniqueEnumValues drops repeated enum values, keeping first occurrences. Values
+// compare by type and printed form, so 1 and "1" stay distinct.
+func uniqueEnumValues(values []interface{}) []interface{} {
+	seen := map[string]bool{}
+	out := make([]interface{}, 0, len(values))
+	for _, raw := range values {
+		key := fmt.Sprintf("%T:%v", raw, raw)
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, raw)
+		}
+	}
+	return out
 }
 
 func bodyFieldEnum(schema *openapi3.Schema, fieldType string) []string {
@@ -2064,68 +2284,236 @@ func effectiveBodySchema(schema *openapi3.Schema) (*openapi3.Schema, bool) {
 	return schema, nullable
 }
 
-func getAuthInit(api *openapi3.T) string {
-	_, scheme := getRequiredSecurityScheme(api)
-	if scheme == nil {
-		return ""
+// collectSecuritySchemeNames returns every distinct security scheme name
+// referenced by the API's top-level security and any operation-level security.
+// `ordered` preserves the order those names first appear in the top-level
+// api.Security list (used to pick the default auth type); `all` is the full set
+// including operation-only references.
+func collectSecuritySchemeNames(api *openapi3.T) (ordered []string, all []string) {
+	if api == nil {
+		return nil, nil
 	}
+
+	seenAll := make(map[string]bool)
+	seenOrdered := make(map[string]bool)
+
+	addOrdered := func(reqs openapi3.SecurityRequirements) {
+		for _, req := range reqs {
+			// A requirement object can list several schemes; sort its keys for
+			// determinism (Go map iteration order is random).
+			names := make([]string, 0, len(req))
+			for name := range req {
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			for _, name := range names {
+				if !seenOrdered[name] {
+					seenOrdered[name] = true
+					ordered = append(ordered, name)
+				}
+			}
+		}
+	}
+	addAll := func(reqs openapi3.SecurityRequirements) {
+		for _, req := range reqs {
+			for name := range req {
+				if !seenAll[name] {
+					seenAll[name] = true
+					all = append(all, name)
+				}
+			}
+		}
+	}
+
+	addOrdered(api.Security)
+	addAll(api.Security)
+	if api.Paths != nil {
+		for _, item := range api.Paths.Map() {
+			for _, operation := range item.Operations() {
+				if operation.Security != nil {
+					addAll(*operation.Security)
+				}
+			}
+		}
+	}
+
+	sort.Strings(all)
+	return ordered, all
+}
+
+// buildAuthInit emits the runtime auth registration code injected into the
+// generated client's initGeneratedRuntime(). It collects every recognized
+// security scheme (top-level + operation-level), emits one typed init per
+// scheme, registers a default auth type, and reports which runtime packages the
+// emitted code references so the template can import them conditionally.
+func buildAuthInit(api *openapi3.T) (authInit string, needsAPIKey bool, needsOAuth bool, schemes []*AuthScheme) {
+	if api == nil || api.Components == nil || api.Components.SecuritySchemes == nil {
+		return "", false, false, nil
+	}
+
+	ordered, all := collectSecuritySchemeNames(api)
+	if len(all) == 0 {
+		return "", false, false, nil
+	}
+
+	var lines []string
+	var emittedNames []string
+
+	for _, name := range all {
+		schemeRef := api.Components.SecuritySchemes[name]
+		if schemeRef == nil || schemeRef.Value == nil {
+			continue
+		}
+		scheme := schemeRef.Value
+		line, kind, tokenURL, pkg := authInitLine(name, scheme)
+		if line == "" {
+			// Unsupported scheme: record it for the README as manual setup.
+			schemes = append(schemes, &AuthScheme{
+				Name:      name,
+				Kind:      unsupportedSchemeKind(scheme),
+				Supported: false,
+				Manual:    unsupportedSchemeReason(scheme),
+			})
+			continue
+		}
+
+		lines = append(lines, line)
+		emittedNames = append(emittedNames, name)
+		switch pkg {
+		case "apikey":
+			needsAPIKey = true
+		case "oauth":
+			needsOAuth = true
+		}
+		schemes = append(schemes, &AuthScheme{
+			Name:      name,
+			Kind:      kind,
+			TokenURL:  tokenURL,
+			Supported: true,
+		})
+	}
+
+	if len(emittedNames) == 0 {
+		// Only unsupported schemes were present. Keep AuthInit empty (unchanged
+		// behavior) but retain the manual-setup notes for the README.
+		return "", false, false, schemes
+	}
+
+	// Pick the default auth type: the first scheme in the top-level security
+	// order that we actually emitted, else the first emitted scheme (already
+	// sorted, since `all` is sorted).
+	defaultName := ""
+	for _, name := range ordered {
+		if containsString(emittedNames, name) {
+			defaultName = name
+			break
+		}
+	}
+	if defaultName == "" {
+		defaultName = emittedNames[0]
+	}
+
+	lines = append(lines, fmt.Sprintf("bartolocli.SetDefaultAuthType(%q)", defaultName))
+
+	for _, s := range schemes {
+		if s.Name == defaultName {
+			s.Default = true
+		}
+	}
+
+	return strings.Join(lines, "\n"), needsAPIKey, needsOAuth, schemes
+}
+
+// authInitLine returns the runtime init call for one security scheme, a
+// human-readable kind, an optional OAuth token URL, and which runtime package
+// ("apikey" or "oauth") the call references. It returns an empty line for
+// unsupported schemes.
+func authInitLine(name string, scheme *openapi3.SecurityScheme) (line, kind, tokenURL, pkg string) {
 	switch scheme.Type {
 	case "apiKey":
 		switch scheme.In {
 		case "header":
-			return fmt.Sprintf("apikey.Init(%q, apikey.LocationHeader)", scheme.Name)
+			return fmt.Sprintf("apikey.InitWithType(%q, %q, apikey.LocationHeader)", name, scheme.Name), "API key (header)", "", "apikey"
 		case "query":
-			return fmt.Sprintf("apikey.Init(%q, apikey.LocationQuery)", scheme.Name)
+			return fmt.Sprintf("apikey.InitWithType(%q, %q, apikey.LocationQuery)", name, scheme.Name), "API key (query)", "", "apikey"
 		case "cookie":
-			return fmt.Sprintf("apikey.Init(%q, apikey.LocationCookie)", scheme.Name)
+			return fmt.Sprintf("apikey.InitWithType(%q, %q, apikey.LocationCookie)", name, scheme.Name), "API key (cookie)", "", "apikey"
 		}
 	case "http":
 		if strings.EqualFold(scheme.Scheme, "bearer") {
-			return "apikey.InitBearer(\"Authorization\")"
+			return fmt.Sprintf("apikey.InitBearerWithType(%q, \"Authorization\")", name), "Bearer token", "", "apikey"
+		}
+	case "oauth2":
+		if scheme.Flows != nil {
+			if flow := scheme.Flows.ClientCredentials; flow != nil {
+				return fmt.Sprintf("oauth.InitClientCredentialsWithType(%q, %q%s)", name, flow.TokenURL, oauthScopesArg(flow)),
+					"OAuth2 client credentials", flow.TokenURL, "oauth"
+			}
+			if flow := scheme.Flows.AuthorizationCode; flow != nil {
+				return fmt.Sprintf("oauth.InitAuthCodeWithType(%q, \"\", %q, %q%s)", name, flow.AuthorizationURL, flow.TokenURL, oauthScopesArg(flow)),
+					"OAuth2 authorization code", flow.TokenURL, "oauth"
+			}
 		}
 	}
 
-	return ""
+	return "", "", "", ""
 }
 
-func getRequiredSecurityScheme(api *openapi3.T) (string, *openapi3.SecurityScheme) {
-	if api == nil || api.Components == nil || api.Components.SecuritySchemes == nil {
-		return "", nil
+// oauthScopesArg renders the trailing `, oauth.Scopes(...)` option for an OAuth
+// flow, or "" when the flow declares no scopes.
+func oauthScopesArg(flow *openapi3.OAuthFlow) string {
+	if flow == nil || len(flow.Scopes) == 0 {
+		return ""
 	}
+	scopes := make([]string, 0, len(flow.Scopes))
+	for scope := range flow.Scopes {
+		scopes = append(scopes, scope)
+	}
+	sort.Strings(scopes)
+	quoted := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		quoted = append(quoted, fmt.Sprintf("%q", scope))
+	}
+	return ", oauth.Scopes(" + strings.Join(quoted, ", ") + ")"
+}
 
-	required := make(map[string]bool)
-	addRequirements := func(reqs openapi3.SecurityRequirements) {
-		for _, req := range reqs {
-			for name := range req {
-				required[name] = true
-			}
+func unsupportedSchemeKind(scheme *openapi3.SecurityScheme) string {
+	switch scheme.Type {
+	case "openIdConnect":
+		return "OpenID Connect"
+	case "http":
+		if strings.EqualFold(scheme.Scheme, "basic") {
+			return "HTTP Basic"
+		}
+		return "HTTP " + scheme.Scheme
+	case "oauth2":
+		return "OAuth2 (unsupported flow)"
+	}
+	return scheme.Type
+}
+
+func unsupportedSchemeReason(scheme *openapi3.SecurityScheme) string {
+	switch scheme.Type {
+	case "openIdConnect":
+		return "OpenID Connect discovery is not auto-wired; configure the token endpoint manually."
+	case "http":
+		if strings.EqualFold(scheme.Scheme, "basic") {
+			return "HTTP Basic auth is not auto-wired; set credentials manually."
+		}
+		return "This HTTP auth scheme is not auto-wired; configure it manually."
+	case "oauth2":
+		return "Only clientCredentials and authorizationCode OAuth2 flows are auto-wired; configure this flow manually."
+	}
+	return "This security scheme is not auto-wired; configure it manually."
+}
+
+func containsString(values []string, target string) bool {
+	for _, v := range values {
+		if v == target {
+			return true
 		}
 	}
-
-	addRequirements(api.Security)
-	for _, item := range api.Paths.Map() {
-		for _, operation := range item.Operations() {
-			if operation.Security != nil {
-				addRequirements(*operation.Security)
-			}
-		}
-	}
-
-	if len(required) != 1 {
-		return "", nil
-	}
-
-	var schemeName string
-	for name := range required {
-		schemeName = name
-	}
-
-	schemeRef := api.Components.SecuritySchemes[schemeName]
-	if schemeRef == nil || schemeRef.Value == nil {
-		return "", nil
-	}
-
-	return schemeName, schemeRef.Value
+	return false
 }
 
 func uniqueStrings(values []string) []string {
@@ -2661,6 +3049,67 @@ func promptSelect(question string, options []selectOption, defaultValue string, 
 	return value, nil
 }
 
+// targetSelectOptions are the surface choices offered by the wizard and the
+// legacy-config migration prompt. Values map to normalized target lists.
+func targetSelectOptions() []selectOption {
+	return []selectOption{
+		{Value: "cli+mcp", Label: "CLI + MCP server (recommended)", Description: "Generate both the command-line surface and the MCP server."},
+		{Value: "cli", Label: "CLI only", Description: "Generate only the command-line surface."},
+		{Value: "mcp", Label: "MCP server only", Description: "Generate an MCP-first binary (bare invocation serves stdio)."},
+	}
+}
+
+// targetsFromSelection maps a target-select value to a normalized target list.
+func targetsFromSelection(value string) []string {
+	switch value {
+	case targetCLI:
+		return []string{targetCLI}
+	case targetMCP:
+		return []string{targetMCP}
+	default:
+		return []string{targetCLI, targetMCP}
+	}
+}
+
+// promptTargets asks the "What should this project generate?" question and
+// returns the normalized target list.
+func promptTargets(color bool) ([]string, error) {
+	value, err := promptSelect("What should this project generate?", targetSelectOptions(), "cli+mcp", color)
+	if err != nil {
+		return nil, err
+	}
+	return targetsFromSelection(value), nil
+}
+
+// ensureConfigTargets resolves the generation targets for an existing project
+// config that predates the targets field. It NEVER prompts during generate/sync
+// when the config already records targets. For a legacy config (no targets):
+// interactive stdin asks the surface question once and persists it; otherwise it
+// defaults to both surfaces and emits a single stderr warning.
+func ensureConfigTargets(config *ProjectConfig) error {
+	if config == nil || len(config.Targets) > 0 {
+		return nil
+	}
+
+	if isInteractiveInput() {
+		color := shouldColorizeWizard()
+		previousDisableColor := surveycore.DisableColor
+		surveycore.DisableColor = !color
+		defer func() { surveycore.DisableColor = previousDisableColor }()
+
+		targets, err := promptTargets(color)
+		if err != nil {
+			return err
+		}
+		config.Targets = targets
+		return nil
+	}
+
+	config.Targets = defaultTargets()
+	fmt.Fprintln(os.Stderr, "warning: .bartolo.json has no \"targets\"; defaulting to CLI + MCP. Set \"targets\" (or run `bartolo init --targets ...`) to choose surfaces.")
+	return nil
+}
+
 func printWizardHeader(color bool) {
 	fmt.Println()
 	fmt.Println(wizardTitle(color, "Bartolo Init Wizard"))
@@ -2689,6 +3138,7 @@ func printWizardSummary(color bool, config *ProjectConfig) {
 	fmt.Printf("%s %s\n", wizardAccent(color, "Env prefix:"), config.EnvPrefix)
 	fmt.Printf("%s %s\n", wizardAccent(color, "API key env var:"), config.APIKeyEnvVar)
 	fmt.Printf("%s %s\n", wizardAccent(color, "Serializes to:"), config.SerializationFormat)
+	fmt.Printf("%s %s\n", wizardAccent(color, "Targets:"), strings.Join(config.effectiveTargets(), ", "))
 	fmt.Println()
 }
 
@@ -2762,6 +3212,9 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 		return nil, fmt.Errorf("--serialization-format: %q is not one of [%s]", rejected, strings.Join(serializationFormats, ", "))
 	}
 
+	targetsFlag, _ := cmd.Flags().GetString("targets")
+	var targets []string
+
 	interactive, _ := cmd.Flags().GetBool("interactive")
 	if len(args) == 0 {
 		interactive = true
@@ -2787,7 +3240,7 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 		}
 
 		var err error
-		printWizardStep(color, 1, 3, "CLI identity", "Pick the install name your users will actually type.")
+		printWizardStep(color, 1, 4, "CLI identity", "Pick the install name your users will actually type.")
 		name, err = promptText("What is the name of your CLI?", defaultName, func(value string) error {
 			if strings.TrimSpace(value) == "" {
 				return fmt.Errorf("CLI name cannot be empty")
@@ -2809,7 +3262,7 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 
 		modulePath = firstNonEmpty(modulePath, defaultModulePath(name))
 
-		printWizardStep(color, 2, 3, "Auth defaults", "You can keep the suggested API key env var or replace it with your own convention.")
+		printWizardStep(color, 2, 4, "Auth defaults", "You can keep the suggested API key env var or replace it with your own convention.")
 		apiKeyEnvVar, err = promptText("API key env var", apiKeyEnvVar, func(value string) error {
 			if !isValidEnvVarName(value) {
 				return fmt.Errorf("%s", wizardError(color, "Use only letters, numbers, and underscores, and do not start with a number."))
@@ -2821,12 +3274,19 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 		}
 		fmt.Println()
 
-		printWizardStep(color, 3, 3, "Serialization format", "List commands render a table on a terminal. Choose what generated CLIs serialize to everywhere else. Use the arrow keys to move and Enter to confirm.")
+		printWizardStep(color, 3, 4, "Serialization format", "List commands render a table on a terminal. Choose what generated CLIs serialize to everywhere else. Use the arrow keys to move and Enter to confirm.")
 		serializationFormat, err = promptSelect("Serialization format", []selectOption{
 			{Value: "json", Label: "json", Description: "What a pipe, a script, or jq expects."},
 			{Value: "yaml", Label: "yaml", Description: "Easy to scan in terminals."},
 			{Value: "toon", Label: "toon", Description: "Compact serialization aimed at LLMs."},
 		}, serializationFormat, color)
+		if err != nil {
+			return nil, err
+		}
+		fmt.Println()
+
+		printWizardStep(color, 4, 4, "Generation targets", "Choose which surfaces to generate. Use the arrow keys to move and Enter to confirm.")
+		targets, err = promptTargets(color)
 		if err != nil {
 			return nil, err
 		}
@@ -2844,11 +3304,20 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 			EnvPrefix:           summaryEnvPrefix,
 			SerializationFormat: serializationFormat,
 			APIKeyEnvVar:        apiKeyEnvVar,
+			Targets:             targets,
 		})
 	}
 
 	if name == "" {
 		return nil, fmt.Errorf("missing app name")
+	}
+
+	if targets == nil {
+		var err error
+		targets, err = parseTargetsFlag(targetsFlag)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	envPrefix := strings.ToUpper(strings.ReplaceAll(slug(name), "-", "_"))
@@ -2875,6 +3344,7 @@ func resolveInitConfig(cmd *cobra.Command, args []string) (*ProjectConfig, error
 		EnvPrefix:           envPrefix,
 		SerializationFormat: serializationFormat,
 		APIKeyEnvVar:        apiKeyEnvVar,
+		Targets:             targets,
 	}, nil
 }
 
@@ -2921,34 +3391,99 @@ func getAuthDocFromProject(api *OpenAPI, project *ProjectConfig) *AuthDoc {
 }
 
 func getAuthDocFromSpec(api *OpenAPI, envPrefix string) *AuthDoc {
-	// This wrapper exists so README generation can use the env prefix written by `init`.
-	// We reconstruct from the original auth init marker rather than trying to parse it later.
-	switch api.AuthInit {
-	case "":
+	// Documentation is derived from the recognized security schemes captured
+	// during generation (api.AuthSchemes), so OAuth2 and multi-scheme specs get
+	// accurate README auth sections rather than a misleading "API key" default.
+	schemes := api.AuthSchemes
+	if len(schemes) == 0 {
 		return &AuthDoc{
 			Enabled: false,
 			Summary: "This CLI does not require configured authentication metadata from the OpenAPI spec.",
 		}
-	case "apikey.InitBearer(\"Authorization\")":
-		return &AuthDoc{
-			Enabled:         true,
-			Kind:            "Bearer token",
-			EnvVars:         uniqueStrings([]string{envPrefix + "_TOKEN", envPrefix + "_API_KEY", envPrefix + "_AUTHORIZATION"}),
-			ProfileCommand:  "<binary> auth setup",
-			ProfileRequired: true,
-			Summary:         "The generated CLI supports bearer token authentication from environment variables or a stored profile.",
+	}
+
+	supported := make([]*AuthScheme, 0, len(schemes))
+	var manualNotes []string
+	for _, s := range schemes {
+		if s.Supported {
+			supported = append(supported, s)
+			continue
 		}
-	default:
-		// Any other auto-generated auth init today is API-key based.
+		manualNotes = append(manualNotes, fmt.Sprintf("`%s` (%s): %s", s.Name, s.Kind, s.Manual))
+	}
+
+	// No auto-wired scheme: document the manual setup only.
+	if len(supported) == 0 {
 		return &AuthDoc{
-			Enabled:         true,
-			Kind:            "API key",
-			EnvVars:         uniqueStrings([]string{envPrefix + "_API_KEY"}),
-			ProfileCommand:  "<binary> auth setup",
-			ProfileRequired: true,
-			Summary:         "The generated CLI supports API key authentication from either environment variables or a stored profile.",
+			Enabled:     true,
+			Summary:     "This CLI's OpenAPI spec declares authentication that Bartolo could not auto-wire. Configure it manually before making API calls.",
+			ManualNotes: manualNotes,
 		}
 	}
+
+	// Single supported scheme with no manual notes keeps the classic, compact
+	// README auth section (backward compatible with the bearer/api-key output).
+	if len(supported) == 1 && len(manualNotes) == 0 {
+		return singleSchemeAuthDoc(supported[0], envPrefix)
+	}
+
+	// Multiple schemes (or a mix with manual ones): document each scheme and
+	// which one is the default.
+	doc := &AuthDoc{
+		Enabled:         true,
+		ProfileCommand:  "<binary> auth setup",
+		ProfileRequired: true,
+		ManualNotes:     manualNotes,
+		Summary:         "The generated CLI supports multiple authentication schemes. The default scheme is used when no profile selects a type explicitly.",
+	}
+	var envVars []string
+	for _, s := range supported {
+		doc.Schemes = append(doc.Schemes, &AuthDocScheme{
+			Name:     s.Name,
+			Kind:     s.Kind,
+			TokenURL: s.TokenURL,
+			Default:  s.Default,
+		})
+		envVars = append(envVars, schemeEnvVars(s, envPrefix)...)
+	}
+	doc.EnvVars = uniqueStrings(envVars)
+	return doc
+}
+
+func singleSchemeAuthDoc(s *AuthScheme, envPrefix string) *AuthDoc {
+	doc := &AuthDoc{
+		Enabled:         true,
+		Kind:            s.Kind,
+		ProfileCommand:  "<binary> auth setup",
+		ProfileRequired: true,
+	}
+
+	switch {
+	case strings.HasPrefix(s.Kind, "OAuth2"):
+		summary := "The generated CLI authenticates with " + s.Kind + " using a stored profile. Run `auth setup` to save the client ID/secret."
+		if s.TokenURL != "" {
+			summary += " Token endpoint: " + s.TokenURL + "."
+		}
+		doc.Summary = summary
+	case s.Kind == "Bearer token":
+		doc.EnvVars = uniqueStrings([]string{envPrefix + "_TOKEN", envPrefix + "_API_KEY", envPrefix + "_AUTHORIZATION"})
+		doc.Summary = "The generated CLI supports bearer token authentication from environment variables or a stored profile."
+	default:
+		doc.EnvVars = uniqueStrings([]string{envPrefix + "_API_KEY"})
+		doc.Summary = "The generated CLI supports API key authentication from either environment variables or a stored profile."
+	}
+
+	return doc
+}
+
+func schemeEnvVars(s *AuthScheme, envPrefix string) []string {
+	switch {
+	case s.Kind == "Bearer token":
+		return []string{envPrefix + "_TOKEN", envPrefix + "_API_KEY", envPrefix + "_AUTHORIZATION"}
+	case strings.HasPrefix(s.Kind, "API key"):
+		return []string{envPrefix + "_API_KEY"}
+	}
+	return nil
 }
 
 func buildREADMEExamples(api *OpenAPI) []*READMEExample {
@@ -3099,6 +3634,19 @@ import "github.com/spf13/cobra"
 func Register(root *cobra.Command) {
 	_ = root
 	// Add your own commands and middleware registrations here.
+	//
+	// To add or patch MCP tools (survives bartolo generate), call mcpserver.Use
+	// from this function. Example:
+	//
+	//   import "github.com/orq-ai/bartolo/mcpserver"
+	//
+	//   mcpserver.Use(
+	//     mcpserver.AddTools(myTool),
+	//     mcpserver.RemoveTools("legacy_delete"),
+	//     mcpserver.PatchTool("echo_echo", func(t *mcpserver.ToolDef) {
+	//         t.Description = "Custom description"
+	//     }),
+	//   )
 }
 `
 
@@ -3191,6 +3739,7 @@ func commandTemplateFuncs() template.FuncMap {
 		"escapeStr": escapeString,
 		"slug":      slug,
 		"title":     strings.Title,
+		"rawJSON":   rawJSONLiteral,
 		"joinComma": func(values []string) string { return strings.Join(values, ", ") },
 	}
 }
@@ -3208,6 +3757,8 @@ func commandFileNeedsFmt(operations []*Operation) bool {
 func writeGeneratedCommandFiles(api *OpenAPI, shortName string) {
 	resetGeneratedPackage()
 
+	// The client funcs are emitted for EVERY operation in the IR, including
+	// CLI-excluded ops, because generated MCP tool closures call them.
 	writeFormattedFile(
 		filepath.Join("cli", "generated", shortName+"_client.go"),
 		[]byte(renderCommandTemplate("templates/generated_client.tmpl", api)),
@@ -3217,11 +3768,32 @@ func writeGeneratedCommandFiles(api *OpenAPI, shortName string) {
 		[]byte(renderCommandTemplate("templates/generated_register.tmpl", api)),
 	)
 
+	// CLI command generation only runs when the CLI surface is a target. In
+	// MCP-only mode no root_commands.go / group command files are emitted, and
+	// the register template omits the matching register calls.
+	if api.TargetCLI {
+		writeGeneratedCLICommandFiles(api)
+	}
+
+	if api.HasMCPTools() {
+		writeFormattedFile(
+			filepath.Join("cli", "generated", "mcp_tools.go"),
+			[]byte(renderCommandTemplate("templates/generated_mcp.tmpl", buildMCPTemplateData(api))),
+		)
+	}
+}
+
+// writeGeneratedCLICommandFiles renders root_commands.go and one file per
+// command group. It only sees CLI-visible operations: x-bartolo-cli-ignore ops
+// are dropped here but survive in the IR, because MCP tools call their client
+// funcs.
+func writeGeneratedCLICommandFiles(api *OpenAPI) {
+	rootOps := cliVisibleOperations(api.Operations)
 	rootCommands := &CommandsTemplateData{
 		API:        api,
-		Operations: api.Operations,
+		Operations: rootOps,
 		Waiters:    api.Waiters,
-		NeedsFmt:   commandFileNeedsFmt(api.Operations),
+		NeedsFmt:   commandFileNeedsFmt(rootOps),
 	}
 	writeFormattedFile(
 		filepath.Join("cli", "generated", "root_commands.go"),
@@ -3229,11 +3801,18 @@ func writeGeneratedCommandFiles(api *OpenAPI, shortName string) {
 	)
 
 	for _, group := range api.Groups {
+		groupOps := cliVisibleOperations(group.Operations)
+		if len(groupOps) == 0 {
+			// Every operation in this group is CLI-excluded; skip the group
+			// command file entirely so we don't emit an empty group command.
+			// The register template guards the matching register call.
+			continue
+		}
 		groupData := &CommandsTemplateData{
 			API:        api,
 			Group:      group,
-			Operations: group.Operations,
-			NeedsFmt:   commandFileNeedsFmt(group.Operations),
+			Operations: groupOps,
+			NeedsFmt:   commandFileNeedsFmt(groupOps),
 		}
 		filename := filepath.Join("cli", "generated", slug(group.CLIName)+"_commands.go")
 		writeFormattedFile(
@@ -3306,6 +3885,13 @@ func generateFromSpec(specPath string) error {
 
 	templateData := ProcessAPI(shortName, swagger)
 	config := loadProjectConfig()
+	if config != nil {
+		if err := ensureConfigTargets(config); err != nil {
+			return err
+		}
+		templateData.TargetCLI = config.TargetCLI()
+		templateData.TargetMCP = config.TargetMCP()
+	}
 	enrichOpenAPIForREADME(templateData, config)
 	writeGeneratedCommandFiles(templateData, shortName)
 	writeGeneratedREADME(templateData)
@@ -3326,6 +3912,12 @@ func syncCmd(cmd *cobra.Command, args []string) {
 	config.BartoloVersion = bartoloVersion
 	if config.AppVersion == "" {
 		config.AppVersion = "0.1.0"
+	}
+	// Resolve targets once here (prompting/warning for legacy configs) and
+	// persist them via writeProjectScaffold, so the generateFromSpec call below
+	// reloads a config that already records targets and never re-prompts.
+	if err := ensureConfigTargets(config); err != nil {
+		log.Fatal(err)
 	}
 	if err := writeProjectScaffold(config, true); err != nil {
 		log.Fatal(err)
@@ -3371,6 +3963,7 @@ func main() {
 	initCommand.Flags().String("bartolo-path", "", "Local path to the bartolo repo to use via go.mod replace during development")
 	initCommand.Flags().String("api-key-env-var", "", "Custom API key environment variable for generated CLIs")
 	initCommand.Flags().String("serialization-format", "json", fmt.Sprintf("What generated CLIs serialize to when not rendering a table [%s]", strings.Join(serializationFormats, ", ")))
+	initCommand.Flags().String("targets", "", "Comma-separated generation targets [cli, mcp] (default: both)")
 	root.AddCommand(initCommand)
 
 	root.AddCommand(&cobra.Command{

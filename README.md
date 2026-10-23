@@ -6,7 +6,7 @@ It is designed for teams that want more than a thin REST wrapper. The generated 
 
 ## Why Bartolo
 
-- Generates grouped commands from tags or `x-cli-group`, so large APIs feel like product CLIs instead of flat path dumps.
+- Generates grouped commands from tags or `x-bartolo-group`, so large APIs feel like product CLIs instead of flat path dumps.
 - Supports `openapi.yaml`, `openapi.yml`, and `openapi.json`.
 - Handles common OpenAPI 3.1 schema shapes in addition to OpenAPI 3.0.
 - Infers API key and bearer auth, including predictable env vars like `MY_CLI_API_KEY`.
@@ -89,23 +89,204 @@ Every generated CLI starts with a useful operator surface:
 - Grouped nouns like `prompts`, `files`, or `human-evals` feel closer to a product CLI than a path translator.
 - String parameters with an `enum` list their values in `--help` and complete them in the shell.
 
+## MCP
+
+Every generated CLI is also a [Model Context Protocol](https://modelcontextprotocol.io) server. Running `generate` emits an `mcp` subcommand that exposes the API's operations as MCP tools for clients such as Claude Code, Claude Desktop, and Cursor. Generated servers speak MCP **2026-07-28** (stdio and stateless Streamable HTTP) through the official Go SDK. Older clients still connect via SDK protocol negotiation.
+
+What gets generated:
+
+- An `mcp` subcommand on the CLI (`my-cli mcp`) that serves over stdio by default.
+- One tool per eligible operation, named `<group>_<leaf>` (or just the leaf for ungrouped ops).
+- A JSON Schema (2020-12) input schema per tool, derived from the operation's path/query/header params and JSON request body. Arguments are validated against it before any request is sent. `oneOf` is emitted as `anyOf`: OpenAPI unions rarely make their branches mutually exclusive, and several model providers accept only `anyOf`.
+- Schemas are budgeted for the model's context: a top-level argument keeps up to 600 characters of description, nested ones their first sentence, and structures deeper than six levels keep only their type.
+- An output schema from the first 2xx JSON response. Clients fail a tool call whose result does not match its output schema, after the API call has already happened, so the output schema describes shape only: no `required`, `enum`, `format`, bounds, or descriptions, four levels deep, and nested values may be `null`.
+- Results returned as `structuredContent` (plus a JSON text block). A non-object response is wrapped as `{"result": ...}`. Upstream API errors surface as `isError` tool results with a structured `{status, body}` payload (body redacted like the CLI's) rather than protocol errors.
+- Tool annotations derived from the HTTP method: `readOnlyHint` for GET/HEAD, `destructiveHint` for PUT/PATCH/DELETE, `idempotentHint` for GET/HEAD/PUT/DELETE.
+- Cancelling a tool call (or dropping its HTTP request) aborts the upstream API request.
+- Outbound auth reuses the CLI's existing runtime, so the same env vars and profiles authenticate MCP tool calls.
+
+Inspect the tool manifest without a client:
+
+```sh
+my-cli mcp list
+```
+
+### stdio quickstart
+
+Add the server to Claude Code:
+
+```sh
+claude mcp add my-cli -- my-cli mcp
+```
+
+Or configure Claude Desktop (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "my-cli": {
+      "command": "my-cli",
+      "args": ["mcp"],
+      "env": {
+        "MY_CLI_API_KEY": "your-token"
+      }
+    }
+  }
+}
+```
+
+Replace `MY_CLI_API_KEY` with the auth env var your CLI reports under `my-cli doctor`.
+
+### HTTP mode
+
+Serve over Streamable HTTP instead of stdio. HTTP is **stateless** (MCP 2026-07-28): each request is self-describing and there is no session, so any number of replicas can run behind a plain load balancer. `server/discover` and `tools/list` results carry a five-minute `ttlMs`, with `cacheScope: private` whenever inbound auth is on.
+
+```sh
+my-cli mcp --http 127.0.0.1:8484
+```
+
+Inbound auth for HTTP is selected with `--http-auth`:
+
+- `none` (default) — allowed only on a loopback address unless `--http-insecure` is set.
+- `bearer` — a static token read from the `<PREFIX>_MCP_TOKEN` env var, compared in constant time.
+- `oauth` — an OAuth 2.1 resource server that validates JWTs against the authorization server's JWKS (`--http-oauth-issuer`, `--http-oauth-audience`, and optional `--http-oauth-jwks`/`--http-oauth-scopes`) and serves RFC 9728 protected-resource metadata at `/.well-known/oauth-protected-resource`.
+- `forward` — for a hosted server that fronts its own API. Every request must carry the caller's API key (`Authorization: Bearer <key>`), and each tool call reaches the API with that key instead of the server's configured credentials, so the API applies the caller's own permissions, workspace scoping, and rate limits. The server needs no API credential of its own. Use it only when the inbound token is a credential for the upstream API itself, never for tokens issued to the MCP server.
+
+Except under `forward`, the inbound HTTP credential only authorizes the request; it is never forwarded to the upstream API.
+
+`GET /healthz` and `GET /readyz` answer `200 ok` without auth, for load balancers and orchestrator probes.
+
+Cross-origin browser requests are refused with 403 unless their origin is listed in `--http-allowed-origins` (full origins, e.g. `https://app.example.com`). Same-origin requests and non-browser clients, which send no `Origin`, are unaffected.
+
+### Filtering tools
+
+Large APIs produce many tools. Narrow the exposed set with:
+
+- `--tools a,b,c` — expose only these tools by exact name.
+- `--groups g1,g2` — expose only tools in these command groups.
+- `--read-only` — expose only tools annotated `readOnlyHint`.
+
+The flags compose, so `--groups files --read-only` exposes the read-only tools within the `files` group. They apply to both `mcp` and `mcp list`.
+
+### Custom MCP tools
+
+Generated `cli/generated/mcp_tools.go` is overwritten on every `generate`. User-owned extras live in `cli/custom/Register`, which is never overwritten:
+
+```go
+import "github.com/orq-ai/bartolo/mcpserver"
+
+func Register(root *cobra.Command) {
+    mcpserver.Use(
+        mcpserver.AddTools(searchCodebase),          // extra tool
+        mcpserver.RemoveTools("legacy_delete"),      // drop a generated tool
+        mcpserver.PatchTool("echo_echo", func(t *mcpserver.ToolDef) {
+            t.Description = "Echo with extra logging"
+            next := t.Handler
+            t.Handler = func(ctx context.Context, args map[string]any) (any, error) {
+                return next(ctx, args)
+            }
+        }),
+    )
+}
+```
+
+Two more options shape a hosted server:
+
+- `mcpserver.KeepTools("agents_list", "agents_create", ...)` narrows the generated tools to an allow-list, for an API too large to expose whole. A listed name with no generated tool is an error, so an operation renamed in the API fails `mcp list` (and CI) instead of quietly disappearing. Tools from `AddTools` are always kept.
+- `mcpserver.DiscoverTools()` keeps the tools `KeepTools` leaves out reachable instead of dropping them. Four meta-tools are listed after the kept ones: `search_operations` finds any operation, `describe_operation` returns its argument schema, `call_read_operation` runs a read-only one, and `call_operation` runs any. The whole API stays usable while the tool list — which the model reads on every turn — stays short. `--groups` and `--read-only` also bound what the meta-tools reach.
+- `mcpserver.HTTPRoute("GET /v2/healthz", handler)` mounts an extra route next to the MCP endpoint — health-check aliases, discovery documents. These routes skip inbound auth and cross-origin protection.
+
+`Use` is applied when the server starts (and for `mcp list`), so it works for both stdio and `--http`. Wrappers run after JSON Schema validation. An `AddTools` name collision, an invalid tool name, a missing handler, or a non-object input schema fails `mcp` and `mcp list` with an error naming the tool. A tool with no `InputSchema` takes no arguments.
+
+### Excluded operations
+
+Some operations are not bridged as tools and are reported (with reasons) in the generate summary:
+
+- SSE-only operations (only `text/event-stream` responses) — operations offering JSON **and** SSE are included using the JSON media type.
+- Multipart/binary request bodies (`multipart/form-data`, `application/octet-stream`).
+- `deprecated: true` operations.
+- Operations marked `x-bartolo-mcp-ignore` (or the legacy `x-mcp-ignore`).
+
+Cookie parameters are not exposed as tool arguments, since generated clients cannot send them.
+
+## Generation Targets
+
+A Bartolo project generates two surfaces from one schema: the **CLI** command tree and the **MCP** server. You choose which surfaces to generate at `init`, and the choice is recorded in `.bartolo.json` under `targets`. Later `generate` / `sync` runs honor that choice and never re-prompt.
+
+The interactive wizard asks:
+
+```
+What should this project generate?
+> CLI + MCP server (recommended)
+  CLI only
+  MCP server only
+```
+
+Or select targets non-interactively with `--targets` (comma-separated `cli` and/or `mcp`):
+
+```sh
+bartolo init my-cli --targets cli        # CLI only
+bartolo init my-mcp --targets mcp        # MCP server only
+bartolo init my-app --targets cli,mcp    # both (the default when --targets is omitted)
+```
+
+Behavior per target set:
+
+- **cli + mcp** (default) — the full surface: CLI commands plus an `mcp` subcommand.
+- **cli only** — no MCP server. `mcp_tools.go` is not emitted, the register wiring drops the `mcp` command, and `go mod tidy` prunes the MCP SDK dependency.
+- **mcp only** — an MCP-first binary. Running the bare binary (`./my-mcp`, no arguments) serves the stdio transport directly, so it drops into an MCP client with no wrapper command. The `mcp`, `mcp list`, `doctor`, and `auth setup` subcommands stay available for inspection and credential bootstrap; no per-operation CLI commands are generated.
+
+Legacy projects created before this feature have no `targets` in `.bartolo.json`. The next interactive `generate` / `sync` asks the question once and persists the answer; a non-interactive run defaults to both surfaces and prints a one-line warning.
+
+### Separate CLI and MCP repos from one schema
+
+To ship the CLI and the MCP server as independent binaries/repos from the same OpenAPI document, scaffold two projects pointed at the same schema and give each a single target:
+
+```sh
+# CLI repo
+mkdir acme-cli && cd acme-cli
+bartolo init acme-cli --targets cli
+bartolo generate ../schema/openapi.yaml
+cd ..
+
+# MCP repo
+mkdir acme-mcp && cd acme-mcp
+bartolo init acme-mcp --targets mcp
+bartolo generate ../schema/openapi.yaml
+```
+
+Each repo owns its own `.bartolo.json`, so re-running `bartolo sync` in either keeps that surface pinned to its recorded target.
+
 ## Schema Shaping
 
 Bartolo will synthesize a decent CLI from a plain schema, but it gets significantly better when the schema carries product intent.
 
+Bartolo's canonical extension namespace is `x-bartolo-*`. Shared extensions affect the whole generated surface (both the CLI and the MCP tools); the two surface-scoped extensions restrict a single surface.
+
+**Shared (CLI + MCP):**
+
 | Extension | Purpose |
 | --- | --- |
-| `x-cli-aliases` | Add command aliases for operations. |
-| `x-cli-description` | Override CLI-facing help text. |
-| `x-cli-group` | Force an operation into a higher-level noun. |
-| `x-cli-hidden` | Hide a path or operation from normal help. |
-| `x-cli-ignore` | Exclude a path, operation, or parameter entirely. |
-| `x-cli-list` | Set to `true` to mark an operation as a collection, or `false` to suppress automatic collection detection. |
-| `x-cli-list-fields` | Set and order the default columns for an interactive collection response; a non-empty list also marks the operation as a collection. |
-| `x-cli-name` | Override a generated CLI name for an API, operation, or parameter. |
-| `x-cli-no-validate` | Set to `true` to skip the client-side `enum`/`format` check for a parameter, for a schema that is stricter than the API it describes. |
-| `x-cli-help-section` | Put a top-level command under a titled section in `--help`. |
-| `x-cli-waiters` | Add polling-based waiter commands and follow-up flags. |
+| `x-bartolo-aliases` | Add command aliases for operations (rendered in the CLI). |
+| `x-bartolo-description` | Override generated help/description text. |
+| `x-bartolo-group` | Force an operation into a higher-level noun. |
+| `x-bartolo-help-section` | Put a top-level command under a titled section in `--help` (CLI only). |
+| `x-bartolo-hidden` | Hide a path or operation from normal CLI help. |
+| `x-bartolo-ignore` | Exclude a path, operation, or parameter entirely (from CLI **and** MCP). |
+| `x-bartolo-list` | Set to `true` to mark an operation as a collection, or `false` to suppress automatic collection detection (CLI only). |
+| `x-bartolo-list-fields` | Set and order the default columns for an interactive collection response; a non-empty list also marks the operation as a collection (CLI only). |
+| `x-bartolo-name` | Override a generated name for an API, operation, or parameter. |
+| `x-bartolo-no-validate` | Set to `true` to skip the client-side `enum`/`format` check for a parameter, for a schema that is stricter than the API it describes. Applies to CLI flags and MCP tool arguments alike. |
+| `x-bartolo-waiters` | Add polling-based waiter commands and follow-up flags. |
+
+**Surface-scoped:**
+
+| Extension | Purpose |
+| --- | --- |
+| `x-bartolo-cli-ignore` | Exclude an operation from the CLI only. The operation still becomes an MCP tool (and its client func is still generated). |
+| `x-bartolo-mcp-ignore` | Exclude an operation from the generated MCP tool surface only. It still generates a CLI command. |
+
+**Legacy aliases:** the earlier `x-cli-*` names (`x-cli-aliases`, `x-cli-description`, `x-cli-group`, `x-cli-help-section`, `x-cli-hidden`, `x-cli-ignore`, `x-cli-list`, `x-cli-list-fields`, `x-cli-name`, `x-cli-no-validate`, `x-cli-waiters`) and `x-mcp-ignore` keep working with no runtime warning. Each maps to the matching shared `x-bartolo-*` key (`x-mcp-ignore` → `x-bartolo-mcp-ignore`). When both a canonical `x-bartolo-*` key and its legacy alias appear on the same element, the canonical value wins. `x-bartolo-ignore` always excludes everywhere, regardless of any surface-scoped flag also present.
 
 Collection paths and responses are inferred automatically for GET operations.
 Any method is also inferred as a collection when its 2xx JSON response is a
@@ -165,7 +346,7 @@ argument when selecting a projected column, for example
 Bartolo also groups operations automatically from:
 
 - the first OpenAPI tag
-- `x-cli-group`
+- `x-bartolo-group`
 - the first stable path noun when tags are missing
 
 That fallback matters for large real-world schemas where tagging is inconsistent.
