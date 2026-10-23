@@ -336,12 +336,14 @@ func scanDotEnvFile(filename string, visit func(key, value string)) error {
 
 func initConfig(appName, envPrefix, apiKeyEnvVar, serializationFormat string) {
 	// One-time setup to ensure the path exists so we can write files into it
-	// later as needed.
+	// later as needed. Everything kept there is optional — settings, profiles
+	// and caches can all come from flags and the environment — so a home that
+	// cannot be written, as in a container with a read-only root filesystem,
+	// costs only those files rather than stopping the CLI.
 	configDir := path.Join(userHomeDir(), "."+appName)
-	if err := os.MkdirAll(configDir, 0700); err != nil {
-		panic(err)
+	if err := os.MkdirAll(configDir, 0700); err == nil {
+		narrowConfigDirPermissions(configDir)
 	}
-	narrowConfigDirPermissions(configDir)
 
 	// Load configuration from file(s) if provided.
 	viper.SetConfigName("config")
@@ -656,12 +658,12 @@ func initCache(appName string) {
 	Cache.AddConfigPath("$HOME/." + appName + "/")
 
 	// Write a blank cache if no file is already there. Later you can use
-	// cli.Cache.SaveConfig() to write new values.
+	// cli.Cache.SaveConfig() to write new values. Best effort, like the config
+	// directory: when it cannot be written the cache lives in memory for this
+	// run.
 	filename := path.Join(viper.GetString("config-directory"), "cache.json")
 	if _, err := os.Stat(filename); os.IsNotExist(err) {
-		if err := ioutil.WriteFile(filename, []byte("{}"), 0600); err != nil {
-			panic(err)
-		}
+		_ = ioutil.WriteFile(filename, []byte("{}"), 0600)
 	}
 
 	Cache.ReadInConfig()

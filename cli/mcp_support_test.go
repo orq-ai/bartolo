@@ -181,3 +181,23 @@ func TestRequestCredentialReplacesConfiguredAuth(t *testing.T) {
 		t.Errorf("a request without a caller credential should go through the configured handler")
 	}
 }
+
+// A hardened container mounts the root filesystem read-only. The config
+// directory only holds optional state, so Init must still succeed.
+func TestInitWithReadOnlyHome(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can write a read-only directory")
+	}
+	resetAuthState(t)
+	home := t.TempDir()
+	if err := os.Chmod(home, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(home, 0o700) })
+	t.Setenv("HOME", home)
+
+	Init(&Config{AppName: "test-readonly", EnvPrefix: "TEST_READONLY"})
+	if Root == nil || Client == nil {
+		t.Fatal("Init did not finish")
+	}
+}
