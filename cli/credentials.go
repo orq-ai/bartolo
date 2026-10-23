@@ -106,6 +106,15 @@ func initAuth() {
 
 	// Install auth middleware
 	Client.UseRequest(func(ctx *context.Context, h context.Handler) {
+		// A request made on a caller's behalf carries that caller's credential
+		// and must not fall back to this process's own: see
+		// WithRequestCredential.
+		if authorization, ok := RequestCredential(ctx.Request.Context()); ok {
+			ctx.Request.Header.Set("Authorization", authorization)
+			h.Next(ctx)
+			return
+		}
+
 		profile := GetProfile()
 		handler := authHandlerFor(profile["type"])
 		if handler == nil {

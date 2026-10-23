@@ -2,7 +2,9 @@ package mcpserver
 
 import (
 	"fmt"
+	"net/http"
 	"slices"
+	"strings"
 	"sync"
 )
 
@@ -48,6 +50,35 @@ func AddTools(tools ...ToolDef) Option {
 	}
 }
 
+// KeepTools narrows the listed generated tools to the named ones: an allow-list
+// for a server that should expose a curated subset of a large API. The rest are
+// dropped, or with DiscoverTools stay reachable through its meta-tools. Tools
+// from AddTools are always listed. A name with no generated tool fails
+// serve/list, so an operation renamed in the API surfaces as an error rather
+// than as a tool that silently disappeared. Successive calls add to the list.
+func KeepTools(names ...string) Option {
+	return func(c *config) {
+		c.keep = append(c.keep, names...)
+	}
+}
+
+// HTTPRoute mounts an extra handler on the Streamable HTTP server, for routes a
+// deployment needs next to the MCP endpoint: health-check aliases, discovery
+// documents, robots.txt. Routes are served WITHOUT inbound auth or cross-origin
+// protection. pattern uses net/http.ServeMux syntax and must not claim "/",
+// which serves MCP.
+func HTTPRoute(pattern string, handler http.Handler) Option {
+	return func(c *config) {
+		c.routes = append(c.routes, httpRoute{pattern: pattern, handler: handler})
+	}
+}
+
+// httpRoute is one HTTPRoute registration.
+type httpRoute struct {
+	pattern string
+	handler http.Handler
+}
+
 // RemoveTools drops generated tools by exact name. Missing names are ignored.
 func RemoveTools(names ...string) Option {
 	return func(c *config) {
@@ -85,7 +116,10 @@ func mergeConfig(cmdCfg *config) *config {
 		instructions: cmdCfg.instructions,
 		envPrefix:    cmdCfg.envPrefix,
 		extra:        slices.Clone(cmdCfg.extra),
+		keep:         slices.Clone(cmdCfg.keep),
+		discover:     cmdCfg.discover,
 		remove:       slices.Clone(cmdCfg.remove),
+		routes:       slices.Clone(cmdCfg.routes),
 		patches:      slices.Clone(cmdCfg.patches),
 		wraps:        slices.Clone(cmdCfg.wraps),
 	}
@@ -95,12 +129,16 @@ func mergeConfig(cmdCfg *config) *config {
 	return runtime
 }
 
-// applyCustomizations runs RemoveTools, then PatchTool, then AddTools, then
-// WrapAll, and validates the result. It does not apply --tools/--groups/
-// --read-only filters.
+// applyCustomizations runs KeepTools, then RemoveTools, then PatchTool, then
+// AddTools, then WrapAll, and validates the result. It does not apply
+// --tools/--groups/--read-only filters.
 func applyCustomizations(defs []ToolDef, cfg *config) ([]ToolDef, error) {
-	out := removeTools(defs, cfg.remove)
-	out, err := patchTools(out, cfg.patches)
+	out, err := keepTools(defs, cfg.keep)
+	if err != nil {
+		return nil, err
+	}
+	out = removeTools(out, cfg.remove)
+	out, err = patchTools(out, cfg.patches)
 	if err != nil {
 		return nil, err
 	}
@@ -112,6 +150,33 @@ func applyCustomizations(defs []ToolDef, cfg *config) ([]ToolDef, error) {
 		return nil, err
 	}
 	return wrapTools(out, cfg.wraps), nil
+}
+
+// keepTools marks every tool not named in keep as hidden, or none when keep is
+// empty.
+func keepTools(defs []ToolDef, keep []string) ([]ToolDef, error) {
+	out := slices.Clone(defs)
+	if len(keep) == 0 {
+		return out, nil
+	}
+	var missing []string
+	for _, name := range keep {
+		if indexTool(defs, name) < 0 {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("keep tools: no generated tool named %s", strings.Join(missing, ", "))
+	}
+	for i := range out {
+		out[i].hidden = !slices.Contains(keep, out[i].Name)
+	}
+	return out, nil
+}
+
+// listedTools returns the tools that are not hidden.
+func listedTools(defs []ToolDef) []ToolDef {
+	return slices.DeleteFunc(slices.Clone(defs), func(d ToolDef) bool { return d.hidden })
 }
 
 // removeTools returns a copy of defs without the named tools.
@@ -180,13 +245,26 @@ func indexTool(defs []ToolDef, name string) int {
 }
 
 // prepareTools materializes generated tools, applies Use() customizations, then
-// runtime filters. The returned config includes any Use() overrides of
-// instructions / env prefix.
+// runtime filters, and returns the tools to list. With DiscoverTools the list
+// ends with the meta-tools, whose catalog is every tool the --groups and
+// --read-only filters allow, hidden or not. The returned config includes any
+// Use() overrides of instructions / env prefix.
 func prepareTools(tools func() []ToolDef, cmdCfg *config, f filterOptions) (*config, []ToolDef, error) {
 	runtime := mergeConfig(cmdCfg)
 	defs, err := applyCustomizations(tools(), runtime)
 	if err != nil {
 		return nil, nil, err
 	}
-	return runtime, filterTools(defs, f), nil
+
+	listed := filterTools(listedTools(defs), f)
+	if !runtime.discover {
+		return runtime, listed, nil
+	}
+	reachable := filterTools(defs, filterOptions{groups: f.groups, readOnly: f.readOnly})
+	meta := filterTools(discoveryTools(reachable), filterOptions{tools: f.tools, readOnly: f.readOnly})
+	listed, err = addTools(listed, meta)
+	if err != nil {
+		return nil, nil, err
+	}
+	return runtime, listed, nil
 }

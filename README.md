@@ -98,7 +98,8 @@ What gets generated:
 - An `mcp` subcommand on the CLI (`my-cli mcp`) that serves over stdio by default.
 - One tool per eligible operation, named `<group>_<leaf>` (or just the leaf for ungrouped ops).
 - A JSON Schema (2020-12) input schema per tool, derived from the operation's path/query/header params and JSON request body. Arguments are validated against it before any request is sent. `oneOf` is emitted as `anyOf`: OpenAPI unions rarely make their branches mutually exclusive, and several model providers accept only `anyOf`.
-- An output schema from the first 2xx JSON response. Clients fail a tool call whose result does not match its output schema, after the API call has already happened, so the output schema describes shape only: no `required`, `enum`, `format`, or bounds, and nested values may be `null`.
+- Schemas are budgeted for the model's context: a top-level argument keeps up to 600 characters of description, nested ones their first sentence, and structures deeper than six levels keep only their type.
+- An output schema from the first 2xx JSON response. Clients fail a tool call whose result does not match its output schema, after the API call has already happened, so the output schema describes shape only: no `required`, `enum`, `format`, bounds, or descriptions, four levels deep, and nested values may be `null`.
 - Results returned as `structuredContent` (plus a JSON text block). A non-object response is wrapped as `{"result": ...}`. Upstream API errors surface as `isError` tool results with a structured `{status, body}` payload (body redacted like the CLI's) rather than protocol errors.
 - Tool annotations derived from the HTTP method: `readOnlyHint` for GET/HEAD, `destructiveHint` for PUT/PATCH/DELETE, `idempotentHint` for GET/HEAD/PUT/DELETE.
 - Cancelling a tool call (or dropping its HTTP request) aborts the upstream API request.
@@ -149,8 +150,11 @@ Inbound auth for HTTP is selected with `--http-auth`:
 - `none` (default) — allowed only on a loopback address unless `--http-insecure` is set.
 - `bearer` — a static token read from the `<PREFIX>_MCP_TOKEN` env var, compared in constant time.
 - `oauth` — an OAuth 2.1 resource server that validates JWTs against the authorization server's JWKS (`--http-oauth-issuer`, `--http-oauth-audience`, and optional `--http-oauth-jwks`/`--http-oauth-scopes`) and serves RFC 9728 protected-resource metadata at `/.well-known/oauth-protected-resource`.
+- `forward` — for a hosted server that fronts its own API. Every request must carry the caller's API key (`Authorization: Bearer <key>`), and each tool call reaches the API with that key instead of the server's configured credentials, so the API applies the caller's own permissions, workspace scoping, and rate limits. The server needs no API credential of its own. Use it only when the inbound token is a credential for the upstream API itself, never for tokens issued to the MCP server.
 
-The inbound HTTP credential only authorizes the request; it is never forwarded to the upstream API.
+Except under `forward`, the inbound HTTP credential only authorizes the request; it is never forwarded to the upstream API.
+
+`GET /healthz` and `GET /readyz` answer `200 ok` without auth, for load balancers and orchestrator probes.
 
 Cross-origin browser requests are refused with 403 unless their origin is listed in `--http-allowed-origins` (full origins, e.g. `https://app.example.com`). Same-origin requests and non-browser clients, which send no `Origin`, are unaffected.
 
@@ -185,6 +189,12 @@ func Register(root *cobra.Command) {
     )
 }
 ```
+
+Two more options shape a hosted server:
+
+- `mcpserver.KeepTools("agents_list", "agents_create", ...)` narrows the generated tools to an allow-list, for an API too large to expose whole. A listed name with no generated tool is an error, so an operation renamed in the API fails `mcp list` (and CI) instead of quietly disappearing. Tools from `AddTools` are always kept.
+- `mcpserver.DiscoverTools()` keeps the tools `KeepTools` leaves out reachable instead of dropping them. Four meta-tools are listed after the kept ones: `search_operations` finds any operation, `describe_operation` returns its argument schema, `call_read_operation` runs a read-only one, and `call_operation` runs any. The whole API stays usable while the tool list — which the model reads on every turn — stays short. `--groups` and `--read-only` also bound what the meta-tools reach.
+- `mcpserver.HTTPRoute("GET /v2/healthz", handler)` mounts an extra route next to the MCP endpoint — health-check aliases, discovery documents. These routes skip inbound auth and cross-origin protection.
 
 `Use` is applied when the server starts (and for `mcp list`), so it works for both stdio and `--http`. Wrappers run after JSON Schema validation. An `AddTools` name collision, an invalid tool name, a missing handler, or a non-object input schema fails `mcp` and `mcp list` with an error naming the tool. A tool with no `InputSchema` takes no arguments.
 

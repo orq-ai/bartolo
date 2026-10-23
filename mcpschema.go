@@ -13,9 +13,24 @@ import (
 	"github.com/getkin/kin-openapi/openapi3"
 )
 
-// maxSchemaDepth bounds $ref inlining recursion. On overflow we emit a
-// permissive {"type":"object"} node so generation never fails or loops.
-const maxSchemaDepth = 8
+// Schema budgets. Tool schemas are read by the model on every turn, so nesting
+// and prose are bounded: below the depth limit a node keeps only its type (and,
+// in input schemas, a short description), which also ends $ref recursion.
+const (
+	// maxInputSchemaDepth counts levels below a tool's top-level property.
+	maxInputSchemaDepth = 6
+	// maxOutputSchemaDepth counts levels below the response root.
+	maxOutputSchemaDepth = 4
+	// maxPropertyDescription bounds a top-level input property's description.
+	maxPropertyDescription = 600
+	// maxNestedDescription bounds a nested input description, which is also
+	// cut to its first sentence.
+	maxNestedDescription = 200
+)
+
+// sentenceEnd matches the end of a description's first sentence: terminal
+// punctuation followed by a capitalized word, a newline, or the end.
+var sentenceEnd = regexp.MustCompile(`[.!?](\s+\p{Lu}|\s*\n|\s*$)`)
 
 // maxMCPDescription bounds the tool description length (LLM context hygiene).
 const maxMCPDescription = 1024
@@ -91,8 +106,8 @@ func (c *schemaConverter) convert(ref *openapi3.SchemaRef, depth int) map[string
 		return map[string]any{}
 	}
 	s := ref.Value
-	if depth >= maxSchemaDepth || c.visited[s] {
-		return truncatedSchema(s)
+	if depth >= c.maxDepth() || c.visited[s] {
+		return c.truncated(s, depth)
 	}
 	c.visited[s] = true
 	defer delete(c.visited, s)
@@ -101,7 +116,7 @@ func (c *schemaConverter) convert(ref *openapi3.SchemaRef, depth int) map[string
 	if t := schemaType(s); t != nil {
 		out["type"] = t
 	}
-	annotateSchema(out, s)
+	c.annotate(out, s, depth)
 	if c.mode == schemaInput {
 		constrainSchema(out, s)
 	}
@@ -192,17 +207,47 @@ func (c *schemaConverter) convertAll(branches openapi3.SchemaRefs, depth int) []
 	return out
 }
 
-// truncatedSchema stands in for a schema cut off by a $ref cycle or the depth
-// limit: its own type and description, with everything below left open.
-func truncatedSchema(s *openapi3.Schema) map[string]any {
+func (c *schemaConverter) maxDepth() int {
+	if c.mode == schemaOutput {
+		return maxOutputSchemaDepth
+	}
+	return maxInputSchemaDepth
+}
+
+// truncated stands in for a schema cut off by a $ref cycle or the depth limit:
+// its own type and description, with everything below left open.
+func (c *schemaConverter) truncated(s *openapi3.Schema, depth int) map[string]any {
 	out := map[string]any{}
 	if t := schemaType(s); t != nil {
 		out["type"] = t
 	}
-	if s.Description != "" {
-		out["description"] = s.Description
+	if desc := c.description(s.Description, depth); desc != "" {
+		out["description"] = desc
 	}
 	return out
+}
+
+// description applies the description budget: none in output schemas, which
+// clients validate rather than show the model; up to maxPropertyDescription on
+// a top-level input property; the first sentence, capped, below that.
+func (c *schemaConverter) description(desc string, depth int) string {
+	switch {
+	case c.mode == schemaOutput:
+		return ""
+	case depth == 0:
+		return truncateMCPDescription(desc, maxPropertyDescription)
+	}
+	return firstSentence(desc, maxNestedDescription)
+}
+
+// firstSentence is desc up to the end of its first sentence, capped at max
+// runes on a word boundary.
+func firstSentence(desc string, max int) string {
+	desc = strings.TrimSpace(desc)
+	if loc := sentenceEnd.FindStringIndex(desc); loc != nil {
+		desc = desc[:loc[0]+1]
+	}
+	return truncateMCPDescription(desc, max)
 }
 
 // schemaType renders the JSON Schema "type", folding OpenAPI 3.0 nullable into
@@ -239,16 +284,21 @@ func allowNull(schema map[string]any) {
 	}
 }
 
-// annotateSchema copies the keywords that describe a value without
-// constraining it. Only one example is kept, under "examples".
-func annotateSchema(out map[string]any, s *openapi3.Schema) {
-	if s.Description != "" {
-		out["description"] = s.Description
+// annotate copies the keywords that describe a value without constraining it,
+// within the description budget. Input schemas keep a default and, on a
+// top-level property, one example under "examples"; output schemas keep
+// neither.
+func (c *schemaConverter) annotate(out map[string]any, s *openapi3.Schema, depth int) {
+	if desc := c.description(s.Description, depth); desc != "" {
+		out["description"] = desc
+	}
+	if c.mode == schemaOutput {
+		return
 	}
 	if s.Default != nil {
 		out["default"] = s.Default
 	}
-	if s.Example != nil {
+	if s.Example != nil && depth == 0 {
 		out["examples"] = []any{s.Example}
 	}
 }
@@ -664,7 +714,7 @@ func (b *mcpInputBuilder) addParams(params openapi3.Parameters) {
 		}
 		schema := convertSchema(pv.Schema, schemaInput)
 		if _, ok := schema["description"]; !ok && pv.Description != "" {
-			schema["description"] = pv.Description
+			schema["description"] = truncateMCPDescription(pv.Description, maxPropertyDescription)
 		}
 		b.add(schema, required, MCPArgRoute{Prop: prop, WireName: pv.Name, In: pv.In, Flag: flag, Required: required})
 	}

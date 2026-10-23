@@ -17,17 +17,24 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/oauthex"
 )
 
-// Inbound-auth design note (confused-deputy prevention): the bearer/JWT the MCP
-// *client* presents here is used ONLY to authorize the incoming request. It is
-// never stored in viper, a profile, or the token cache, and is never forwarded
-// to the upstream API — outbound API auth is a completely separate credential
-// plane handled by the cli middleware. The two planes never cross.
+// Inbound-auth design note (confused-deputy prevention): in the none, bearer
+// and oauth modes the bearer/JWT the MCP *client* presents is used ONLY to
+// authorize the incoming request. It is never stored in viper, a profile, or the
+// token cache, and is never forwarded to the upstream API — outbound API auth is
+// a separate credential plane handled by the cli middleware. The forward mode is
+// the one deliberate exception: there the inbound token IS the caller's API
+// credential, and every upstream call is made with it and nothing else.
 
 // Inbound HTTP auth modes for the `mcp --http` transport.
 const (
 	authModeNone   = "none"
 	authModeBearer = "bearer"
 	authModeOAuth  = "oauth"
+	// authModeForward requires each request to carry the caller's own API
+	// credential and calls the upstream API with it. It is for a server that
+	// fronts its own API, where the inbound token is already a credential for
+	// that API (an API key), never for tokens issued to the MCP server itself.
+	authModeForward = "forward"
 )
 
 // resourceMetadataPath is the RFC 9728 protected-resource-metadata endpoint.
@@ -87,10 +94,7 @@ func bearerAuthMiddleware(token string) func(http.Handler) http.Handler {
 	expected := []byte(token)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			var provided string
-			if fields := strings.Fields(r.Header.Get("Authorization")); len(fields) == 2 && strings.EqualFold(fields[0], "bearer") {
-				provided = fields[1]
-			}
+			provided := bearerToken(r.Header.Get("Authorization"))
 			if provided == "" || subtle.ConstantTimeCompare([]byte(provided), expected) != 1 {
 				w.Header().Set("WWW-Authenticate", "Bearer")
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -99,6 +103,31 @@ func bearerAuthMiddleware(token string) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// forwardAuthMiddleware admits only requests carrying a bearer credential, which
+// makeHandler then forwards upstream. The upstream API validates it; this layer
+// only refuses requests that carry none, so an anonymous request can never be
+// served with some other credential.
+func forwardAuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if bearerToken(r.Header.Get("Authorization")) == "" {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized: send your API key as Authorization: Bearer <key>", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// bearerToken returns the token of an "Authorization: Bearer <token>" value,
+// or "".
+func bearerToken(authorization string) string {
+	fields := strings.Fields(authorization)
+	if len(fields) != 2 || !strings.EqualFold(fields[0], "bearer") {
+		return ""
+	}
+	return fields[1]
 }
 
 // resourceMetadataURL derives the RFC 9728 metadata URL for the resource server

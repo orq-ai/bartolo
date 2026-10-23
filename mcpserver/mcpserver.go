@@ -72,6 +72,10 @@ type ToolDef struct {
 	// JSON-serializable value) or an error; a *cli.HTTPError is surfaced as a
 	// structured error result.
 	Handler ToolHandler
+
+	// hidden marks a generated tool KeepTools left out: not listed, and only
+	// reachable through DiscoverTools.
+	hidden bool
 }
 
 // ToolHandler is the business-logic callback for one MCP tool. It runs after

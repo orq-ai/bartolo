@@ -38,10 +38,13 @@ type config struct {
 	instructions string
 	envPrefix    string
 
-	extra   []ToolDef
-	remove  []string
-	patches []toolPatch
-	wraps   []func(ToolHandler) ToolHandler
+	extra    []ToolDef
+	keep     []string
+	discover bool
+	remove   []string
+	patches  []toolPatch
+	wraps    []func(ToolHandler) ToolHandler
+	routes   []httpRoute
 }
 
 // SetInstructions sets the MCP server instructions surfaced to connected
@@ -94,6 +97,9 @@ type serverInfo struct {
 	// intermediary never serves the tool list to a caller that could not have
 	// fetched it; "public" otherwise.
 	cacheScope string
+	// forwardCredentials makes every tool call reach the upstream API with the
+	// caller's own Authorization header (--http-auth forward).
+	forwardCredentials bool
 }
 
 // filterTools narrows the tool list per the --tools / --groups / --read-only
@@ -165,9 +171,11 @@ func Command(appName, version string, tools func() []ToolDef, opts ...Option) *c
 			if err != nil {
 				return err
 			}
+			opts.routes = runtime.routes
 			if opts.authMode != authModeNone {
 				info.cacheScope = "private"
 			}
+			info.forwardCredentials = opts.authMode == authModeForward
 			return serveHTTP(cmd.Context(), info, selected, opts)
 		},
 	}
@@ -189,6 +197,10 @@ func commandLong(appName, envPrefix string) string {
 		"                       unless --http-insecure is set).\n" +
 		"  --http-auth bearer   static bearer token from the " + tokenEnvVar(envPrefix) + "\n" +
 		"                       environment variable (constant-time compared).\n" +
+		"  --http-auth forward  every request must carry the caller's own API key\n" +
+		"                       (Authorization: Bearer <key>), and tool calls reach the\n" +
+		"                       API with that key instead of this process's credentials.\n" +
+		"                       For a hosted server fronting its own API.\n" +
 		"  --http-auth oauth    OAuth 2.1 resource server: JWTs are validated against the\n" +
 		"                       authorization server's JWKS (--http-oauth-issuer,\n" +
 		"                       --http-oauth-audience, optional --http-oauth-jwks and\n" +
@@ -198,8 +210,9 @@ func commandLong(appName, envPrefix string) string {
 		"                       for cross-origin browser requests. Other cross-origin\n" +
 		"                       browser requests are rejected (DNS-rebinding and CSRF\n" +
 		"                       guard); same-origin and non-browser clients are allowed.\n\n" +
-		"The inbound HTTP credential is used only to authorize the request; it is never\n" +
-		"forwarded to the upstream API.\n\n" +
+		"Except under --http-auth forward, the inbound HTTP credential is used only to\n" +
+		"authorize the request and is never forwarded to the upstream API.\n\n" +
+		"GET /healthz and /readyz answer 200 for load-balancer and orchestrator probes.\n\n" +
 		"Use `" + appName + " mcp list` to print the tool manifest as JSON."
 }
 
@@ -211,7 +224,7 @@ func bindFilterFlags(flags *pflag.FlagSet, f *filterOptions) {
 
 func bindHTTPFlags(flags *pflag.FlagSet, h *httpFlags) {
 	flags.StringVar(&h.addr, "http", "", "Serve stateless Streamable HTTP at this address (e.g. 127.0.0.1:8484)")
-	flags.StringVar(&h.authMode, "http-auth", authModeNone, "Inbound HTTP auth mode: none|bearer|oauth (requires --http)")
+	flags.StringVar(&h.authMode, "http-auth", authModeNone, "Inbound HTTP auth mode: none|bearer|oauth|forward (requires --http)")
 	flags.StringSliceVar(&h.allowedOrigins, "http-allowed-origins", nil, "Origins trusted for cross-origin browser requests, comma-separated (requires --http)")
 	flags.BoolVar(&h.insecure, "http-insecure", false, "Allow binding a non-loopback address with --http-auth none (requires --http)")
 	flags.StringVar(&h.oauthIssuer, "http-oauth-issuer", "", "OAuth authorization server issuer (required for --http-auth oauth)")
@@ -267,7 +280,7 @@ func resolveHTTPOptions(envPrefix string, f httpFlags) (httpServeOptions, error)
 	}
 
 	switch f.authMode {
-	case authModeNone:
+	case authModeNone, authModeForward:
 		// nothing to resolve
 	case authModeBearer:
 		opts.token = os.Getenv(tokenEnvVar(envPrefix))
@@ -285,7 +298,7 @@ func resolveHTTPOptions(envPrefix string, f httpFlags) (httpServeOptions, error)
 			scopes:   f.oauthScopes,
 		}
 	default:
-		return httpServeOptions{}, fmt.Errorf("invalid --http-auth %q (want none|bearer|oauth)", f.authMode)
+		return httpServeOptions{}, fmt.Errorf("invalid --http-auth %q (want none|bearer|oauth|forward)", f.authMode)
 	}
 
 	return opts, nil
@@ -374,7 +387,7 @@ func buildServer(info serverInfo, defs []ToolDef) (*mcp.Server, error) {
 	})
 
 	for _, def := range defs {
-		if err := registerTool(server, def); err != nil {
+		if err := registerTool(server, def, info.forwardCredentials); err != nil {
 			return nil, fmt.Errorf("registering tool %q: %w", def.Name, err)
 		}
 	}
@@ -388,7 +401,7 @@ var emptyObjectSchema = json.RawMessage(`{"type":"object"}`)
 // server with a self-validating handler (Server.AddTool does not validate).
 // Every check the SDK would panic on is reported as an error instead, since a
 // custom tool from cli/custom reaches here unvetted.
-func registerTool(server *mcp.Server, def ToolDef) error {
+func registerTool(server *mcp.Server, def ToolDef, forwardCredentials bool) error {
 	if def.Handler == nil {
 		return errors.New("tool has no handler")
 	}
@@ -415,7 +428,7 @@ func registerTool(server *mcp.Server, def ToolDef) error {
 		tool.OutputSchema = def.OutputSchema
 	}
 
-	server.AddTool(tool, makeHandler(def, resolved))
+	server.AddTool(tool, makeHandler(def, resolved, forwardCredentials))
 	return nil
 }
 
@@ -440,9 +453,14 @@ func resolveInputSchema(raw json.RawMessage) (*jsonschema.Resolved, error) {
 // validation, result mapping, and panic recovery. It never returns a protocol
 // error for tool-level failures — those become IsError results the model can
 // read and correct — reserving protocol errors for the SDK (unknown tool,
-// malformed JSON-RPC).
-func makeHandler(def ToolDef, resolved *jsonschema.Resolved) mcp.ToolHandler {
+// malformed JSON-RPC). With forwardCredentials the handler's context carries the
+// caller's Authorization header, so every API request it makes acts as the
+// caller (cli.WithRequestCredential).
+func makeHandler(def ToolDef, resolved *jsonschema.Resolved, forwardCredentials bool) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (result *mcp.CallToolResult, retErr error) {
+		if forwardCredentials {
+			ctx = cli.WithRequestCredential(ctx, callerAuthorization(req))
+		}
 		defer func() {
 			if r := recover(); r != nil {
 				result = errorResult(fmt.Sprintf("tool panicked: %v", r))
@@ -466,6 +484,15 @@ func makeHandler(def ToolDef, resolved *jsonschema.Resolved) mcp.ToolHandler {
 		}
 		return successResult(def, out), nil
 	}
+}
+
+// callerAuthorization is the Authorization header of the HTTP request a tool
+// call arrived on, or "" off HTTP.
+func callerAuthorization(req *mcp.CallToolRequest) string {
+	if req.Extra == nil {
+		return ""
+	}
+	return req.Extra.Header.Get("Authorization")
 }
 
 // successResult returns the value as serialized JSON text and, where clients

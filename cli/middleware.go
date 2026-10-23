@@ -98,3 +98,22 @@ func bindRequestContext(params *viper.Viper, r *gentleman.Request) {
 		r.Context.SetCancelContext(ctx)
 	}
 }
+
+// requestCredentialKey carries the credential of the caller a request acts for.
+type requestCredentialKey struct{}
+
+// WithRequestCredential returns a context whose generated requests send
+// authorization as their Authorization header in place of the configured
+// profile or environment credentials, which are then never consulted. A hosted
+// MCP server uses it to call the API as each of its callers. Bind the context
+// with SetRequestContext.
+func WithRequestCredential(ctx context.Context, authorization string) context.Context {
+	return context.WithValue(ctx, requestCredentialKey{}, authorization)
+}
+
+// RequestCredential returns the caller credential WithRequestCredential put on
+// ctx, for custom code that calls an API outside the generated client.
+func RequestCredential(ctx context.Context) (string, bool) {
+	authorization, _ := ctx.Value(requestCredentialKey{}).(string)
+	return authorization, authorization != ""
+}

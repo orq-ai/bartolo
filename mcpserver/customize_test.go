@@ -261,3 +261,28 @@ func TestApplyCustomizationsRejectsInvalidCustomTools(t *testing.T) {
 		})
 	}
 }
+
+func TestKeepToolsIsAnAllowList(t *testing.T) {
+	handler := func(context.Context, map[string]any) (any, error) { return nil, nil }
+	cfg := &config{
+		keep:  []string{"echo_echo"},
+		extra: []ToolDef{{Name: "custom_tool", Handler: handler}},
+	}
+	out, err := applyCustomizations(generatedEchoTools(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, d := range listedTools(out) {
+		names = append(names, d.Name)
+	}
+	if strings.Join(names, ",") != "echo_echo,custom_tool" {
+		t.Errorf("tools = %v, want the kept generated tool plus the custom one", names)
+	}
+
+	// A kept name the API no longer has is an error, not a silent omission.
+	cfg.keep = []string{"echo_echo", "echo_renamed"}
+	if _, err := applyCustomizations(generatedEchoTools(), cfg); err == nil || !strings.Contains(err.Error(), "echo_renamed") {
+		t.Errorf("err = %v, want one naming the missing tool", err)
+	}
+}

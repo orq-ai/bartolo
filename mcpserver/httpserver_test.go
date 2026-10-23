@@ -7,6 +7,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/orq-ai/bartolo/cli"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -437,4 +439,103 @@ func TestResolveHTTPOptions(t *testing.T) {
 			t.Error("expected error for invalid auth mode")
 		}
 	})
+}
+
+// credentialTool reports the caller credential its context carries.
+func credentialTool() ToolDef {
+	return ToolDef{
+		Name:        "whoami",
+		InputSchema: json.RawMessage(`{"type":"object"}`),
+		Handler: func(ctx context.Context, _ map[string]any) (any, error) {
+			authorization, _ := cli.RequestCredential(ctx)
+			return map[string]any{"authorization": authorization}, nil
+		},
+	}
+}
+
+func newForwardTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	server, err := buildServer(serverInfo{name: "testapp", forwardCredentials: true}, []ToolDef{credentialTool()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler, err := buildHTTPHandler(context.Background(), server, httpServeOptions{addr: "127.0.0.1:0", authMode: authModeForward})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// Under --http-auth forward every tool call acts as its caller: the caller's
+// own Authorization header is what the API request would send.
+func TestHTTPForwardModeActsAsTheCaller(t *testing.T) {
+	srv := newForwardTestServer(t)
+
+	for _, key := range []string{"sk-orq-alice", "sk-orq-bob"} {
+		client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "0"}, nil)
+		httpClient := &http.Client{Transport: &headerRoundTripper{base: http.DefaultTransport, key: "Authorization", value: "Bearer " + key}}
+		cs, err := client.Connect(context.Background(), &mcp.StreamableClientTransport{Endpoint: srv.URL, HTTPClient: httpClient}, nil)
+		if err != nil {
+			t.Fatalf("connect as %s: %v", key, err)
+		}
+		res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{Name: "whoami", Arguments: map[string]any{}})
+		_ = cs.Close()
+		if err != nil {
+			t.Fatalf("call as %s: %v", key, err)
+		}
+		if got := res.StructuredContent.(map[string]any)["authorization"]; got != "Bearer "+key {
+			t.Errorf("tool saw %v, want Bearer %s", got, key)
+		}
+	}
+}
+
+func TestHTTPForwardModeRequiresACredential(t *testing.T) {
+	srv := newForwardTestServer(t)
+	resp, err := http.Post(srv.URL, "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized || resp.Header.Get("WWW-Authenticate") == "" {
+		t.Errorf("status = %d, WWW-Authenticate = %q; want 401 with a Bearer challenge", resp.StatusCode, resp.Header.Get("WWW-Authenticate"))
+	}
+}
+
+// Probes and HTTPRoute handlers answer without inbound auth, even when the MCP
+// endpoint requires it.
+func TestHTTPHealthAndExtraRoutesSkipAuth(t *testing.T) {
+	server, err := buildServer(serverInfo{name: "testapp"}, echoTools())
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("extra")) })
+	opts := httpServeOptions{
+		addr: "127.0.0.1:0", authMode: authModeBearer, token: "secret",
+		routes: []httpRoute{{pattern: "GET /v2/healthz", handler: extra}},
+	}
+	handler, err := buildHTTPHandler(context.Background(), server, opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	for path, want := range map[string]string{"/healthz": "ok\n", "/readyz": "ok\n", "/v2/healthz": "extra"} {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || string(body) != want {
+			t.Errorf("GET %s = %d %q, want 200 %q", path, resp.StatusCode, body, want)
+		}
+	}
+
+	opts.routes = []httpRoute{{pattern: "/", handler: extra}}
+	if _, err := buildHTTPHandler(context.Background(), server, opts); err == nil {
+		t.Error(`an HTTPRoute claiming "/" should be rejected`)
+	}
 }

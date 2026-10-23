@@ -138,3 +138,46 @@ func TestAbandonedStdinReadDoesNotLog(t *testing.T) {
 		t.Errorf("the abandoned read logged after the caller moved on: %s", got)
 	}
 }
+
+// failingAuthHandler fails any request it is asked to authenticate, so a test
+// can prove a request never reached it.
+type failingAuthHandler struct{}
+
+func (failingAuthHandler) ProfileKeys() []string { return []string{"api-key"} }
+func (failingAuthHandler) OnRequest(_ *zerolog.Logger, _ *http.Request) error {
+	return errors.New("the configured credentials were consulted")
+}
+
+// A request made on a caller's behalf sends that caller's credential and never
+// consults this process's own: an anonymous caller must not borrow it, and a
+// caller must never act as another.
+func TestRequestCredentialReplacesConfiguredAuth(t *testing.T) {
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", failingAuthHandler{})
+
+	seen := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen <- r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	params := viper.New()
+	SetRequestContext(params, WithRequestCredential(context.Background(), "Bearer sk-caller"))
+	req := Client.URL(srv.URL).Get()
+	HandleBefore("test", params, req)
+
+	if _, err := req.Do(); err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if got := <-seen; got != "Bearer sk-caller" {
+		t.Errorf("Authorization = %q, want the caller's credential", got)
+	}
+
+	// Without one, the configured handler authenticates as before.
+	if _, err := Client.URL(srv.URL).Get().Do(); err == nil {
+		t.Errorf("a request without a caller credential should go through the configured handler")
+	}
+}

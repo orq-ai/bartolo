@@ -1016,3 +1016,52 @@ paths:
 		t.Errorf("an untyped JSON body should be a permissive 'body' argument, got %v", body)
 	}
 }
+
+// Tool schemas reach the model on every turn, so prose and nesting are budgeted:
+// nested descriptions keep their first sentence, output schemas keep none, and
+// deep structures are cut to their type.
+func TestConvertSchemaBudget(t *testing.T) {
+	ref := bodySchemaRef(t, `{
+  "openapi": "3.1.0",
+  "info": {"title": "t", "version": "1"},
+  "paths": {"/x": {"post": {"operationId": "X",
+    "requestBody": {"content": {"application/json": {"schema": {
+      "type": "object",
+      "description": "The body. It has a long story.",
+      "properties": {
+        "config": {
+          "type": "object",
+          "description": "Nested config. Second sentence that should go, e.g. this.",
+          "properties": {"a": {"type": "object", "properties": {"b": {"type": "object", "properties": {
+            "c": {"type": "object", "properties": {"d": {"type": "object", "properties": {
+              "e": {"type": "object", "description": "Deep.", "properties": {"f": {"type": "string"}}}
+            }}}}
+          }}}}}
+        }
+      }
+    }}}},
+    "responses": {"200": {"description": "ok"}}}}}
+}`, "/x")
+
+	in := convertSchema(ref, schemaInput)
+	if in["description"] != "The body. It has a long story." {
+		t.Errorf("a top-level description should be kept whole: %v", in["description"])
+	}
+	config := propOf(t, in, "config")
+	if config["description"] != "Nested config." {
+		t.Errorf("a nested description should keep its first sentence: %q", config["description"])
+	}
+	node := config
+	for _, name := range []string{"a", "b", "c", "d", "e"} {
+		node = propOf(t, node, name)
+	}
+	if _, ok := node["properties"]; ok || node["type"] != "object" {
+		t.Errorf("below the depth limit a node keeps only its type: %v", node)
+	}
+
+	out := convertSchema(ref, schemaOutput)
+	if _, ok := out["description"]; ok {
+		t.Errorf("output schemas carry no descriptions: %v", out["description"])
+	}
+	resolveSchema(t, "budgeted input", mustCompactJSON(in))
+}

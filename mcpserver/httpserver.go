@@ -37,6 +37,7 @@ type httpServeOptions struct {
 	insecure       bool     // override the non-loopback + auth-none safety rail
 	token          string   // static bearer token (authModeBearer)
 	oauth          oauthConfig
+	routes         []httpRoute // extra unauthenticated routes (HTTPRoute)
 }
 
 // serveHTTP builds the shared MCP server and serves it over Streamable HTTP with
@@ -122,12 +123,43 @@ func buildHTTPHandler(ctx context.Context, server *mcp.Server, opts httpServeOpt
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", healthHandler)
+	mux.HandleFunc("GET /readyz", healthHandler)
+	if err := mountRoutes(mux, opts.routes); err != nil {
+		return nil, err
+	}
+
 	mcpHandler, err := withInboundAuth(ctx, mux, streamable, opts)
 	if err != nil {
 		return nil, err
 	}
 	mux.Handle("/", protection.Handler(mcpHandler))
 	return mux, nil
+}
+
+// healthHandler answers liveness and readiness probes. The server holds no
+// connections of its own to check: it is ready as soon as it listens.
+func healthHandler(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte("ok\n"))
+}
+
+// mountRoutes registers the HTTPRoute handlers, reporting a pattern the mux
+// rejects (a conflict, or "/", which serves MCP) as an error rather than a
+// panic.
+func mountRoutes(mux *http.ServeMux, routes []httpRoute) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("HTTPRoute: %v", r)
+		}
+	}()
+	for _, route := range routes {
+		if route.pattern == "/" {
+			return errors.New(`HTTPRoute: "/" serves MCP and cannot be replaced`)
+		}
+		mux.Handle(route.pattern, route.handler)
+	}
+	return nil
 }
 
 // withInboundAuth wraps next with the configured inbound auth. In oauth mode it
@@ -142,6 +174,8 @@ func withInboundAuth(ctx context.Context, mux *http.ServeMux, next http.Handler,
 			return nil, errors.New("bearer auth requires a token; set the <PREFIX>_MCP_TOKEN environment variable")
 		}
 		return bearerAuthMiddleware(opts.token)(next), nil
+	case authModeForward:
+		return forwardAuthMiddleware(next), nil
 	case authModeOAuth:
 		mw, meta, err := newOAuthMiddleware(ctx, opts.oauth)
 		if err != nil {
@@ -150,7 +184,7 @@ func withInboundAuth(ctx context.Context, mux *http.ServeMux, next http.Handler,
 		mux.Handle(resourceMetadataPath, auth.ProtectedResourceMetadataHandler(meta))
 		return mw(next), nil
 	}
-	return nil, fmt.Errorf("invalid --http-auth %q (want none|bearer|oauth)", opts.authMode)
+	return nil, fmt.Errorf("invalid --http-auth %q (want none|bearer|oauth|forward)", opts.authMode)
 }
 
 // crossOriginProtection rejects cross-origin browser requests with 403 unless
