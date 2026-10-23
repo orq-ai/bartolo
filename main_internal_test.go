@@ -2821,3 +2821,27 @@ func TestEnvExampleNamesThePrefixedMCPToken(t *testing.T) {
 		t.Errorf(".env.example does not name ACME_MCP_TOKEN:\n%s", data)
 	}
 }
+
+// An MCP-only binary has no per-operation commands, so its examples show the
+// server instead of `<group> --help` invocations that would not exist.
+func TestExamplesForMCPOnlyProjects(t *testing.T) {
+	api := ProcessAPI("acme", loadTestSpec(t, `
+openapi: 3.1.0
+info: {title: Acme API, version: "1"}
+paths:
+  /widgets:
+    get: {operationId: ListWidgets, tags: [widgets], responses: {"200": {description: ok}}}
+`))
+	api.CommandName = "acme"
+
+	api.TargetCLI = false
+	mcpOnly := renderTemplate("templates/examples_readme.tmpl", nil, api)
+	if !strings.Contains(mcpOnly, "acme mcp list") || strings.Contains(mcpOnly, "--help") {
+		t.Errorf("MCP-only examples should show the server, not CLI commands:\n%s", mcpOnly)
+	}
+
+	api.TargetCLI = true
+	if cli := renderTemplate("templates/examples_readme.tmpl", nil, api); !strings.Contains(cli, "acme widgets --help") {
+		t.Errorf("CLI examples lost the group command:\n%s", cli)
+	}
+}
