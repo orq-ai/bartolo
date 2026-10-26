@@ -51,6 +51,12 @@ var Stderr io.Writer = os.Stderr
 
 var tty bool
 
+// runningCommand is the command being executed, so output can name its flags.
+var runningCommand *cobra.Command
+
+// setupHint is Config.SetupHint.
+var setupHint string
+
 // Config is used to pass settings to the CLI.
 type Config struct {
 	AppName      string
@@ -64,6 +70,10 @@ type Config struct {
 	// starts at `table`, so a user opts out of tables with `default-format`.
 	SerializationFormat string
 
+	// SetupHint is the command a remedy names for adding a profile, such as
+	// "mycli auth login". Empty means `<binary> auth setup`.
+	SetupHint string
+
 	Version string
 }
 
@@ -73,6 +83,8 @@ func Init(config *Config) {
 	initCache(config.AppName)
 	authInitialized = false
 	resolvedOutputFormat = ""
+	runningCommand = nil
+	setupHint = config.SetupHint
 
 	// Forced color makes tty true on a pipe, so tables key off terminal alone.
 	stdoutIsTerminal := isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
@@ -102,6 +114,8 @@ func Init(config *Config) {
 		Use:     filepath.Base(os.Args[0]),
 		Version: config.Version,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			runningCommand = cmd
+
 			// An unknown output format used to be ignored, which silently
 			// produced JSON while reporting success. Reject it here so the
 			// flag behaves like any other enumerated one, whether the value
@@ -512,9 +526,9 @@ func newDefaultFormatCommand() *cobra.Command {
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				return Formatter.Format(map[string]interface{}{
+				return formatResult(map[string]interface{}{
 					"output_format": OutputFormat(),
-				})
+				}, fmt.Sprintf("Default output format is %s.", OutputFormat()))
 			}
 
 			next, ok := parseOutputFormat(args[0])
@@ -525,10 +539,10 @@ func newDefaultFormatCommand() *cobra.Command {
 				return err
 			}
 
-			return Formatter.Format(map[string]interface{}{
+			return formatResult(map[string]interface{}{
 				"output_format": next,
 				"persisted":     true,
-			})
+			}, fmt.Sprintf("Default output format is now %s.", next))
 		},
 	}
 }
@@ -588,6 +602,22 @@ func migrateLegacyServerConfig(configDir string) {
 	}
 
 	viper.ReadInConfig()
+}
+
+// SetupCommand is the command to suggest for adding a profile: Config.SetupHint,
+// with `--profile <name>` when the remedy is about one profile.
+func SetupCommand(profile string) string {
+	command := setupHint
+	if command == "" {
+		command = "auth setup"
+		if Root != nil {
+			command = Root.CommandPath() + " " + command
+		}
+	}
+	if profile != "" {
+		command += " --profile " + profile
+	}
+	return command
 }
 
 func saveJSONConfig(values map[string]interface{}) error {
