@@ -221,6 +221,14 @@ and `1` for anything that failed while running. Passing it to `os.Exit` is what
 makes failures visible to `set -e` scripts and CI. Calling `cli.Root.Execute()`
 directly discards the error and always exits `0`.
 
+Built-in commands such as `auth profile use` and `server current` print a
+sentence when stdout is a terminal and no format was requested, and the same
+record as before for `-o json`, `-o yaml`, `-o toon` and pipes. Remedies that
+name the setup command say `<binary> auth setup`; set `SetupHint` (for example
+`"my-cli auth login"`) when your CLI adds profiles another way. A failed API
+response is a `*cli.HTTPError` with `StatusCode` and the redacted `Body`, so
+read it with `errors.As` rather than parsing the message.
+
 A CLI that cancels in-flight requests on SIGINT/SIGTERM needs a context, and
 calling `cli.Root.ExecuteContext(ctx)` for it loses the same contract — the
 unknown-subcommand check and the usage exit code live in `cli.Execute`, not on

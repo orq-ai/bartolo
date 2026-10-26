@@ -147,20 +147,33 @@ func newProfileListCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			profiles := Creds.GetStringMap("profiles")
 			if len(profiles) == 0 {
-				return Formatter.Format(map[string]interface{}{
+				message := fmt.Sprintf("No profiles configured. Run `%s` to add one.", SetupCommand(""))
+				return formatResult(map[string]interface{}{
 					"profiles": []map[string]interface{}{},
-					"message":  fmt.Sprintf("No profiles configured. Use `%s auth setup` to add one.", Root.CommandPath()),
-				})
+					"message":  message,
+				}, func() string { return message })
 			}
 
 			active := ActiveProfileName()
 			listed := make([]map[string]interface{}, 0, len(profiles))
+			rows := make([]map[string]interface{}, 0, len(profiles))
 			for _, name := range sortedKeys(profiles) {
 				profile, ok := profiles[name].(map[string]interface{})
 				if !ok {
 					continue
 				}
-				listed = append(listed, profileListEntry(name, profile, active))
+				entry, key := profileListEntry(name, profile, active)
+				listed = append(listed, entry)
+				rows = append(rows, map[string]interface{}{
+					"active": activeMarker(name == active),
+					"name":   name,
+					"server": entry["server"],
+					"key":    key,
+				})
+			}
+
+			if HumanOutput() {
+				return FormatList(rows, "active", "name", "server", "key")
 			}
 
 			// Keep the response shape stable for existing JSON consumers.
@@ -174,21 +187,57 @@ func newProfileListCommand() *cobra.Command {
 // resolved handler used to choose the fields, which hid a stored credential
 // whenever the profile's type label named a scheme this build no longer
 // registers — the listing is where someone goes to find that credential.
-func profileListEntry(name string, profile map[string]interface{}, active string) map[string]interface{} {
+// key is the first secret it holds, masked, for the table's KEY column.
+func profileListEntry(name string, profile map[string]interface{}, active string) (entry map[string]interface{}, key interface{}) {
 	typeName, _ := profile["type"].(string)
-	entry := map[string]interface{}{"name": name, "type": typeName, "active": name == active}
+	entry = map[string]interface{}{"name": name, "type": typeName, "active": name == active}
 
-	for _, key := range sortedKeys(profile) {
+	for _, stored := range sortedKeys(profile) {
 		// Read by the stored spelling, report by the normalized one: a
 		// hand-written "api-key" is a field on disk like any other.
-		field := normalizeProfileKeyName(key)
+		field := normalizeProfileKeyName(stored)
 		if field == "type" {
 			continue
 		}
-		entry[field] = maskIfSecret(field, profile[key])
+		entry[field] = maskIfSecret(field, profile[stored])
+		if key == nil && looksSensitiveKey(field) {
+			key = entry[field]
+		}
 	}
 
-	return entry
+	return entry, key
+}
+
+// activeMarker is the cell that marks the row in use.
+func activeMarker(active bool) string {
+	if active {
+		return "*"
+	}
+	return ""
+}
+
+// profileSourceText names what put a profile in force, for a person.
+func profileSourceText(source string) string {
+	switch source {
+	case "flag":
+		return "--profile"
+	case "env":
+		return "the environment"
+	}
+	return "`" + commandRef("auth profile use") + "`"
+}
+
+// profileInForceText says which profile the next command uses, and what to
+// run when there is none.
+func profileInForceText() string {
+	name, source := activeProfileNameWithSource()
+	switch {
+	case name == "":
+		return fmt.Sprintf("No profile is in force. Run `%s` to pick one, or `%s` to add one.", commandRef("auth profile use <name>"), SetupCommand(""))
+	case !ProfileExists(name):
+		return fmt.Sprintf("Profile %s is selected by %s but does not exist. Run `%s` to see the stored profiles.", name, profileSourceText(source), commandRef("auth profile list"))
+	}
+	return fmt.Sprintf("Using profile %s (%s), selected by %s.", name, ResolveServer(), profileSourceText(source))
 }
 
 func newProfileUseCommand(use string) *cobra.Command {
@@ -207,7 +256,13 @@ func newProfileUseCommand(use string) *cobra.Command {
 				return err
 			}
 
-			return Formatter.Format(map[string]interface{}{"active_profile": name, "persisted": true})
+			return formatResult(map[string]interface{}{"active_profile": name, "persisted": true}, func() string {
+				if ActiveProfileName() != name {
+					// --profile or the environment outranks the stored choice.
+					return fmt.Sprintf("Saved profile %s as the default. %s", name, profileInForceText())
+				}
+				return fmt.Sprintf("Now using profile %s (%s).", name, ResolveServer())
+			})
 		},
 	}
 }
@@ -223,12 +278,12 @@ func newProfileCurrentCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name, source := activeProfileNameWithSource()
 
-			return Formatter.Format(map[string]interface{}{
+			return formatResult(map[string]interface{}{
 				"active_profile": name,
 				"source":         source,
 				"exists":         ProfileExists(name),
 				"profile_server": ProfileServer(),
-			})
+			}, profileInForceText)
 		},
 	}
 }
@@ -262,12 +317,13 @@ func newProfileRemoveCommand() *cobra.Command {
 			cleared := false
 			if sanitizeProfileName(viper.GetString("profile-selected")) == name {
 				if err := persistProfileSelection(""); err != nil {
-					return fmt.Errorf("profile %q was removed but is still selected: %w; run `auth profile clear`", name, err)
+					return fmt.Errorf("profile %q was removed but is still selected: %w; run `%s`", name, err, commandRef("auth profile clear"))
 				}
 				cleared = true
 			}
 
-			return Formatter.Format(map[string]interface{}{"removed_profile": name, "selection_cleared": cleared})
+			return formatResult(map[string]interface{}{"removed_profile": name, "selection_cleared": cleared},
+				func() string { return fmt.Sprintf("Removed profile %s. %s", name, profileInForceText()) })
 		},
 	}
 }
@@ -282,7 +338,8 @@ func newProfileClearCommand() *cobra.Command {
 				return err
 			}
 
-			return Formatter.Format(map[string]interface{}{"active_profile": ActiveProfileName(), "persisted": true})
+			return formatResult(map[string]interface{}{"active_profile": ActiveProfileName(), "persisted": true},
+				func() string { return "Cleared the stored profile selection. " + profileInForceText() })
 		},
 	}
 }
@@ -1065,7 +1122,7 @@ func saveAuthProfile(typeName string, profileName string, keys []string, values 
 	// next `auth profile use`.
 	if !ProfileSelected() {
 		if err := persistProfileSelection(profileName); err != nil {
-			return fmt.Errorf("profile %q was saved but could not be selected: %w; run `auth profile use %s` or pass --profile %s", profileName, err, profileName, profileName)
+			return fmt.Errorf("profile %q was saved but could not be selected: %w; run `%s` or pass --profile %s", profileName, err, commandRef("auth profile use "+profileName), profileName)
 		}
 	}
 
@@ -1364,5 +1421,5 @@ func adoptLegacyDefaultProfile() {
 		return
 	}
 
-	fmt.Fprintf(Stderr, "Profile %q is the active authentication profile. The environment API key is not consulted while a profile is in force; run `auth profile clear` to opt out.\n", "default")
+	fmt.Fprintf(Stderr, "Profile %q is the active authentication profile. The environment API key is not consulted while a profile is in force; run `%s` to opt out.\n", "default", commandRef("auth profile clear"))
 }

@@ -144,12 +144,12 @@ func (h *Handler) lookupKey(profile map[string]string, activeProfile string) (ke
 func (h *Handler) missingKeyError(name string, source string) error {
 	switch source {
 	case "profile-unknown":
-		return fmt.Errorf("profile %q is not configured; run `auth setup --profile %s` or pick one with `auth profile list`", name, name)
+		return fmt.Errorf("profile %q is not configured; run `%s` or pick one with `auth profile list`", name, cli.SetupCommand(name))
 	case "profile-incomplete":
-		return fmt.Errorf("profile %q has no API key; run `auth setup --profile %s`", name, name)
+		return fmt.Errorf("profile %q has no API key; run `%s`", name, cli.SetupCommand(name))
 	}
 
-	remedies := []string{"configure a profile with `auth setup`"}
+	remedies := []string{"configure a profile with `" + cli.SetupCommand("") + "`"}
 	if len(h.EnvVars) > 0 {
 		remedies = append(remedies, "set one of "+strings.Join(h.EnvVars, ", "))
 	}

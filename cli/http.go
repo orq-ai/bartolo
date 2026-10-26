@@ -325,8 +325,21 @@ func ResponseError(resp *gentleman.Response) error {
 		return fmt.Errorf("the request failed with no response")
 	}
 
-	body := redactBody(resp.Header.Get("content-type"), string(resp.Bytes()))
-	return fmt.Errorf("HTTP %d:\n%s", resp.StatusCode, body)
+	return &HTTPError{
+		StatusCode: resp.StatusCode,
+		Body:       redactBody(resp.Header.Get("content-type"), string(resp.Bytes())),
+	}
+}
+
+// HTTPError is a failed response, so a caller can read the status and body
+// with errors.As instead of parsing the message. Body is redacted.
+type HTTPError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("HTTP %d:\n%s", e.StatusCode, e.Body)
 }
 
 func unmarshalBody(headers http.Header, data []byte, s interface{}) error {

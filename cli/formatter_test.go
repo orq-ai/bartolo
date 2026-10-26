@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 )
@@ -667,6 +668,8 @@ func TestDefaultFormatterClassifiesEnvelopeShapes(t *testing.T) {
 		table      = "table"
 		noResults  = "no results"
 		serialized = "serialized"
+		// record is a single object: serialized, without the fallback notice.
+		record = "record"
 	)
 
 	rowOne := map[string]interface{}{"id": "one"}
@@ -689,7 +692,7 @@ func TestDefaultFormatterClassifiesEnvelopeShapes(t *testing.T) {
 		{"two populated arrays", map[string]interface{}{"input": []interface{}{rowOne}, "output": []interface{}{rowTwo}}, serialized, ""},
 		{"scalar array beside an empty sibling", map[string]interface{}{"ids": []interface{}{"a", "b"}, "warnings": []interface{}{}}, serialized, ""},
 		{"scalar array beside an empty conventional key", map[string]interface{}{"data": []interface{}{}, "ids": []interface{}{"a", "b"}}, serialized, ""},
-		{"no array at all", map[string]interface{}{"id": "one"}, serialized, ""},
+		{"no array at all", map[string]interface{}{"id": "one"}, record, ""},
 	}
 
 	for _, tt := range tests {
@@ -717,6 +720,9 @@ func TestDefaultFormatterClassifiesEnvelopeShapes(t *testing.T) {
 				assert.NotContains(t, out.String(), "No results.")
 				assert.NotContains(t, out.String(), "│")
 				assert.Contains(t, errOut.String(), "Not shown as a table")
+			case record:
+				assert.Contains(t, out.String(), "one")
+				assert.Empty(t, errOut.String())
 			}
 		})
 	}
@@ -827,7 +833,7 @@ func TestDefaultFormatterFooterCountsAgainstTotal(t *testing.T) {
 }
 
 func TestTableFooterKeepsUnrecognizedEnvelopeFields(t *testing.T) {
-	footer, err := tableFooter(2, "evaluators", map[string]interface{}{
+	footer, err := tableFooter(make([]map[string]interface{}, 2), "evaluators", map[string]interface{}{
 		"enabled": true,
 		"id":      "pol_1",
 		"name":    "PII guard",
@@ -1113,4 +1119,50 @@ func TestDefaultFormatterFooterStaysQuietWithoutMorePages(t *testing.T) {
 		"total_pages": 1,
 	}))
 	assert.NotContains(t, out.String(), "more available")
+}
+
+// The footer names the flag that fetches the next page when the running command
+// has one, and timestamps are cut to the minute.
+func TestTableFooterNamesNextPageFlagAndShortensTimestamps(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	out := new(bytes.Buffer)
+	original, originalCommand := Stdout, runningCommand
+	Stdout = out
+	t.Cleanup(func() { Stdout, runningCommand = original, originalCommand })
+
+	runningCommand = &cobra.Command{Use: "list"}
+	runningCommand.Flags().String("starting-after", "", "")
+
+	err := NewDefaultFormatter(false, true).FormatList(map[string]interface{}{
+		"has_more": true,
+		"data":     []interface{}{map[string]interface{}{"id": "agent_1", "created": "2026-06-10T09:02:31.767Z"}},
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "1 shown, more available; next page: --starting-after agent_1")
+	assert.Contains(t, out.String(), "2026-06-10 09:02")
+	assert.NotContains(t, out.String(), "09:02:31")
+}
+
+// A total does not hide the next-page hint, and a server token is quoted
+// before it lands in a command someone pastes.
+func TestTableFooterHintWithTotalQuotesTheToken(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	out := new(bytes.Buffer)
+	original, originalCommand := Stdout, runningCommand
+	Stdout = out
+	t.Cleanup(func() { Stdout, runningCommand = original, originalCommand })
+
+	runningCommand = &cobra.Command{Use: "list"}
+	runningCommand.Flags().String("cursor", "", "")
+
+	err := NewDefaultFormatter(false, true).FormatList(map[string]interface{}{
+		"total":       50,
+		"next_cursor": "a b;$x",
+		"data":        []interface{}{map[string]interface{}{"id": "one"}},
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "1 of 50; next page: --cursor 'a b;$x'")
+	assert.Equal(t, "", flagHint("cursor", "evil\x1b[2J"), "a token with control bytes is not echoed")
 }

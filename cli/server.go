@@ -43,6 +43,27 @@ func newServerListCommand() *cobra.Command {
 				})
 			}
 
+			if HumanOutput() {
+				inList := false
+				rows := make([]map[string]interface{}, 0, len(items))
+				for _, item := range items {
+					inList = inList || item["selected"] == true
+					rows = append(rows, map[string]interface{}{
+						"selected":    activeMarker(item["selected"] == true),
+						"index":       item["index"],
+						"description": item["description"],
+						"url":         item["url"],
+					})
+				}
+				if err := FormatList(rows, "selected", "index", "description", "url"); err != nil {
+					return err
+				}
+				if !inList {
+					fmt.Fprintf(Stdout, "None of these is in use: %s.\n", serverInUse())
+				}
+				return nil
+			}
+
 			return FormatList(map[string]interface{}{
 				"selected_server": currentURL,
 				"overridden":      overridden,
@@ -58,13 +79,13 @@ func newServerCurrentCommand() *cobra.Command {
 		Short: "Show the currently selected server",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return Formatter.Format(map[string]interface{}{
+			return formatResult(map[string]interface{}{
 				"server":          ResolveServer(),
 				"server_index":    viper.GetInt("server-index"),
 				"server_override": viper.GetString("server"),
 				"server_default":  viper.GetString("server-default"),
 				"profile_server":  ProfileServer(),
-			})
+			}, func() string { return "Using " + serverInUse() + "." })
 		},
 	}
 }
@@ -88,10 +109,12 @@ func newServerUseCommand() *cobra.Command {
 				return err
 			}
 
-			return Formatter.Format(map[string]interface{}{
+			return formatResult(map[string]interface{}{
 				"persisted": true,
 				"server":    server["url"],
 				"index":     index,
+			}, func() string {
+				return "Default server is now " + server["url"] + "." + serverStillOverridden(server["url"])
 			})
 		},
 	}
@@ -115,11 +138,11 @@ func newServerSetCommand() *cobra.Command {
 				return err
 			}
 
-			return Formatter.Format(map[string]interface{}{
+			return formatResult(map[string]interface{}{
 				"persisted": true,
 				"server":    url,
 				"override":  true,
-			})
+			}, func() string { return "Default server is now " + url + "." + serverStillOverridden(url) })
 		},
 	}
 }
@@ -137,13 +160,53 @@ func newServerClearCommand() *cobra.Command {
 				return err
 			}
 
-			return Formatter.Format(map[string]interface{}{
+			return formatResult(map[string]interface{}{
 				"persisted": true,
 				"server":    ResolveServer(),
 				"override":  false,
+			}, func() string {
+				return "Cleared the custom server. Using " + serverInUse() + "."
 			})
 		},
 	}
+}
+
+// serverInUse is the server the next command uses and where it comes from,
+// for a person.
+func serverInUse() string {
+	server, origin := resolveServerWithOrigin()
+	return fmt.Sprintf("%s (%s)", server, origin.describe())
+}
+
+func (origin serverOrigin) describe() string {
+	switch origin {
+	case serverFromFlag:
+		return "from --server"
+	case serverFromProfile:
+		return "from profile " + ActiveProfileName()
+	case serverFromSetting:
+		return "from the environment or config"
+	case serverFromCustom:
+		return fmt.Sprintf("custom default; `%s` resets it", commandRef("server clear"))
+	}
+	servers := GetServers()
+	index := viper.GetInt("server-index")
+	if index < 0 || index >= len(servers) {
+		index = 0
+	}
+	if len(servers) == 0 || servers[index]["description"] == "" {
+		return "default"
+	}
+	return "default: " + strings.TrimSuffix(servers[index]["description"], ".")
+}
+
+// serverStillOverridden warns that a persisted default is not what the next
+// command uses, because --server, a profile or the environment outranks it.
+func serverStillOverridden(persisted string) string {
+	if server, origin := resolveServerWithOrigin(); server != persisted {
+		return fmt.Sprintf(" Still using %s (%s).", server, origin.describe())
+	}
+	return ""
 }
 
 func resolveServerSelection(input string) (int, map[string]string, error) {
