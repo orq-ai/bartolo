@@ -1143,3 +1143,26 @@ func TestTableFooterNamesNextPageFlagAndShortensTimestamps(t *testing.T) {
 	assert.Contains(t, out.String(), "2026-06-10 09:02")
 	assert.NotContains(t, out.String(), "09:02:31")
 }
+
+// A total does not hide the next-page hint, and a server token is quoted
+// before it lands in a command someone pastes.
+func TestTableFooterHintWithTotalQuotesTheToken(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	out := new(bytes.Buffer)
+	original, originalCommand := Stdout, runningCommand
+	Stdout = out
+	t.Cleanup(func() { Stdout, runningCommand = original, originalCommand })
+
+	runningCommand = &cobra.Command{Use: "list"}
+	runningCommand.Flags().String("cursor", "", "")
+
+	err := NewDefaultFormatter(false, true).FormatList(map[string]interface{}{
+		"total":       50,
+		"next_cursor": "a b;$x",
+		"data":        []interface{}{map[string]interface{}{"id": "one"}},
+	})
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "1 of 50; next page: --cursor 'a b;$x'")
+	assert.Equal(t, "", flagHint("cursor", "evil\x1b[2J"), "a token with control bytes is not echoed")
+}

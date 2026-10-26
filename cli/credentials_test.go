@@ -1598,8 +1598,9 @@ func TestBuiltinCommandsPrintSentencesAtATerminal(t *testing.T) {
 	execute("auth profile add scratch secret-scratch")
 	Formatter = NewDefaultFormatter(false, true)
 
+	bin := Root.CommandPath()
 	assert.Equal(t, "Now using profile acme (https://acme.example.com).\n", execute("auth profile use acme"))
-	assert.Equal(t, "Using profile acme (https://acme.example.com), selected by `auth profile use`.\n", execute("auth profile current"))
+	assert.Equal(t, "Using profile acme (https://acme.example.com), selected by `"+bin+" auth profile use`.\n", execute("auth profile current"))
 	assert.Equal(t, "Using https://acme.example.com (from profile acme).\n", execute("server current"))
 	assert.Equal(t, "Default output format is table.\n", execute("default-format"))
 
@@ -1607,7 +1608,6 @@ func TestBuiltinCommandsPrintSentencesAtATerminal(t *testing.T) {
 	assert.Regexp(t, `\*\s*│\s*acme\s*│\s*https://acme.example.com\s*│\s*\S+`, listing, "the active profile is marked")
 	assert.NotContains(t, listing, "secret-scratch", "the key stays masked")
 
-	bin := Root.CommandPath()
 	assert.Equal(t, "Removed profile acme. No profile is in force. Run `"+bin+" auth profile use <name>` to pick one, or `"+bin+" auth setup` to add one.\n",
 		execute("auth profile remove acme"))
 
@@ -1622,4 +1622,16 @@ func TestSetupHintNamesTheDownstreamCommand(t *testing.T) {
 
 	assert.Equal(t, "orq auth login --profile prod", SetupCommand("prod"))
 	assert.Contains(t, execute("auth profile list -o json"), "Run `orq auth login` to add one.")
+}
+
+// `server list` says nothing listed is in use only when no row is marked, even
+// when a profile is what selected the marked row.
+func TestServerListNamesAnUnlistedServer(t *testing.T) {
+	serverFixture(t, "https://acme.example.com")
+	Formatter = NewDefaultFormatter(false, true)
+	assert.Contains(t, execute("server list"), "None of these is in use: https://acme.example.com (from profile acme).")
+
+	serverFixture(t, "https://prod.example.com")
+	Formatter = NewDefaultFormatter(false, true)
+	assert.NotContains(t, execute("server list"), "None of these is in use")
 }

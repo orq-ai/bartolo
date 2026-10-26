@@ -44,14 +44,22 @@ func newServerListCommand() *cobra.Command {
 			}
 
 			if HumanOutput() {
+				inList := false
+				rows := make([]map[string]interface{}, 0, len(items))
 				for _, item := range items {
-					item["selected"] = activeMarker(item["selected"] == true)
+					inList = inList || item["selected"] == true
+					rows = append(rows, map[string]interface{}{
+						"selected":    activeMarker(item["selected"] == true),
+						"index":       item["index"],
+						"description": item["description"],
+						"url":         item["url"],
+					})
 				}
-				if err := FormatList(items, "selected", "index", "description", "url"); err != nil {
+				if err := FormatList(rows, "selected", "index", "description", "url"); err != nil {
 					return err
 				}
-				if overridden {
-					fmt.Fprintf(Stdout, "None of these is in use: %s (%s).\n", currentURL, serverSource())
+				if !inList {
+					fmt.Fprintf(Stdout, "None of these is in use: %s.\n", serverInUse())
 				}
 				return nil
 			}
@@ -77,7 +85,7 @@ func newServerCurrentCommand() *cobra.Command {
 				"server_override": viper.GetString("server"),
 				"server_default":  viper.GetString("server-default"),
 				"profile_server":  ProfileServer(),
-			}, fmt.Sprintf("Using %s (%s).", ResolveServer(), serverSource()))
+			}, func() string { return "Using " + serverInUse() + "." })
 		},
 	}
 }
@@ -105,7 +113,9 @@ func newServerUseCommand() *cobra.Command {
 				"persisted": true,
 				"server":    server["url"],
 				"index":     index,
-			}, "Default server is now "+server["url"]+"."+serverStillOverridden(server["url"]))
+			}, func() string {
+				return "Default server is now " + server["url"] + "." + serverStillOverridden(server["url"])
+			})
 		},
 	}
 }
@@ -132,7 +142,7 @@ func newServerSetCommand() *cobra.Command {
 				"persisted": true,
 				"server":    url,
 				"override":  true,
-			}, "Default server is now "+url+"."+serverStillOverridden(url))
+			}, func() string { return "Default server is now " + url + "." + serverStillOverridden(url) })
 		},
 	}
 }
@@ -154,25 +164,30 @@ func newServerClearCommand() *cobra.Command {
 				"persisted": true,
 				"server":    ResolveServer(),
 				"override":  false,
-			}, fmt.Sprintf("Cleared the custom server. Using %s (%s).", ResolveServer(), serverSource()))
+			}, func() string {
+				return "Cleared the custom server. Using " + serverInUse() + "."
+			})
 		},
 	}
 }
 
-// serverSource says where ResolveServer's value comes from, in
-// resolveServerRaw's order.
-func serverSource() string {
-	if override, _ := flagValueIfChanged(Root, "server"); override != "" {
+// serverInUse is the server the next command uses and where it comes from,
+// for a person.
+func serverInUse() string {
+	server, origin := resolveServerWithOrigin()
+	return fmt.Sprintf("%s (%s)", server, origin.describe())
+}
+
+func (origin serverOrigin) describe() string {
+	switch origin {
+	case serverFromFlag:
 		return "from --server"
-	}
-	if ProfileServer() != "" {
+	case serverFromProfile:
 		return "from profile " + ActiveProfileName()
-	}
-	if strings.TrimSpace(viper.GetString("server")) != "" {
+	case serverFromSetting:
 		return "from the environment or config"
-	}
-	if strings.TrimSpace(viper.GetString("server-default")) != "" {
-		return fmt.Sprintf("custom default; `%s server clear` resets it", Root.CommandPath())
+	case serverFromCustom:
+		return fmt.Sprintf("custom default; `%s` resets it", commandRef("server clear"))
 	}
 	servers := GetServers()
 	index := viper.GetInt("server-index")
@@ -188,8 +203,8 @@ func serverSource() string {
 // serverStillOverridden warns that a persisted default is not what the next
 // command uses, because --server, a profile or the environment outranks it.
 func serverStillOverridden(persisted string) string {
-	if current := ResolveServer(); current != persisted {
-		return fmt.Sprintf(" Still using %s (%s).", current, serverSource())
+	if server, origin := resolveServerWithOrigin(); server != persisted {
+		return fmt.Sprintf(" Still using %s (%s).", server, origin.describe())
 	}
 	return ""
 }

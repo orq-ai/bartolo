@@ -528,7 +528,7 @@ func newDefaultFormatCommand() *cobra.Command {
 			if len(args) == 0 {
 				return formatResult(map[string]interface{}{
 					"output_format": OutputFormat(),
-				}, fmt.Sprintf("Default output format is %s.", OutputFormat()))
+				}, func() string { return fmt.Sprintf("Default output format is %s.", OutputFormat()) })
 			}
 
 			next, ok := parseOutputFormat(args[0])
@@ -542,7 +542,7 @@ func newDefaultFormatCommand() *cobra.Command {
 			return formatResult(map[string]interface{}{
 				"output_format": next,
 				"persisted":     true,
-			}, fmt.Sprintf("Default output format is now %s.", next))
+			}, func() string { return fmt.Sprintf("Default output format is now %s.", next) })
 		},
 	}
 }
@@ -604,15 +604,20 @@ func migrateLegacyServerConfig(configDir string) {
 	viper.ReadInConfig()
 }
 
+// commandRef is a built-in command as a person types it, binary first.
+func commandRef(command string) string {
+	if Root == nil {
+		return command
+	}
+	return Root.CommandPath() + " " + command
+}
+
 // SetupCommand is the command to suggest for adding a profile: Config.SetupHint,
 // with `--profile <name>` when the remedy is about one profile.
 func SetupCommand(profile string) string {
 	command := setupHint
 	if command == "" {
-		command = "auth setup"
-		if Root != nil {
-			command = Root.CommandPath() + " " + command
-		}
+		command = commandRef("auth setup")
 	}
 	if profile != "" {
 		command += " --profile " + profile

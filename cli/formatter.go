@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/alecthomas/chroma"
 	"github.com/alecthomas/chroma/quick"
@@ -75,18 +76,25 @@ func FormatList(data interface{}, columns ...string) error {
 	return Formatter.Format(data)
 }
 
-// HumanOutput reports whether a result goes to a person: stdout is a terminal
-// and no machine format, --raw or --jmespath was asked for. Built-in commands
-// print a sentence then, and keep their record for everything else.
+// HumanOutput reports whether a result goes to a person, so built-in commands
+// print a sentence instead of their record. A custom Formatter opts in by
+// implementing HumanOutput() bool, which a wrapper can delegate.
 func HumanOutput() bool {
-	formatter, ok := Formatter.(*DefaultFormatter)
-	return ok && formatter.shouldRenderTable() && viper.GetString("jmespath") == ""
+	formatter, ok := Formatter.(interface{ HumanOutput() bool })
+	return ok && formatter.HumanOutput()
 }
 
-// formatResult prints text for a person and record for a script.
-func formatResult(record interface{}, text string) error {
+// HumanOutput is true when stdout is a terminal and no machine format, --raw or
+// --jmespath was asked for.
+func (f *DefaultFormatter) HumanOutput() bool {
+	return f.shouldRenderTable() && viper.GetString("jmespath") == ""
+}
+
+// formatResult prints text for a person and record for a script. text is a
+// func so the machine path never builds a sentence it would not print.
+func formatResult(record interface{}, text func() string) error {
 	if HumanOutput() {
-		fmt.Fprintln(Stdout, text)
+		fmt.Fprintln(Stdout, text())
 		return nil
 	}
 	return Formatter.Format(record)
@@ -683,14 +691,17 @@ func tableFooter(rows []map[string]interface{}, label string, metadata map[strin
 	shown := len(rows)
 
 	parts := make([]string, 0, len(metadata))
+	count := ""
 	if total, ok := metadataInt(metadata, "total", "total_count"); ok {
-		parts = append(parts, fmt.Sprintf("%d of %d", shown, total))
+		count = fmt.Sprintf("%d of %d", shown, total)
 	} else if moreAvailable(metadata) {
-		more := fmt.Sprintf("%d shown, more available", shown)
-		if hint := nextPageHint(rows, metadata); hint != "" {
-			more += "; next page: " + hint
-		}
-		parts = append(parts, more)
+		count = fmt.Sprintf("%d shown, more available", shown)
+	}
+	if hint := nextPageHint(rows, metadata); count != "" && hint != "" {
+		count += "; next page: " + hint
+	}
+	if count != "" {
+		parts = append(parts, count)
 	}
 
 	keys := make([]string, 0, len(metadata))
@@ -718,8 +729,8 @@ func moreAvailable(metadata map[string]interface{}) bool {
 			return true
 		}
 	}
-	for _, key := range []string{"next_page_token", "next_page", "next_cursor", "cursor", "starting_after"} {
-		if token, ok := metadata[key].(string); ok && token != "" {
+	for _, pair := range nextPageTokens {
+		if token, ok := metadata[pair.key].(string); ok && token != "" {
 			return true
 		}
 	}
@@ -727,31 +738,45 @@ func moreAvailable(metadata map[string]interface{}) bool {
 	return ok && pages > 1
 }
 
-// nextPageFlags pairs an envelope key holding the next page's token with the
-// flag a generated list command takes it as.
-var nextPageFlags = []struct{ key, flag string }{
+// nextPageTokens are the envelope keys holding the next page's token, with the
+// flag a generated list command takes it as. next_page is often a URL, so no
+// flag is guessed for it.
+var nextPageTokens = []struct{ key, flag string }{
+	{"next_page_token", "page-token"},
+	{"next_page", ""},
 	{"next_cursor", "cursor"},
 	{"cursor", "cursor"},
-	{"next_page_token", "page-token"},
 	{"starting_after", "starting-after"},
 }
 
 // nextPageHint names the flag and value that fetch the next page, or nothing
 // when the running command has no flag to take it.
 func nextPageHint(rows []map[string]interface{}, metadata map[string]interface{}) string {
-	for _, pair := range nextPageFlags {
-		if token, ok := metadata[pair.key].(string); ok && token != "" && runningCommandHasFlag(pair.flag) {
-			return fmt.Sprintf("--%s %s", pair.flag, token)
+	for _, pair := range nextPageTokens {
+		if token, ok := metadata[pair.key].(string); ok && token != "" && pair.flag != "" && runningCommandHasFlag(pair.flag) {
+			return flagHint(pair.flag, token)
 		}
 	}
 
 	// A bare has_more carries no token: the next page starts after the last row.
 	if more, _ := metadata["has_more"].(bool); more && len(rows) > 0 && runningCommandHasFlag("starting-after") {
 		if id, ok := rows[len(rows)-1]["id"].(string); ok && id != "" {
-			return "--starting-after " + id
+			return flagHint("starting-after", id)
 		}
 	}
 	return ""
+}
+
+// flagHint renders `--flag value` safe to paste into a shell. The value came
+// from the server, so one that cannot be shown verbatim yields no hint.
+func flagHint(flag, value string) string {
+	if strings.IndexFunc(value, func(r rune) bool { return !unicode.IsPrint(r) }) >= 0 {
+		return ""
+	}
+	if strings.Trim(value, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:=+/") != "" {
+		value = "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+	}
+	return "--" + flag + " " + value
 }
 
 func runningCommandHasFlag(name string) bool {
