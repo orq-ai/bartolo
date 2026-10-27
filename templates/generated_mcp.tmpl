@@ -5,6 +5,9 @@ package generated
 
 import (
 	"encoding/json"
+	{{- if .API.MCPNeedsTime }}
+	"time"
+	{{- end }}
 
 	"github.com/orq-ai/bartolo/mcpserver"
 )
@@ -12,6 +15,16 @@ import (
 // mcpInstructions is the server instructions string surfaced to connected MCP
 // clients (app name, API title, and short outbound-auth guidance).
 const mcpInstructions = {{ .API.MCPInstructions | printf "%q" }}
+
+// mcpOptions configures the server: its instructions, then the `mcp` block of
+// .bartolo.json.
+func mcpOptions() []mcpserver.Option {
+	return []mcpserver.Option{
+		{{- range .API.MCPServerOptions }}
+		{{ . }},
+		{{- end }}
+	}
+}
 
 // mcpTools returns the MCP tool definitions for every non-excluded operation.
 // mcpserver.APITool routes each call's validated arguments per Routes, and the

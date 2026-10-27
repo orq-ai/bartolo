@@ -272,6 +272,8 @@ type ProjectConfig struct {
 	// When absent (legacy configs), both surfaces are generated. See
 	// defaultTargets / effectiveTargets.
 	Targets []string `json:"targets,omitempty"`
+	// MCP holds the generated MCP server's protocol-level options.
+	MCP *MCPConfig `json:"mcp,omitempty"`
 }
 
 // defaultTargets is the surface set used when a project does not record an
@@ -406,6 +408,9 @@ type OpenAPI struct {
 	// render time. TargetMCP additionally gates HasMCPTools.
 	TargetCLI bool
 	TargetMCP bool
+	// MCPConfig is the project's `mcp` block, rendered into the generated
+	// server's options.
+	MCPConfig *MCPConfig
 }
 
 // AuthScheme is a recognized (or explicitly unsupported) OpenAPI security
@@ -3891,6 +3896,10 @@ func generateFromSpec(specPath string) error {
 		}
 		templateData.TargetCLI = config.TargetCLI()
 		templateData.TargetMCP = config.TargetMCP()
+		if err := config.MCP.check(); err != nil {
+			return err
+		}
+		templateData.MCPConfig = config.MCP
 	}
 	enrichOpenAPIForREADME(templateData, config)
 	writeGeneratedCommandFiles(templateData, shortName)

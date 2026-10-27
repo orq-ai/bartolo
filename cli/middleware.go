@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"maps"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -89,14 +90,44 @@ func SetRequestContext(params *viper.Viper, ctx context.Context) {
 	params.Set(requestContextKey, ctx)
 }
 
-// bindRequestContext applies the context SetRequestContext stored, if any.
+// bindRequestContext applies the context SetRequestContext stored, if any,
+// and the headers WithRequestHeaders put on it.
 func bindRequestContext(params *viper.Viper, r *gentleman.Request) {
 	if params == nil || r == nil || r.Context == nil {
 		return
 	}
-	if ctx, ok := params.Get(requestContextKey).(context.Context); ok {
-		r.Context.SetCancelContext(ctx)
+	ctx, ok := params.Get(requestContextKey).(context.Context)
+	if !ok {
+		return
 	}
+	r.Context.SetCancelContext(ctx)
+	for name, value := range RequestHeaders(ctx) {
+		if r.Context.Request.Header.Get(name) == "" {
+			r.SetHeader(name, value)
+		}
+	}
+}
+
+// requestHeadersKey carries headers every request made under a context sends.
+type requestHeadersKey struct{}
+
+// WithRequestHeaders returns a context whose generated requests also send
+// headers, without replacing one a request already sets. The MCP server uses
+// it to propagate a caller's W3C trace context to the API. Bind the context
+// with SetRequestContext.
+func WithRequestHeaders(ctx context.Context, headers map[string]string) context.Context {
+	merged := maps.Clone(RequestHeaders(ctx))
+	if merged == nil {
+		merged = make(map[string]string, len(headers))
+	}
+	maps.Copy(merged, headers)
+	return context.WithValue(ctx, requestHeadersKey{}, merged)
+}
+
+// RequestHeaders returns the headers WithRequestHeaders put on ctx.
+func RequestHeaders(ctx context.Context) map[string]string {
+	headers, _ := ctx.Value(requestHeadersKey{}).(map[string]string)
+	return headers
 }
 
 // requestCredentialKey carries the credential of the caller a request acts for.

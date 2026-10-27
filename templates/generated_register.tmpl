@@ -31,7 +31,7 @@ func Register(root *cobra.Command) {
 	{{- end }}
 	{{- end }}
 	{{- if .HasMCPTools }}
-	mcpCommand := mcpserver.Command(viper.GetString("app-name"), root.Version, mcpTools, mcpserver.SetInstructions(mcpInstructions))
+	mcpCommand := mcpserver.Command(viper.GetString("app-name"), root.Version, mcpTools, mcpOptions()...)
 	root.AddCommand(mcpCommand)
 	{{- if not .TargetCLI }}
 	// MCP-first: with no CLI command surface, the bare binary serves the MCP

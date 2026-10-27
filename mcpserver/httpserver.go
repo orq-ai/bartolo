@@ -62,6 +62,12 @@ func serveHTTP(ctx context.Context, info serverInfo, defs []ToolDef, opts httpSe
 	if err != nil {
 		return err
 	}
+	if info.settings.serverCard != nil {
+		opts.routes = append(opts.routes, httpRoute{
+			pattern: "GET " + info.settings.serverCard.endpoint() + "/server-card",
+			handler: serverCardHandler(info, opts.authMode),
+		})
+	}
 	handler, err := buildHTTPHandler(ctx, server, opts)
 	if err != nil {
 		return err

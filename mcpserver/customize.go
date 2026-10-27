@@ -122,6 +122,7 @@ func mergeConfig(cmdCfg *config) *config {
 		routes:       slices.Clone(cmdCfg.routes),
 		patches:      slices.Clone(cmdCfg.patches),
 		wraps:        slices.Clone(cmdCfg.wraps),
+		settings:     cmdCfg.settings,
 	}
 	for _, o := range snapshotUseOpts() {
 		o(runtime)

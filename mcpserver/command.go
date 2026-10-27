@@ -23,11 +23,6 @@ import (
 	"github.com/spf13/viper"
 )
 
-// listTTL is how long clients may cache server/discover and tools/list results
-// (ttlMs, SEP-2549). The tool set is fixed for the life of the process, so the
-// only staleness is across a redeploy.
-const listTTL = 5 * time.Minute
-
 // validToolName is the MCP tool-name grammar.
 var validToolName = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,128}$`)
 
@@ -45,6 +40,8 @@ type config struct {
 	patches  []toolPatch
 	wraps    []func(ToolHandler) ToolHandler
 	routes   []httpRoute
+
+	settings settings
 }
 
 // SetInstructions sets the MCP server instructions surfaced to connected
@@ -100,6 +97,9 @@ type serverInfo struct {
 	// forwardCredentials makes every tool call reach the upstream API with the
 	// caller's own Authorization header (--http-auth forward).
 	forwardCredentials bool
+	// settings are the protocol-level choices from SetMetadata, SetListTTL,
+	// SetProtocolVersions, SetTraceContext, and PublishServerCard.
+	settings settings
 }
 
 // filterTools narrows the tool list per the --tools / --groups / --read-only
@@ -158,7 +158,13 @@ func Command(appName, version string, tools func() []ToolDef, opts ...Option) *c
 			if err != nil {
 				return err
 			}
-			info := serverInfo{name: appName, version: version, instructions: runtime.instructions, cacheScope: "public"}
+			info := serverInfo{
+				name:         appName,
+				version:      version,
+				instructions: runtime.instructions,
+				cacheScope:   "public",
+				settings:     runtime.settings,
+			}
 
 			if http.addr == "" {
 				if err := rejectHTTPOnlyFlags(cmd.Flags()); err != nil {
@@ -364,30 +370,34 @@ func serveStdio(ctx context.Context, info serverInfo, defs []ToolDef) error {
 
 // buildServer constructs an *mcp.Server with every def registered as a tool.
 //
-// The server declares only the tools capability: logging is deprecated as of
-// 2026-07-28 (SEP-2577) and the SDK would otherwise advertise it, and the tool
-// set never changes while the server runs, so there is no list_changed to send.
+// The server declares tools, plus prompts and resources it has none of (see
+// capabilities): never logging, deprecated as of 2026-07-28 (SEP-2577), which
+// the SDK would otherwise advertise. The tool set never changes while the
+// server runs, so there is no list_changed to send.
 // SDK diagnostics go to stderr, never stdout.
 func buildServer(info serverInfo, defs []ToolDef) (*mcp.Server, error) {
+	if err := info.settings.validate(); err != nil {
+		return nil, err
+	}
 	cacheScope := info.cacheScope
 	if cacheScope == "" {
 		cacheScope = "public"
 	}
-	server := mcp.NewServer(&mcp.Implementation{
-		Name:    info.name,
-		Version: info.version,
-	}, &mcp.ServerOptions{
-		Instructions: info.instructions,
-		Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}},
-		Logger:       slog.New(slog.NewTextHandler(cli.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
+	ttlMs := int(info.settings.ttl() / time.Millisecond)
+	server := mcp.NewServer(info.settings.implementation(info.name, info.version), &mcp.ServerOptions{
+		Instructions:              info.instructions,
+		Capabilities:              capabilities(),
+		Logger:                    slog.New(slog.NewTextHandler(cli.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
+		SupportedProtocolVersions: info.settings.protocolVersions,
 		SetCacheable: func(_ context.Context, _ mcp.Request, c *mcp.Cacheable) {
-			c.TTLMs = int(listTTL / time.Millisecond)
+			c.TTLMs = ttlMs
 			c.CacheScope = cacheScope
 		},
 	})
+	server.AddReceivingMiddleware(rejectUndeclaredMethods)
 
 	for _, def := range defs {
-		if err := registerTool(server, def, info.forwardCredentials); err != nil {
+		if err := registerTool(server, def, info); err != nil {
 			return nil, fmt.Errorf("registering tool %q: %w", def.Name, err)
 		}
 	}
@@ -401,7 +411,7 @@ var emptyObjectSchema = json.RawMessage(`{"type":"object"}`)
 // server with a self-validating handler (Server.AddTool does not validate).
 // Every check the SDK would panic on is reported as an error instead, since a
 // custom tool from cli/custom reaches here unvetted.
-func registerTool(server *mcp.Server, def ToolDef, forwardCredentials bool) error {
+func registerTool(server *mcp.Server, def ToolDef, info serverInfo) (err error) {
 	if def.Handler == nil {
 		return errors.New("tool has no handler")
 	}
@@ -428,7 +438,14 @@ func registerTool(server *mcp.Server, def ToolDef, forwardCredentials bool) erro
 		tool.OutputSchema = def.OutputSchema
 	}
 
-	server.AddTool(tool, makeHandler(def, resolved, forwardCredentials))
+	// The SDK panics on what it cannot register, such as an invalid x-mcp-header
+	// annotation; report it as this tool's error instead.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("%v", r)
+		}
+	}()
+	server.AddTool(tool, makeHandler(def, resolved, info))
 	return nil
 }
 
@@ -455,11 +472,16 @@ func resolveInputSchema(raw json.RawMessage) (*jsonschema.Resolved, error) {
 // read and correct — reserving protocol errors for the SDK (unknown tool,
 // malformed JSON-RPC). With forwardCredentials the handler's context carries the
 // caller's Authorization header, so every API request it makes acts as the
-// caller (cli.WithRequestCredential).
-func makeHandler(def ToolDef, resolved *jsonschema.Resolved, forwardCredentials bool) mcp.ToolHandler {
+// caller (cli.WithRequestCredential); with trace context on, it also carries
+// the caller's W3C trace context.
+func makeHandler(def ToolDef, resolved *jsonschema.Resolved, info serverInfo) mcp.ToolHandler {
+	traceOn := info.settings.traceContextEnabled()
 	return func(ctx context.Context, req *mcp.CallToolRequest) (result *mcp.CallToolResult, retErr error) {
-		if forwardCredentials {
+		if info.forwardCredentials {
 			ctx = cli.WithRequestCredential(ctx, callerAuthorization(req))
+		}
+		if traceOn {
+			ctx = withTraceContext(ctx, req)
 		}
 		defer func() {
 			if r := recover(); r != nil {
@@ -501,13 +523,17 @@ func callerAuthorization(req *mcp.CallToolRequest) string {
 // arrays and scalars as text only. A tool with an output schema must always
 // send structuredContent, so an empty response body becomes {}.
 func successResult(def ToolDef, out any) *mcp.CallToolResult {
+	hasSchema := len(def.OutputSchema) > 0
+	if text, ok := out.(string); ok && !hasSchema {
+		// Plain text from a custom tool is the text itself, not a JSON string.
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}
+	}
 	data, err := json.Marshal(out)
 	if err != nil {
 		return errorResult(fmt.Sprintf("failed to serialize result: %v", err))
 	}
 	res := &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(data)}}}
 
-	hasSchema := len(def.OutputSchema) > 0
 	switch {
 	case hasSchema && string(data) == "null":
 		res.StructuredContent = map[string]any{}

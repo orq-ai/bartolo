@@ -444,8 +444,8 @@ func TestServerAdvertisesToolsOnlyWithCacheTTL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.TTLMs != int(listTTL/time.Millisecond) || res.CacheScope != "public" {
-		t.Errorf("tools/list cache = %d/%q, want %d/public", res.TTLMs, res.CacheScope, int(listTTL/time.Millisecond))
+	if res.TTLMs != int(defaultListTTL/time.Millisecond) || res.CacheScope != "public" {
+		t.Errorf("tools/list cache = %d/%q, want %d/public", res.TTLMs, res.CacheScope, int(defaultListTTL/time.Millisecond))
 	}
 }
 

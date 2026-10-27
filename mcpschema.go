@@ -655,7 +655,9 @@ func buildMCPTool(o *Operation, op *openapi3.Operation, item *openapi3.PathItem)
 // mcpInputBuilder accumulates a tool's input schema properties and the routes
 // that send each one to its place in the API call.
 type mcpInputBuilder struct {
+	op         string              // "METHOD /path", for errors
 	flags      map[paramKey]string // CLI flag name of each optional param
+	headers    map[string]bool     // x-mcp-header names claimed, lowercased
 	properties map[string]any
 	required   []string
 	routes     []MCPArgRoute
@@ -666,7 +668,42 @@ func newMCPInputBuilder(o *Operation) *mcpInputBuilder {
 	for _, p := range o.OptionalParams {
 		flags[paramKey{p.In, p.Name}] = p.CLIName
 	}
-	return &mcpInputBuilder{flags: flags, properties: map[string]any{}}
+	return &mcpInputBuilder{
+		op:         strings.ToUpper(o.Method) + " " + o.Path,
+		flags:      flags,
+		headers:    map[string]bool{},
+		properties: map[string]any{},
+	}
+}
+
+// mcpHeaderExt marks a parameter or top-level body property whose value MCP
+// clients mirror into an Mcp-Param-<Name> HTTP header (SEP-2243), so gateways
+// and load balancers can route on it without parsing the request body.
+const mcpHeaderExt = "x-bartolo-mcp-header"
+
+// httpToken is the HTTP field-name grammar a header name must follow.
+var httpToken = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+
+// annotateHeader adds the x-mcp-header annotation ext asks for. The SDK
+// refuses to register a tool whose annotation is on a non-primitive value,
+// names an invalid header, or repeats one, so those fail generation instead.
+func (b *mcpInputBuilder) annotateHeader(schema, ext map[string]any, prop string) {
+	raw, ok := extLookup(ext, mcpHeaderExt)
+	if !ok {
+		return
+	}
+	name := extStr(raw)
+	typ, _ := schema["type"].(string)
+	switch {
+	case typ != "string" && typ != "integer" && typ != "boolean":
+		panic(fmt.Errorf("%s: %s on %q needs a single string, integer, or boolean type", b.op, mcpHeaderExt, prop))
+	case !httpToken.MatchString(name):
+		panic(fmt.Errorf("%s: %s %q is not a valid HTTP header name", b.op, mcpHeaderExt, name))
+	case b.headers[strings.ToLower(name)]:
+		panic(fmt.Errorf("%s: %s %q is used twice", b.op, mcpHeaderExt, name))
+	}
+	b.headers[strings.ToLower(name)] = true
+	schema["x-mcp-header"] = name
 }
 
 // claim returns a free property name: base, else prefix_base, else a numbered
@@ -716,6 +753,7 @@ func (b *mcpInputBuilder) addParams(params openapi3.Parameters) {
 		if _, ok := schema["description"]; !ok && pv.Description != "" {
 			schema["description"] = truncateMCPDescription(pv.Description, maxPropertyDescription)
 		}
+		b.annotateHeader(schema, pv.Extensions, prop)
 		b.add(schema, required, MCPArgRoute{Prop: prop, WireName: pv.Name, In: pv.In, Flag: flag, Required: required})
 	}
 }
@@ -744,7 +782,9 @@ func (b *mcpInputBuilder) addBody(op *openapi3.Operation) {
 		if prop == "" {
 			continue
 		}
-		b.add(convertSchema(pref, schemaInput), slices.Contains(merged.Required, name), MCPArgRoute{Prop: prop, WireName: name, In: "body"})
+		schema := convertSchema(pref, schemaInput)
+		b.annotateHeader(schema, pref.Value.Extensions, prop)
+		b.add(schema, slices.Contains(merged.Required, name), MCPArgRoute{Prop: prop, WireName: name, In: "body"})
 	}
 }
 
