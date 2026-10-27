@@ -1,0 +1,9 @@
+{
+  "title": "Conformance Fixture",
+  "description": "A bartolo-generated MCP server for conformance testing.",
+  "website_url": "https://github.com/orq-ai/bartolo",
+  "icons": [{"src": "https://github.com/orq-ai.png", "mime_type": "image/png", "sizes": ["48x48"]}],
+  "list_ttl_seconds": 300,
+  "trace_context": true,
+  "server_card": {"name": "ai.orq/bartolo-conformance", "endpoint": "/mcp", "repository": "https://github.com/orq-ai/bartolo"}
+}
