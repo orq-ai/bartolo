@@ -4,11 +4,16 @@ SHELL := /bin/sh
 TEST_ARGS ?=
 GENERATOR_BIN := $(CURDIR)/.bartolo-test-bin
 
-.PHONY: test smoke verify
+.PHONY: test smoke verify conformance
 
 test:
 	@echo "==> go test $(TEST_ARGS) ./..."
 	@go test $(TEST_ARGS) ./...
+
+# The official MCP conformance suite against a generated server, at every spec
+# revision's requirement set. See docs/mcp-conformance.md.
+conformance:
+	@conformance/run.sh
 
 smoke:
 	@echo "==> smoke: init, generate, and verify a fresh example CLI"

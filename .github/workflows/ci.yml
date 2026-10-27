@@ -21,6 +21,25 @@ jobs:
           cache: true
       - run: make verify
 
+  # The official MCP conformance suite (pinned in conformance/run.sh) against a
+  # generated server, for the 2025-11-25 and 2026-07-28 requirement sets. Every
+  # check it cannot pass is baselined with its reason in
+  # conformance/expected-failures-*.yaml; anything else fails the job, as does
+  # a baselined check that starts passing.
+  conformance:
+    name: mcp conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+      - run: make conformance
+
   vet:
     name: vet
     runs-on: ubuntu-latest

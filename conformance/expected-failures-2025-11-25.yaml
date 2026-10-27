@@ -1,0 +1,49 @@
+# Checks the 2025-11-25 requirement set scores that a bartolo-generated server
+# cannot pass, and why. conformance/run.sh fails on any other failing check, and
+# on an entry here that starts passing (a stale baseline).
+#
+# The suite targets an SDK's "everything" fixture. A generated server is an API
+# turned into tools: it has none of the fixture's prompts or resources, and by
+# design it never asks the client for anything (sampling, elicitation), never
+# logs, and returns JSON rather than images or audio. Every entry below falls
+# under one of the reasons on its group.
+server:
+  # Logging is deprecated (SEP-2577) and the server never emits log messages,
+  # so it does not declare or accept logging/setLevel.
+  - logging-set-level:logging-set-level
+  - tools-call-with-logging:tools-call-with-logging
+
+  # No prompts or resource templates to complete: completion is not declared.
+  - completion-complete:completion-complete
+
+  # Fixture prompts and resources: the server declares both capabilities but
+  # lists none (an API has no prompts or static resources).
+  - prompts-get-simple:prompts-get-simple
+  - prompts-get-with-args:prompts-get-with-args
+  - prompts-get-embedded-resource:prompts-get-embedded-resource
+  - prompts-get-with-image:prompts-get-with-image
+  - resources-read-text:resources-read-text
+  - resources-read-binary:resources-read-binary
+  - resources-templates-read:resources-templates-read
+
+  # Resource subscriptions are not offered (and are gone in 2026-07-28).
+  - resources-subscribe:resources-subscribe
+  - resources-unsubscribe:resources-unsubscribe
+
+  # Fixture tools returning content an API does not produce (images, audio,
+  # embedded resources, mixed blocks) or behavior the server never uses
+  # (progress notifications, sampling, elicitation).
+  - tools-call-image:tools-call-image
+  - tools-call-audio:tools-call-audio
+  - tools-call-embedded-resource:tools-call-embedded-resource
+  - tools-call-mixed-content:tools-call-mixed-content
+  - tools-call-with-progress:tools-call-with-progress
+  - tools-call-sampling:tools-call-sampling
+  - tools-call-elicitation:tools-call-elicitation
+  - elicitation-sep1034-defaults:elicitation-sep1034-general
+  - elicitation-sep1330-enums:elicitation-sep1330-general
+
+  # The server is stateless: it assigns no Mcp-Session-Id (optional in
+  # 2025-11-25, removed in 2026-07-28 by SEP-2567), so the session-scoped
+  # stream test warns that it has no session to attach streams to.
+  - server-sse-multiple-streams:server-sse-multiple-streams-session

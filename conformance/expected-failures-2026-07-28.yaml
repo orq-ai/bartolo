@@ -1,0 +1,57 @@
+# Checks the 2026-07-28 requirement set scores that a bartolo-generated server
+# cannot pass, and why. conformance/run.sh fails on any other failing check, and
+# on an entry here that starts passing (a stale baseline).
+#
+# The suite targets an SDK's "everything" fixture. A generated server is an API
+# turned into tools: it has none of the fixture's prompts or resources, and by
+# design it never asks the client for anything (multi round-trip requests),
+# never logs, and returns JSON rather than images or audio. Every entry below
+# falls under one of the reasons on its group.
+server:
+  # These need the suite's diagnostic tools: one that requires a client
+  # capability, one that logs, one that streams an elicitation. The server
+  # never requires a client capability, never emits notifications/message, and
+  # never sends a server-to-client request, so the requirements hold trivially
+  # but cannot be probed.
+  - server-stateless:sep-2575-server-rejects-undeclared-capability
+  - server-stateless:sep-2575-missing-capability-http-400
+  - server-stateless:sep-2575-http-server-no-independent-requests-on-stream
+  - server-stateless:sep-2575-server-no-log-without-loglevel
+
+  # No prompts or resource templates to complete: completion is not declared.
+  - completion-complete:completion-complete
+
+  # Fixture prompts and resources: the server declares both capabilities but
+  # lists none (an API has no prompts or static resources).
+  - prompts-get-simple:prompts-get-simple
+  - prompts-get-with-args:prompts-get-with-args
+  - prompts-get-embedded-resource:prompts-get-embedded-resource
+  - prompts-get-with-image:prompts-get-with-image
+  - resources-read-text:resources-read-text
+  - resources-read-binary:resources-read-binary
+  - resources-templates-read:resources-templates-read
+
+  # Fixture tools returning content an API does not produce (images, audio,
+  # embedded resources, mixed blocks) or progress notifications.
+  - tools-call-image:tools-call-image
+  - tools-call-audio:tools-call-audio
+  - tools-call-embedded-resource:tools-call-embedded-resource
+  - tools-call-mixed-content:tools-call-mixed-content
+  - tools-call-with-progress:tools-call-with-progress
+
+  # Multi round-trip requests (SEP-2322): the server never asks the client for
+  # input (elicitation, sampling, roots), so it has no tool that returns an
+  # InputRequiredResult.
+  - input-required-result-basic-elicitation:sep-2322-elicitation-incomplete
+  - input-required-result-basic-sampling:sep-2322-sampling-incomplete
+  - input-required-result-basic-list-roots:sep-2322-list-roots-incomplete
+  - input-required-result-request-state:sep-2322-request-state-incomplete
+  - input-required-result-multiple-input-requests:sep-2322-multiple-inputs-incomplete
+  - input-required-result-multi-round:sep-2322-multi-round-r1
+  - input-required-result-non-tool-request:sep-2322-non-tool-incomplete
+  - input-required-result-result-type:sep-2322-result-type-included
+  - input-required-result-tampered-state:sep-2322-reject-tampered-state
+  - input-required-result-capability-check:sep-2322-respect-client-capabilities
+  # Same fixture tool, reported as warnings rather than failures.
+  - input-required-result-missing-input-response:sep-2322-missing-response-rerequests
+  - input-required-result-ignore-extra-params:sep-2322-ignore-unexpected-params

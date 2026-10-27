@@ -168,6 +168,10 @@ Large APIs produce many tools. Narrow the exposed set with:
 
 The flags compose, so `--groups files --read-only` exposes the read-only tools within the `files` group. They apply to both `mcp` and `mcp list`.
 
+### Protocol options and conformance
+
+An optional `mcp` block in `.bartolo.json` sets the server's identity and icons, list caching, trace-context propagation, accepted protocol versions, and an MCP Server Card. `x-bartolo-mcp-header` on a parameter lets gateways route on its value. Generated servers run the official MCP conformance suite in CI (`make conformance`). [docs/mcp-conformance.md](docs/mcp-conformance.md) maps every SEP to how it is supported and verified, and documents each option.
+
 ### Custom MCP tools
 
 Generated `cli/generated/mcp_tools.go` is overwritten on every `generate`. User-owned extras live in `cli/custom/Register`, which is never overwritten:
