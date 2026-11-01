@@ -33,13 +33,14 @@ type config struct {
 	instructions string
 	envPrefix    string
 
-	extra    []ToolDef
-	keep     []string
-	discover bool
-	remove   []string
-	patches  []toolPatch
-	wraps    []func(ToolHandler) ToolHandler
-	routes   []httpRoute
+	extra     []ToolDef
+	keep      []string
+	discover  bool
+	remove    []string
+	patches   []toolPatch
+	wraps     []func(ToolHandler) ToolHandler
+	routes    []httpRoute
+	resources []resourceDefinition
 
 	settings settings
 }
@@ -97,6 +98,7 @@ type serverInfo struct {
 	// forwardCredentials makes every tool call reach the upstream API with the
 	// caller's own Authorization header (--http-auth forward).
 	forwardCredentials bool
+	resources          []resourceDefinition
 	// settings are the protocol-level choices from SetMetadata, SetListTTL,
 	// SetProtocolVersions, SetTraceContext, and PublishServerCard.
 	settings settings
@@ -164,6 +166,7 @@ func Command(appName, version string, tools func() []ToolDef, opts ...Option) *c
 				instructions: runtime.instructions,
 				cacheScope:   "public",
 				settings:     runtime.settings,
+				resources:    runtime.resources,
 			}
 
 			if http.addr == "" {
@@ -368,15 +371,18 @@ func serveStdio(ctx context.Context, info serverInfo, defs []ToolDef) error {
 	return server.Run(ctx, &mcp.StdioTransport{})
 }
 
-// buildServer constructs an *mcp.Server with every def registered as a tool.
+// buildServer constructs an *mcp.Server with the configured tools and resources.
 //
-// The server declares tools, plus prompts and resources it has none of (see
+// The server declares tools and resources, plus prompts it has none of (see
 // capabilities): never logging, deprecated as of 2026-07-28 (SEP-2577), which
-// the SDK would otherwise advertise. The tool set never changes while the
-// server runs, so there is no list_changed to send.
+// the SDK would otherwise advertise. The tool and resource sets never change
+// while the server runs, so there is no list_changed to send.
 // SDK diagnostics go to stderr, never stdout.
 func buildServer(info serverInfo, defs []ToolDef) (*mcp.Server, error) {
 	if err := info.settings.validate(); err != nil {
+		return nil, err
+	}
+	if err := validateResources(info.resources); err != nil {
 		return nil, err
 	}
 	cacheScope := info.cacheScope
@@ -400,6 +406,13 @@ func buildServer(info serverInfo, defs []ToolDef) (*mcp.Server, error) {
 		if err := registerTool(server, def, info); err != nil {
 			return nil, fmt.Errorf("registering tool %q: %w", def.Name, err)
 		}
+	}
+	for _, resource := range info.resources {
+		metadata, err := cloneResource(resource.metadata)
+		if err != nil {
+			return nil, err
+		}
+		server.AddResource(metadata, resourceHandler(resource.handler, info))
 	}
 	return server, nil
 }

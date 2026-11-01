@@ -120,6 +120,7 @@ func mergeConfig(cmdCfg *config) *config {
 		discover:     cmdCfg.discover,
 		remove:       slices.Clone(cmdCfg.remove),
 		routes:       slices.Clone(cmdCfg.routes),
+		resources:    slices.Clone(cmdCfg.resources),
 		patches:      slices.Clone(cmdCfg.patches),
 		wraps:        slices.Clone(cmdCfg.wraps),
 		settings:     cmdCfg.settings,
@@ -252,6 +253,9 @@ func indexTool(defs []ToolDef, name string) int {
 // Use() overrides of instructions / env prefix.
 func prepareTools(tools func() []ToolDef, cmdCfg *config, f filterOptions) (*config, []ToolDef, error) {
 	runtime := mergeConfig(cmdCfg)
+	if err := validateResources(runtime.resources); err != nil {
+		return nil, nil, err
+	}
 	defs, err := applyCustomizations(tools(), runtime)
 	if err != nil {
 		return nil, nil, err
