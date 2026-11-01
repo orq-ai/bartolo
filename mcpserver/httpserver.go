@@ -38,6 +38,7 @@ type httpServeOptions struct {
 	token          string   // static bearer token (authModeBearer)
 	oauth          oauthConfig
 	routes         []httpRoute // extra unauthenticated routes (HTTPRoute)
+	middleware     []func(http.Handler) http.Handler
 }
 
 // serveHTTP builds the shared MCP server and serves it over Streamable HTTP with
@@ -136,6 +137,10 @@ func buildHTTPHandler(ctx context.Context, server *mcp.Server, opts httpServeOpt
 	}
 
 	mcpHandler, err := withInboundAuth(ctx, mux, streamable, opts)
+	if err != nil {
+		return nil, err
+	}
+	mcpHandler, err = wrapHTTPHandler(mcpHandler, opts.middleware)
 	if err != nil {
 		return nil, err
 	}

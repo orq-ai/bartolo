@@ -113,17 +113,19 @@ func snapshotUseOpts() []Option {
 // mergeConfig copies cmdCfg and applies Use() options on top.
 func mergeConfig(cmdCfg *config) *config {
 	runtime := &config{
-		instructions: cmdCfg.instructions,
-		envPrefix:    cmdCfg.envPrefix,
-		extra:        slices.Clone(cmdCfg.extra),
-		keep:         slices.Clone(cmdCfg.keep),
-		discover:     cmdCfg.discover,
-		remove:       slices.Clone(cmdCfg.remove),
-		routes:       slices.Clone(cmdCfg.routes),
-		resources:    slices.Clone(cmdCfg.resources),
-		patches:      slices.Clone(cmdCfg.patches),
-		wraps:        slices.Clone(cmdCfg.wraps),
-		settings:     cmdCfg.settings,
+		instructions:        cmdCfg.instructions,
+		envPrefix:           cmdCfg.envPrefix,
+		extra:               slices.Clone(cmdCfg.extra),
+		keep:                slices.Clone(cmdCfg.keep),
+		discover:            cmdCfg.discover,
+		remove:              slices.Clone(cmdCfg.remove),
+		routes:              slices.Clone(cmdCfg.routes),
+		resources:           slices.Clone(cmdCfg.resources),
+		httpMiddleware:      slices.Clone(cmdCfg.httpMiddleware),
+		receivingMiddleware: slices.Clone(cmdCfg.receivingMiddleware),
+		patches:             slices.Clone(cmdCfg.patches),
+		wraps:               slices.Clone(cmdCfg.wraps),
+		settings:            cmdCfg.settings,
 	}
 	for _, o := range snapshotUseOpts() {
 		o(runtime)
@@ -254,6 +256,9 @@ func indexTool(defs []ToolDef, name string) int {
 func prepareTools(tools func() []ToolDef, cmdCfg *config, f filterOptions) (*config, []ToolDef, error) {
 	runtime := mergeConfig(cmdCfg)
 	if err := validateResources(runtime.resources); err != nil {
+		return nil, nil, err
+	}
+	if err := validateMiddleware(runtime.httpMiddleware, runtime.receivingMiddleware); err != nil {
 		return nil, nil, err
 	}
 	defs, err := applyCustomizations(tools(), runtime)
