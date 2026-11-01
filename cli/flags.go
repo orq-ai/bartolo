@@ -257,6 +257,25 @@ func MarkPassedFlags(cmd *cobra.Command, params *viper.Viper) {
 	params.Set(passedFlagsKey, passed)
 }
 
+// MarkPassedParams records names as explicitly given, for callers that build
+// params without cobra. An MCP tool argument is explicit even at its zero
+// value, so `false`, `0` and `""` must still reach the request.
+func MarkPassedParams(params *viper.Viper, names ...string) {
+	if params == nil || len(names) == 0 {
+		return
+	}
+
+	passed, _ := params.Get(passedFlagsKey).(map[string]bool)
+	if passed == nil {
+		passed = make(map[string]bool, len(names))
+	}
+	for _, name := range names {
+		passed[name] = true
+	}
+
+	params.Set(passedFlagsKey, passed)
+}
+
 // RequestParams is params.AllSettings without the passed-flag bookkeeping, for
 // callers that treat the settings map as the user's own parameters — waiter
 // matchers, for one.
@@ -267,6 +286,7 @@ func RequestParams(params *viper.Viper) map[string]interface{} {
 
 	settings := params.AllSettings()
 	delete(settings, passedFlagsKey)
+	delete(settings, requestContextKey)
 
 	return settings
 }
