@@ -1,11 +1,15 @@
 package cli
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/rs/zerolog"
+	zlog "github.com/rs/zerolog/log"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -211,7 +215,11 @@ func fakeKeychain(t *testing.T) map[string]string {
 			}
 			return "", "", fakeExit{44}
 		case "-i": // stdin: add-generic-password -U -s S -a A -w V
-			f := strings.Fields(stdin)
+			f := splitKeychainLine(stdin)
+			// The real parser rejects a stray argument with exit 2 and stores nothing.
+			if len(f) != 8 {
+				return "", "", fakeExit{2}
+			}
 			k := argVal(f, "-s") + "\x00" + argVal(f, "-a")
 			kc[k] = argVal(f, "-w")
 			return "", "", nil
@@ -220,6 +228,34 @@ func fakeKeychain(t *testing.T) map[string]string {
 	}
 	t.Cleanup(func() { runSecretTool = orig })
 	return kc
+}
+
+// splitKeychainLine splits a `security -i` line the way the real parser does:
+// on whitespace, except inside double quotes, where a backslash escapes.
+func splitKeychainLine(line string) []string {
+	var fields []string
+	var current strings.Builder
+	inQuotes, started := false, false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case inQuotes && c == '\\' && i+1 < len(line):
+			i++
+			current.WriteByte(line[i])
+		case c == '"':
+			inQuotes, started = !inQuotes, true
+		case !inQuotes && (c == ' ' || c == '\n'):
+			if started {
+				fields = append(fields, current.String())
+				current.Reset()
+				started = false
+			}
+		default:
+			current.WriteByte(c)
+			started = true
+		}
+	}
+	return fields
 }
 
 func TestMacKeychainStoreRoundTrips(t *testing.T) {
@@ -266,4 +302,189 @@ func TestMacKeychainStoreChunksALargeSecret(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "tiny", got)
 	assert.Equal(t, 1, len(kc), "leftover continuation chunks must be cleared")
+}
+
+// credentialsOnDisk reads the file as another process would see it.
+func credentialsOnDisk(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile(credentialsFile())
+	require.NoError(t, err)
+	return string(data)
+}
+
+func TestNewPlaintextKeyClearsAStaleMarker(t *testing.T) {
+	for name, next := range map[string]SecretStore{"no store": nil, "failed save": failingSaveStore{}} {
+		t.Run(name, func(t *testing.T) {
+			credStoreFixture(t)
+			useStore(t, newFakeStore())
+			Creds.SetProfile("acme", map[string]string{"type": "apikey", apiKeyField: "secret-one"})
+
+			useStore(t, next)
+			Creds.SetProfile("acme", map[string]string{apiKeyField: "secret-two"})
+			require.NoError(t, Creds.Save(credentialsFile()))
+
+			data := credentialsOnDisk(t)
+			assert.Contains(t, data, "secret-two", "the key must stay in the file")
+			assert.NotContains(t, data, apiKeyStoreField, "the file must not claim the key moved")
+		})
+	}
+}
+
+func TestMarkedProfileHoldingAPlaintextKeyMigrates(t *testing.T) {
+	credStoreFixture(t)
+	store := newFakeStore()
+	store.data["acme"] = "secret-old"
+	useStore(t, store)
+	// The shape a stale marker left in files written before this was fixed.
+	Creds.Set("profiles", map[string]interface{}{
+		"acme": map[string]interface{}{"type": "apikey", apiKeyField: "secret-new", apiKeyStoreField: "Fake Store"},
+	})
+	require.NoError(t, Creds.Save(credentialsFile()))
+
+	assert.Equal(t, "secret-new", GetProfile()[apiKeyField])
+	assert.Equal(t, "secret-new", store.data["acme"])
+	assert.NotContains(t, credentialsOnDisk(t), "secret-new")
+}
+
+func TestFailedMigrationKeepsThePlaintextOnDisk(t *testing.T) {
+	credStoreFixture(t)
+	useStore(t, failingSaveStore{})
+	Creds.Set("profiles", map[string]interface{}{
+		"acme": map[string]interface{}{"type": "apikey", apiKeyField: "sk-orq-legacy"},
+	})
+	require.NoError(t, Creds.Save(credentialsFile()))
+
+	assert.Equal(t, "sk-orq-legacy", GetProfile()[apiKeyField])
+	data := credentialsOnDisk(t)
+	assert.Contains(t, data, "sk-orq-legacy", "a failed move must not lose the key")
+	assert.NotContains(t, data, apiKeyStoreField)
+}
+
+func TestMigrationKeepsAProfileAnotherProcessWrote(t *testing.T) {
+	credStoreFixture(t)
+	store := newFakeStore()
+	useStore(t, store)
+	Creds.Set("profiles", map[string]interface{}{
+		"acme": map[string]interface{}{"type": "apikey", apiKeyField: "sk-orq-legacy"},
+	})
+	require.NoError(t, Creds.Save(credentialsFile()))
+
+	other, err := NewCredentialsFile(filepath.Dir(credentialsFile()))
+	require.NoError(t, err)
+	other.Set("profiles", map[string]interface{}{
+		"acme":  map[string]interface{}{"type": "apikey", apiKeyField: "sk-orq-legacy"},
+		"later": map[string]interface{}{"type": "apikey", "server": "https://later.example"},
+	})
+	require.NoError(t, other.Save(credentialsFile()))
+
+	GetProfile()
+
+	data := credentialsOnDisk(t)
+	assert.Contains(t, data, "later.example", "a read must not drop what another process wrote")
+	assert.NotContains(t, data, "sk-orq-legacy")
+	assert.Contains(t, data, apiKeyStoreField)
+}
+
+func TestMigrationLeavesAKeyChangedOnDiskAlone(t *testing.T) {
+	credStoreFixture(t)
+	useStore(t, newFakeStore())
+	Creds.Set("profiles", map[string]interface{}{
+		"acme": map[string]interface{}{"type": "apikey", apiKeyField: "sk-orq-legacy"},
+	})
+	require.NoError(t, Creds.Save(credentialsFile()))
+
+	other, err := NewCredentialsFile(filepath.Dir(credentialsFile()))
+	require.NoError(t, err)
+	other.Set("profiles", map[string]interface{}{
+		"acme": map[string]interface{}{"type": "apikey", apiKeyField: "sk-orq-rotated"},
+	})
+	require.NoError(t, other.Save(credentialsFile()))
+
+	GetProfile()
+
+	assert.Contains(t, credentialsOnDisk(t), "sk-orq-rotated", "the store holds the old key, so the new one must stay")
+}
+
+func TestUnreadableStoreWarnsAndNamesTheStore(t *testing.T) {
+	cases := map[string]struct {
+		store SecretStore
+		want  []string
+	}{
+		"locked": {func() SecretStore {
+			s := newFakeStore()
+			s.loadErr = fmt.Errorf("keychain is locked")
+			return s
+		}(), []string{"Fake Store", "keychain is locked"}},
+		"entry gone": {newFakeStore(), []string{"Fake Store", "no entry"}},
+		"no store":   {nil, []string{"Fake Store", "no secure store"}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			credStoreFixture(t)
+			useStore(t, tc.store)
+			var logged bytes.Buffer
+			previous := zlog.Logger
+			zlog.Logger = zerolog.New(&logged).Level(zerolog.WarnLevel)
+			t.Cleanup(func() { zlog.Logger = previous })
+			Creds.Set("profiles", map[string]interface{}{
+				"acme": map[string]interface{}{"type": "apikey", apiKeyStoreField: "Fake Store"},
+			})
+
+			_, present := GetProfile()[apiKeyField]
+
+			assert.False(t, present)
+			for _, want := range tc.want {
+				assert.Contains(t, logged.String(), want)
+			}
+		})
+	}
+}
+
+func TestStoreMarkerIsNotTreatedAsASecret(t *testing.T) {
+	assert.False(t, looksSensitiveKey(apiKeyStoreField))
+	assert.True(t, looksSensitiveKey(apiKeyField))
+}
+
+func TestResolveSecretStoreStaysOffTheKeychainUnderGoTest(t *testing.T) {
+	assert.Nil(t, resolveSecretStore())
+}
+
+func TestMacKeychainStoreHandlesAProfileNameWithASpace(t *testing.T) {
+	kc := fakeKeychain(t)
+	store := macKeychainStore{}
+
+	require.NoError(t, store.Save("my work", "sk-orq-secret"))
+	assert.Contains(t, kc, secretService()+"\x00my work")
+
+	got, ok, err := store.Load("my work")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, "sk-orq-secret", got)
+	assert.Equal(t, `add-generic-password -U -s "svc" -a "a\"b\\c" -w v`+"\n", addGenericPasswordLine("svc", `a"b\c`, "v"))
+}
+
+func TestMacKeychainStoreRefusesALineBreakInAName(t *testing.T) {
+	kc := fakeKeychain(t)
+	assert.Error(t, macKeychainStore{}.Save("acme\nwork", "sk-orq-secret"))
+	assert.Empty(t, kc)
+}
+
+func TestStoresReadAnEmptySecretAsMissing(t *testing.T) {
+	kc := fakeKeychain(t)
+	kc[secretService()+"\x00acme"] = ""
+	_, ok, err := macKeychainStore{}.Load("acme")
+	require.NoError(t, err)
+	assert.False(t, ok, "macOS Keychain")
+
+	orig := runSecretTool
+	runSecretTool = func(string, string, ...string) (string, string, error) { return "", "", nil }
+	t.Cleanup(func() { runSecretTool = orig })
+	_, ok, err = secretToolStore{}.Load("acme")
+	require.NoError(t, err)
+	assert.False(t, ok, "secret-tool")
+}
+
+func TestManualClearHintQuotesTheNames(t *testing.T) {
+	assert.Contains(t, manualClearHint(macKeychainStore{}, "my work"), `-a "my work"`)
+	assert.Contains(t, manualClearHint(secretToolStore{}, "my work"), `account "my work"`)
 }

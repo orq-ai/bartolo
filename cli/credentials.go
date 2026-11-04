@@ -38,12 +38,72 @@ const (
 // the marker, never the secret. A store that is absent (file fallback, no
 // Secret Service, Windows) or that fails leaves the key in fields unchanged, so
 // the profile still authenticates from the 0600 file: moving a key must never be
-// able to lose it.
+// able to lose it. fields can carry the marker of an earlier save, so those paths
+// drop it: the file must not claim a key moved when the key is right there.
 func storeProfileAPIKey(name string, fields map[string]interface{}) {
 	key, ok := fields[apiKeyField].(string)
 	if !ok || key == "" {
 		return
 	}
+	store := resolveSecretStore()
+	if store == nil {
+		delete(fields, apiKeyStoreField)
+		return
+	}
+	if err := store.Save(sanitizeProfileName(name), key); err != nil {
+		log.Warn().Err(err).Msg("could not store the API key securely; keeping it in credentials.json")
+		delete(fields, apiKeyStoreField)
+		return
+	}
+	delete(fields, apiKeyField)
+	fields[apiKeyStoreField] = store.Name()
+}
+
+// hydrateProfileAPIKey returns profile with its api_key present: loaded from the
+// secure store when the profile carries the marker, or migrated out of the file
+// when a plaintext key is there. It never removes a usable key: a store that
+// cannot answer leaves a marked profile without api_key and warns, so "no key"
+// is never confused with "the key is in the store and unreadable", and a failed
+// migration keeps the plaintext.
+func hydrateProfileAPIKey(name string, profile map[string]string) map[string]string {
+	if profile == nil {
+		return profile
+	}
+	if key := profile[apiKeyField]; key != "" {
+		migrateAPIKeyToStore(name, key)
+		return profile
+	}
+	marker, marked := profile[apiKeyStoreField]
+	if !marked {
+		return profile
+	}
+	store := resolveSecretStore()
+	if store == nil {
+		log.Warn().Msgf("the API key of profile %q is in %s, but no secure store is available here", name, marker)
+		return profile
+	}
+	secret, ok, err := store.Load(sanitizeProfileName(name))
+	switch {
+	case err != nil:
+		log.Warn().Err(err).Msgf("could not read the API key of profile %q from %s", name, store.Name())
+	case !ok:
+		log.Warn().Msgf("the API key of profile %q should be in %s, but it has no entry for it", name, store.Name())
+	default:
+		profile[apiKeyField] = secret
+	}
+	return profile
+}
+
+// migrateAPIKeyToStore moves a plaintext key found on read into the store and
+// strips it from the file, best-effort: on any failure the key stays where it is
+// and the next read tries again.
+//
+// This runs on a read path, and Creds can be older than the file by the time it
+// gets here, so the rewrite starts from what is on disk now rather than from the
+// in-memory tree, which would drop whatever another process wrote since. There is
+// no lock on this file, so two writers can still race in the moment between that
+// read and the rename, as they can for every writer of it.
+func migrateAPIKeyToStore(name, key string) {
 	store := resolveSecretStore()
 	if store == nil {
 		return
@@ -52,54 +112,31 @@ func storeProfileAPIKey(name string, fields map[string]interface{}) {
 		log.Warn().Err(err).Msg("could not store the API key securely; keeping it in credentials.json")
 		return
 	}
-	delete(fields, apiKeyField)
-	fields[apiKeyStoreField] = store.Name()
-}
-
-// hydrateProfileAPIKey returns profile with its api_key present: loaded from the
-// secure store when the profile carries the marker, or migrated out of a legacy
-// plaintext file on first read. It never removes a usable key — a store that
-// cannot answer leaves a marked profile without api_key (the caller reports "no
-// key" rather than the wrong one), and a failed migration keeps the plaintext.
-func hydrateProfileAPIKey(name string, profile map[string]string) map[string]string {
-	if profile == nil {
-		return profile
+	onDisk, err := NewCredentialsFile(filepath.Dir(credentialsFile()))
+	if err != nil {
+		log.Warn().Err(err).Msg("moved the API key to the secure store but could not read credentials.json")
+		return
 	}
-	if _, marked := profile[apiKeyStoreField]; marked {
-		if _, present := profile[apiKeyField]; !present {
-			if store := resolveSecretStore(); store != nil {
-				if secret, ok, err := store.Load(sanitizeProfileName(name)); err == nil && ok {
-					profile[apiKeyField] = secret
-				}
-			}
-		}
-		return profile
-	}
-	// Legacy plaintext key: move it to the store on first read, best-effort, and
-	// strip it from the file so it is not left in two places.
-	if key := profile[apiKeyField]; key != "" {
-		if store := resolveSecretStore(); store != nil {
-			if err := store.Save(sanitizeProfileName(name), key); err == nil {
-				Creds.migrateProfileToStore(name, store.Name())
-				if err := Creds.Save(credentialsFile()); err != nil {
-					log.Warn().Err(err).Msg("moved the API key to the secure store but could not rewrite credentials.json")
-				}
-			}
+	if onDisk.migrateProfileToStore(name, key, store.Name()) {
+		if err := onDisk.Save(credentialsFile()); err != nil {
+			log.Warn().Err(err).Msg("moved the API key to the secure store but could not rewrite credentials.json")
+			return
 		}
 	}
-	return profile
+	Creds.migrateProfileToStore(name, key, store.Name())
 }
 
 // migrateProfileToStore rewrites one profile in place: drops the plaintext
-// api_key and adds the store marker. Used on read when a legacy key is moved to
-// the secure store; the whole profiles map is rewritten for the same reason
-// SetProfile does it (a viper override on a nested key hides its siblings).
-func (c *CredentialsFile) migrateProfileToStore(name, storeName string) {
+// api_key and adds the store marker. It reports false and changes nothing unless
+// the profile still holds key: one that has changed is not what the store holds.
+// The whole profiles map is rewritten for the same reason SetProfile does it (a
+// viper override on a nested key hides its siblings).
+func (c *CredentialsFile) migrateProfileToStore(name, key, storeName string) bool {
 	name = sanitizeProfileName(name)
 	profiles := c.viper.GetStringMap("profiles")
 	existing, ok := profiles[name].(map[string]interface{})
-	if !ok {
-		return
+	if !ok || existing[apiKeyField] != key {
+		return false
 	}
 	merged := map[string]interface{}{}
 	maps.Copy(merged, existing)
@@ -107,6 +144,7 @@ func (c *CredentialsFile) migrateProfileToStore(name, storeName string) {
 	merged[apiKeyStoreField] = storeName
 	profiles[name] = merged
 	c.viper.Set("profiles", profiles)
+	return true
 }
 
 // Save atomically replaces filename with the whole in-memory tree, so an
@@ -1093,7 +1131,9 @@ var promptProfileValue = func(key string, required bool) (string, error) {
 // not a fixed set we can check by eye.
 func looksSensitiveKey(key string) bool {
 	lower := strings.ToLower(key)
-	if namesALocation(lower) {
+	// The marker holds a store's name, and exists to be read: it says where the
+	// key lives. Its name only looks like a secret because it contains "key".
+	if lower == apiKeyStoreField || namesALocation(lower) {
 		return false
 	}
 	for _, hint := range []string{"key", "token", "secret", "password", "passphrase", "credential", "signature", "auth", "session", "cookie"} {

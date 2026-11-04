@@ -159,6 +159,9 @@ func (macKeychainStore) Load(account string) (string, bool, error) {
 	if derr != nil {
 		return "", false, fmt.Errorf("keychain secret is not valid base64: %w", derr)
 	}
+	if len(dec) == 0 {
+		return "", false, nil // an empty item is not a key
+	}
 	return string(dec), true, nil
 }
 
@@ -175,8 +178,16 @@ const maxKeychainCommand = 4000
 // addGenericPasswordLine builds the exact `security -i` line Save writes for one
 // chunk. Both the per-chunk budget (with an empty value) and the real command use
 // it, so the overhead the budget subtracts can never drift from the command sent.
+// The names are quoted because `security -i` splits the line on spaces, and a
+// profile name can hold one; the value is base64 and never needs it.
 func addGenericPasswordLine(service, account, value string) string {
-	return fmt.Sprintf("add-generic-password -U -s %s -a %s -w %s\n", service, account, value)
+	return fmt.Sprintf("add-generic-password -U -s %s -a %s -w %s\n", keychainQuote(service), keychainQuote(account), value)
+}
+
+// keychainQuote quotes one argument for the `security -i` line parser, which
+// takes a backslash as the escape inside double quotes.
+func keychainQuote(value string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value) + `"`
 }
 
 // keychainContService holds continuation chunks for a secret too large for one
@@ -200,6 +211,12 @@ func chunkTarget(account string, i int) (service, acct string) {
 }
 
 func (macKeychainStore) Save(account, secret string) error {
+	// `security -i` reads one command per line, so a line break in a name would
+	// start a second command. The caller then keeps the key in the 0600 file.
+	if strings.ContainsAny(secretService()+account, "\r\n") {
+		return errors.New("keychain service/account names cannot hold a line break")
+	}
+
 	// base64 so the blob carries no spaces or quotes to break the interactive
 	// parser, and the command goes in on stdin via `security -i`, not argv, so
 	// the token never appears in the process table. -U updates in place.
@@ -293,9 +310,9 @@ func (macKeychainStore) Delete(account string) error {
 func manualClearHint(store SecretStore, account string) string {
 	switch store.(type) {
 	case macKeychainStore:
-		return fmt.Sprintf("security delete-generic-password -s %s -a %s", secretService(), account)
+		return fmt.Sprintf("security delete-generic-password -s %q -a %q", secretService(), account)
 	case secretToolStore:
-		return fmt.Sprintf("secret-tool clear service %s account %s", secretService(), account)
+		return fmt.Sprintf("secret-tool clear service %q account %q", secretService(), account)
 	}
 	return ""
 }
@@ -317,6 +334,9 @@ func (secretToolStore) Load(account string) (string, bool, error) {
 			return "", false, nil
 		}
 		return "", false, fmt.Errorf("secret-tool lookup: %w: %s", err, stderr)
+	}
+	if out == "" {
+		return "", false, nil // an empty item is not a key
 	}
 	return out, true, nil
 }
