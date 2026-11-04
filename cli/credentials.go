@@ -13,14 +13,207 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	survey "github.com/AlecAivazis/survey/v2"
 	isatty "github.com/mattn/go-isatty"
 	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"gopkg.in/h2non/gentleman.v2/context"
 )
+
+// apiKeyField is the profile field holding the workspace API key. Once that key
+// has been moved to the OS secure store, apiKeyStoreField is left in
+// credentials.json in its place: a non-secret marker (its value is the store's
+// name, so status output can say where the key lives). Only api_key is ever
+// moved; every other profile field stays in the file. See credstore.go.
+const (
+	apiKeyField      = "api_key"
+	apiKeyStoreField = "api_key_store"
+)
+
+// storeProfileAPIKey moves fields[apiKeyField] into the secure store under the
+// profile name and replaces it with the marker, so what SetProfile persists is
+// the marker, never the secret. A store that is absent (file fallback, no
+// Secret Service, Windows) or that fails leaves the key in fields unchanged, so
+// the profile still authenticates from the 0600 file: moving a key must never be
+// able to lose it. fields can carry the marker of an earlier save, so those paths
+// drop it: the file must not claim a key moved when the key is right there.
+func storeProfileAPIKey(name string, fields map[string]interface{}) {
+	key, ok := fields[apiKeyField].(string)
+	if !ok || key == "" {
+		return
+	}
+	store := resolveSecretStore()
+	if store == nil {
+		delete(fields, apiKeyStoreField)
+		return
+	}
+	if err := store.Save(sanitizeProfileName(name), key); err != nil {
+		log.Warn().Err(err).Msg("could not store the API key securely; keeping it in credentials.json")
+		delete(fields, apiKeyStoreField)
+		return
+	}
+	delete(fields, apiKeyField)
+	fields[apiKeyStoreField] = store.Name()
+}
+
+// hydrateProfileAPIKey returns profile with its api_key present: loaded from the
+// secure store when the profile carries the marker, or migrated out of the file
+// when a plaintext key is there. It never removes a usable key: a store that
+// cannot answer leaves a marked profile without api_key and warns, so "no key"
+// is never confused with "the key is in the store and unreadable", and a failed
+// migration keeps the plaintext.
+func hydrateProfileAPIKey(name string, profile map[string]string) map[string]string {
+	if profile == nil {
+		return profile
+	}
+	if key := profile[apiKeyField]; key != "" {
+		if Creds.hydrated.once("migrate", name) {
+			migrateAPIKeyToStore(name, key)
+		}
+		return profile
+	}
+	marker, marked := profile[apiKeyStoreField]
+	if !marked {
+		return profile
+	}
+	if secret, ok := Creds.hydrated.key(name); ok {
+		profile[apiKeyField] = secret
+		return profile
+	}
+	warnOnce := func(event *zerolog.Event, format string, args ...any) {
+		if Creds.hydrated.once("warn", name) {
+			event.Msgf(format, args...)
+		}
+	}
+	store := resolveSecretStore()
+	if store == nil {
+		warnOnce(log.Warn(), "the API key of profile %q is in %s, but no secure store is available here", name, marker)
+		return profile
+	}
+	secret, ok, err := store.Load(sanitizeProfileName(name))
+	switch {
+	case err != nil:
+		warnOnce(log.Warn().Err(err), "could not read the API key of profile %q from %s", name, store.Name())
+	case !ok:
+		warnOnce(log.Warn(), "the API key of profile %q should be in %s, but it has no entry for it", name, store.Name())
+	default:
+		Creds.hydrated.setKey(name, secret)
+		profile[apiKeyField] = secret
+	}
+	return profile
+}
+
+// profileHydration keeps GetProfile off the OS store after the first read. The auth
+// middleware calls GetProfile per request, and on macOS each store read starts a
+// process. A key rotated by another process is not seen until this one restarts. A
+// failed read is not cached, so unlocking the store works without a restart, and it
+// only warns once.
+type profileHydration struct {
+	mu   sync.Mutex
+	keys map[string]string
+	seen map[string]bool
+}
+
+func (h *profileHydration) key(name string) (string, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	secret, ok := h.keys[sanitizeProfileName(name)]
+	return secret, ok
+}
+
+func (h *profileHydration) setKey(name, secret string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.keys == nil {
+		h.keys = map[string]string{}
+	}
+	h.keys[sanitizeProfileName(name)] = secret
+}
+
+// once reports true the first time it sees this action for this profile.
+func (h *profileHydration) once(action, name string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	id := action + "/" + sanitizeProfileName(name)
+	if h.seen[id] {
+		return false
+	}
+	if h.seen == nil {
+		h.seen = map[string]bool{}
+	}
+	h.seen[id] = true
+	return true
+}
+
+// forget drops what was learned about a profile whose key just changed here.
+func (h *profileHydration) forget(name string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	name = sanitizeProfileName(name)
+	delete(h.keys, name)
+	delete(h.seen, "migrate/"+name)
+	delete(h.seen, "warn/"+name)
+}
+
+// migrateAPIKeyToStore moves a plaintext key found on read into the store and
+// strips it from the file, best-effort: on any failure the key stays where it is
+// and the next process tries again.
+//
+// This runs on a read path, and Creds can be older than the file by the time it
+// gets here, so everything starts from what is on disk now. The store is only
+// written while the file still holds this key: another process may have rotated
+// the key and moved it to the store, and saving ours would overwrite the newer one
+// with nothing left to repair it. There is no lock on this file, so two writers can
+// still race in the moment between that read and the rename, as they can for every
+// writer of it.
+func migrateAPIKeyToStore(name, key string) {
+	store := resolveSecretStore()
+	if store == nil {
+		return
+	}
+	onDisk, err := NewCredentialsFile(filepath.Dir(credentialsFile()))
+	if err != nil {
+		log.Warn().Err(err).Msg("could not read credentials.json; keeping the API key where it is")
+		return
+	}
+	if !onDisk.migrateProfileToStore(name, key, store.Name()) {
+		return
+	}
+	if err := store.Save(sanitizeProfileName(name), key); err != nil {
+		log.Warn().Err(err).Msg("could not store the API key securely; keeping it in credentials.json")
+		return
+	}
+	if err := onDisk.Save(credentialsFile()); err != nil {
+		log.Warn().Err(err).Msg("moved the API key to the secure store but could not rewrite credentials.json")
+		return
+	}
+	Creds.migrateProfileToStore(name, key, store.Name())
+}
+
+// migrateProfileToStore rewrites one profile in place: drops the plaintext
+// api_key and adds the store marker. It reports false and changes nothing unless
+// the profile still holds key: one that has changed is not what the store holds.
+// The whole profiles map is rewritten for the same reason SetProfile does it (a
+// viper override on a nested key hides its siblings).
+func (c *CredentialsFile) migrateProfileToStore(name, key, storeName string) bool {
+	name = sanitizeProfileName(name)
+	profiles := c.viper.GetStringMap("profiles")
+	existing, ok := profiles[name].(map[string]interface{})
+	if !ok || existing[apiKeyField] != key {
+		return false
+	}
+	merged := map[string]interface{}{}
+	maps.Copy(merged, existing)
+	delete(merged, apiKeyField)
+	merged[apiKeyStoreField] = storeName
+	profiles[name] = merged
+	c.viper.Set("profiles", profiles)
+	return true
+}
 
 // Save atomically replaces filename with the whole in-memory tree, so an
 // instance built outside NewCredentialsFile drops every profile it never read.
@@ -1006,7 +1199,9 @@ var promptProfileValue = func(key string, required bool) (string, error) {
 // not a fixed set we can check by eye.
 func looksSensitiveKey(key string) bool {
 	lower := strings.ToLower(key)
-	if namesALocation(lower) {
+	// The marker holds a store's name, and exists to be read: it says where the
+	// key lives. Its name only looks like a secret because it contains "key".
+	if lower == apiKeyStoreField || namesALocation(lower) {
 		return false
 	}
 	for _, hint := range []string{"key", "token", "secret", "password", "passphrase", "credential", "signature", "auth", "session", "cookie"} {
@@ -1183,7 +1378,8 @@ func ConfirmDestructive(cmd *cobra.Command, args []string) error {
 // unexported so callers cannot reach viper's own WriteConfigAs, which creates
 // the file 0644; Save is the only write.
 type CredentialsFile struct {
-	viper *viper.Viper
+	viper    *viper.Viper
+	hydrated profileHydration
 }
 
 // Set places a viper override at key. Never call it with a nested profile key
@@ -1210,6 +1406,11 @@ func (c *CredentialsFile) SetProfile(name string, fields map[string]string) {
 		merged[key] = value
 	}
 
+	// Keep the API key out of credentials.json: move it to the secure store and
+	// leave the marker. A no-op when there is no key or no store.
+	storeProfileAPIKey(name, merged)
+	c.hydrated.forget(name)
+
 	profiles[name] = merged
 	c.viper.Set("profiles", profiles)
 }
@@ -1219,6 +1420,17 @@ func (c *CredentialsFile) SetProfile(name string, fields map[string]string) {
 func (c *CredentialsFile) RemoveProfile(name string) {
 	name = sanitizeProfileName(name)
 
+	// Clear any API key this profile moved to the secure store, so removing a
+	// profile does not orphan its secret in the OS keychain. Best-effort: a
+	// profile that never stored a key is a no-op, and a store that cannot answer
+	// is logged with the by-hand command rather than blocking the removal.
+	if store := resolveSecretStore(); store != nil {
+		if err := store.Delete(name); err != nil {
+			log.Warn().Err(err).Msgf("could not remove the stored API key for profile %q; clear it by hand: %s", name, manualClearHint(store, name))
+		}
+	}
+
+	c.hydrated.forget(name)
 	profiles := c.viper.GetStringMap("profiles")
 	delete(profiles, name)
 	c.viper.Set("profiles", profiles)
@@ -1272,7 +1484,7 @@ func GetProfile() map[string]string {
 		return nil
 	}
 
-	return Creds.GetStringMapString("profiles." + name)
+	return hydrateProfileAPIKey(name, Creds.GetStringMapString("profiles."+name))
 }
 
 // ProfileExists reports whether a profile of that name is configured. name is
