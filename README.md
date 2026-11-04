@@ -272,6 +272,7 @@ Bartolo's canonical extension namespace is `x-bartolo-*`. Shared extensions affe
 | Extension | Purpose |
 | --- | --- |
 | `x-bartolo-aliases` | Add command aliases for operations (rendered in the CLI). |
+| `x-bartolo-beta` | Set to `true` on a group, operation, or flag to append a `(beta)` marker to its help text, so an unstable surface is discoverable but clearly flagged (CLI only). |
 | `x-bartolo-description` | Override generated help/description text. |
 | `x-bartolo-group` | Force an operation into a higher-level noun. |
 | `x-bartolo-help-section` | Put a top-level command under a titled section in `--help` (CLI only). |
@@ -290,7 +291,7 @@ Bartolo's canonical extension namespace is `x-bartolo-*`. Shared extensions affe
 | `x-bartolo-cli-ignore` | Exclude an operation from the CLI only. The operation still becomes an MCP tool (and its client func is still generated). |
 | `x-bartolo-mcp-ignore` | Exclude an operation from the generated MCP tool surface only. It still generates a CLI command. |
 
-**Legacy aliases:** the earlier `x-cli-*` names (`x-cli-aliases`, `x-cli-description`, `x-cli-group`, `x-cli-help-section`, `x-cli-hidden`, `x-cli-ignore`, `x-cli-list`, `x-cli-list-fields`, `x-cli-name`, `x-cli-no-validate`, `x-cli-waiters`) and `x-mcp-ignore` keep working with no runtime warning. Each maps to the matching shared `x-bartolo-*` key (`x-mcp-ignore` → `x-bartolo-mcp-ignore`). When both a canonical `x-bartolo-*` key and its legacy alias appear on the same element, the canonical value wins. `x-bartolo-ignore` always excludes everywhere, regardless of any surface-scoped flag also present.
+**Legacy aliases:** the earlier `x-cli-*` names (`x-cli-aliases`, `x-cli-beta`, `x-cli-description`, `x-cli-group`, `x-cli-help-section`, `x-cli-hidden`, `x-cli-ignore`, `x-cli-list`, `x-cli-list-fields`, `x-cli-name`, `x-cli-no-validate`, `x-cli-waiters`) and `x-mcp-ignore` keep working with no runtime warning. Each maps to the matching shared `x-bartolo-*` key (`x-mcp-ignore` → `x-bartolo-mcp-ignore`). When both a canonical `x-bartolo-*` key and its legacy alias appear on the same element, the canonical value wins. `x-bartolo-ignore` always excludes everywhere, regardless of any surface-scoped flag also present.
 
 Collection paths and responses are inferred automatically for GET operations.
 Any method is also inferred as a collection when its 2xx JSON response is a

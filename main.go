@@ -578,6 +578,23 @@ func (b *irBuilder) addOperation(scope pathScope, httpMethod string, operation *
 	method := strings.Title(strings.ToLower(httpMethod))
 	group, leafName := b.resolveGroup(path, operation, leafName, method, explicitLeafName != "")
 	short := operationShort(operation.Summary, leafName)
+	betaSfx := betaSuffix(operation.Extensions)
+	short += betaSfx
+	// Cobra prints Long or Short, never both, so a beta operation that has its own
+	// description (its Long) needs the marker there too, or its own --help page
+	// would omit it while the parent's command list shows it. The empty-description
+	// case is covered below, where Long falls back to the already-marked short. Put
+	// the marker at the end of the first line (the summary), not after the
+	// body-fields and renamed-flags sections operationDescription appended, so it
+	// reads as "<summary> (beta)" rather than landing mid-document. Those sections
+	// start with a newline, so a leading newline means the operation has no text of
+	// its own and the first line has to be the already-marked summary.
+	if betaSfx != "" && strings.HasPrefix(description, "\n") {
+		description = short + description
+	} else {
+		description = markFirstLine(description, betaSfx)
+	}
+
 	if args := requiredArgsHelp(requiredParams); args != "" {
 		// Cobra prints Long or Short, never both, so a Long that exists
 		// only for this section still has to carry the summary.
@@ -958,6 +975,36 @@ func extStr(i interface{}) (decoded string) {
 	return
 }
 
+// betaSuffix returns " (beta)" when x-bartolo-beta (or its x-cli-beta alias) is
+// set truthy on the given extensions, else "". Appended to the Short/description
+// text so the marker shows wherever that text is rendered: command list, command
+// help, flag help, and the generated README. Readable at group, operation, flag
+// and body-field level.
+func betaSuffix(exts map[string]interface{}) string {
+	if extBool(extValueOrNil(exts, extKeyBeta)) {
+		return " (beta)"
+	}
+	return ""
+}
+
+// markFlagHelp appends the beta marker to a flag's description. Trimming keeps a
+// flag with no description from reading " (beta)".
+func markFlagHelp(description string, exts map[string]interface{}) string {
+	return strings.TrimSpace(description + betaSuffix(exts))
+}
+
+// markFirstLine appends suffix to the first line of multi-line text. Empty text
+// stays empty, so callers keep their fallback to the already-marked short.
+func markFirstLine(text, suffix string) string {
+	if text == "" {
+		return ""
+	}
+	if nl := strings.IndexByte(text, '\n'); nl >= 0 {
+		return text[:nl] + suffix + text[nl:]
+	}
+	return text + suffix
+}
+
 func mustDecodeExt(input interface{}, target interface{}) {
 	switch value := input.(type) {
 	case json.RawMessage:
@@ -1130,6 +1177,13 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		if h, ok := extValue(tagDef.Extensions, extKeyHidden); ok {
 			mustDecodeExt(h, &hidden)
 		}
+		sfx := betaSuffix(tagDef.Extensions)
+		short += sfx
+		// Long and Description both come from `long`, and the group/readme
+		// templates render them. Mark them too, so a beta group shows "(beta)" on
+		// its help page and in the README, not only in the parent command list.
+		// When long is empty the templates fall back to the already-marked short.
+		long = markFirstLine(long, sfx)
 		section = extString(tagDef.Extensions, extKeyHelpSection)
 	}
 
@@ -1602,6 +1656,7 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 			// usage or one bullet of the Arguments section, so a spec's
 			// paragraph breaks would split the line or start a second bullet.
 			description = strings.Join(strings.Fields(description), " ")
+			description = markFlagHelp(description, p.Value.Extensions)
 
 			allParams = append(allParams, &Param{
 				Name:        p.Value.Name,
@@ -1846,6 +1901,9 @@ func getBodyFields(schema *openapi3.Schema) []*BodyField {
 		if d, ok := extValue(ref.Value.Extensions, extKeyDescription); ok {
 			description = extStr(d)
 		}
+		// A body property becomes a flag, so the beta extension on it marks that
+		// flag's help, the same as it does for a parameter.
+		description = markFlagHelp(description, ref.Value.Extensions)
 
 		fields = append(fields, &BodyField{
 			Name:        name,

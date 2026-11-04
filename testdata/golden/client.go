@@ -30,7 +30,7 @@ func initGeneratedRuntime() {
 
 }
 
-// ExampleGetThing Get a thing
+// ExampleGetThing Get a thing (beta)
 func ExampleGetThing(paramId string, paramFrom string, paramFromTime string, params *viper.Viper) (*gentleman.Response, interface{}, error) {
 	handlerPath := "get-thing id from from-time"
 	server := bartolocli.ResolveServer()

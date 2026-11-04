@@ -21,8 +21,8 @@ func registerRootCommands(root *cobra.Command) {
 
 		cmd := &cobra.Command{
 			Use:     "get-thing id from from-time",
-			Short:   "Get a thing",
-			Long:    bartolocli.Markdown("Get a thing\n\n## Arguments\n\n- `id`\n- `from` — (accepts RFC 3339 (2026-08-31T17:40:00Z), a date (2026-08-31) or date and time (2026-08-31 14:00:00), or a relative value such as 24h, 7d, 2w, 30m, now, now-24h, now+1h)\n- `from-time`"),
+			Short:   "Get a thing (beta)",
+			Long:    bartolocli.Markdown("Get a thing (beta)\n\n## Arguments\n\n- `id`\n- `from` — (accepts RFC 3339 (2026-08-31T17:40:00Z), a date (2026-08-31) or date and time (2026-08-31 14:00:00), or a relative value such as 24h, 7d, 2w, 30m, now, now-24h, now+1h)\n- `from-time`"),
 			Example: examples,
 			Args:    cobra.MinimumNArgs(3),
 			RunE: func(cmd *cobra.Command, args []string) error {
@@ -44,7 +44,7 @@ func registerRootCommands(root *cobra.Command) {
 		}
 		parent.AddCommand(cmd)
 
-		cmd.Flags().Bool("detailed", false, "")
+		cmd.Flags().Bool("detailed", false, "(beta)")
 		cmd.Flags().Int64("limit", 0, "")
 		cmd.Flags().Float64("ratio", 0.0, "")
 		cmd.Flags().String("kind", "", " (one of: internal, a2a)")

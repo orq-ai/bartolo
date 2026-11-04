@@ -11,6 +11,7 @@ package main
 //	x-bartolo-description  <- x-cli-description
 //	x-bartolo-hidden       <- x-cli-hidden
 //	x-bartolo-aliases      <- x-cli-aliases
+//	x-bartolo-beta         <- x-cli-beta
 //	x-bartolo-waiters      <- x-cli-waiters
 //	x-bartolo-list         <- x-cli-list
 //	x-bartolo-list-fields  <- x-cli-list-fields
@@ -36,6 +37,7 @@ const (
 	extKeyDescription = "description"
 	extKeyHidden      = "hidden"
 	extKeyAliases     = "aliases"
+	extKeyBeta        = "beta"
 	extKeyWaiters     = "waiters"
 	extKeyList        = "list"
 	extKeyListFields  = "list-fields"

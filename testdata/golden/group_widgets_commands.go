@@ -13,8 +13,8 @@ import (
 func registerwidgetsCommands(root *cobra.Command) {
 	widgetsCmd := &cobra.Command{
 		Use:   "widgets",
-		Short: "Widgets",
-		Long:  bartolocli.Markdown("Widgets"),
+		Short: "widgets (beta)",
+		Long:  bartolocli.Markdown("widgets (beta)"),
 	}
 	bartolocli.HelpSection(root, widgetsCmd, "Writes")
 	root.AddCommand(widgetsCmd)
