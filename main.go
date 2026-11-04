@@ -987,9 +987,14 @@ func betaSuffix(exts map[string]interface{}) string {
 	return ""
 }
 
-// markFirstLine appends suffix to the first line of text, the one place the beta
-// marker's position is decided. Empty text stays empty, so callers keep their
-// fallback to the already-marked short.
+// markFlagHelp appends the beta marker to a flag's description. Trimming keeps a
+// flag with no description from reading " (beta)".
+func markFlagHelp(description string, exts map[string]interface{}) string {
+	return strings.TrimSpace(description + betaSuffix(exts))
+}
+
+// markFirstLine appends suffix to the first line of multi-line text. Empty text
+// stays empty, so callers keep their fallback to the already-marked short.
 func markFirstLine(text, suffix string) string {
 	if text == "" {
 		return ""
@@ -1651,7 +1656,7 @@ func getParams(path *openapi3.PathItem, httpMethod string) []*Param {
 			// usage or one bullet of the Arguments section, so a spec's
 			// paragraph breaks would split the line or start a second bullet.
 			description = strings.Join(strings.Fields(description), " ")
-			description = strings.TrimSpace(description + betaSuffix(p.Value.Extensions))
+			description = markFlagHelp(description, p.Value.Extensions)
 
 			allParams = append(allParams, &Param{
 				Name:        p.Value.Name,
@@ -1898,7 +1903,7 @@ func getBodyFields(schema *openapi3.Schema) []*BodyField {
 		}
 		// A body property becomes a flag, so the beta extension on it marks that
 		// flag's help, the same as it does for a parameter.
-		description = strings.TrimSpace(description + betaSuffix(ref.Value.Extensions))
+		description = markFlagHelp(description, ref.Value.Extensions)
 
 		fields = append(fields, &BodyField{
 			Name:        name,

@@ -2948,7 +2948,7 @@ paths:
 
 // TestBetaMarker pins that x-cli-beta renders a "(beta)" marker at each level it
 // is read: a tagged group, an operation, and a flag; and that an untagged
-// sibling stays unmarked (ENG-2958).
+// sibling stays unmarked.
 func TestBetaMarker(t *testing.T) {
 	const spec = `
 openapi: 3.0.3
@@ -3009,6 +3009,7 @@ paths:
               type: object
               properties:
                 betafield: {type: string, x-cli-beta: true}
+                describedfield: {type: string, description: A described field., x-cli-beta: true}
                 plainfield: {type: string}
       responses:
         "200": {description: ok}
@@ -3111,17 +3112,22 @@ paths:
 	if body == nil {
 		t.Fatal("CreateBodyBeta operation not found")
 	}
-	var betaField, plainField *BodyField
+	var betaField, describedField, plainField *BodyField
 	for _, f := range body.BodyFields {
 		switch f.CLIName {
 		case "betafield":
 			betaField = f
+		case "describedfield":
+			describedField = f
 		case "plainfield":
 			plainField = f
 		}
 	}
-	if betaField == nil || !strings.Contains(betaField.Description, "(beta)") {
-		t.Errorf("beta body-field flag missing marker: %+v", betaField)
+	if betaField == nil || betaField.Description != "(beta)" {
+		t.Errorf("beta body-field flag with no description: %+v", betaField)
+	}
+	if describedField == nil || describedField.Description != "A described field. (beta)" {
+		t.Errorf("beta body-field flag with a description: %+v", describedField)
 	}
 	if plainField == nil || strings.Contains(plainField.Description, "(beta)") {
 		t.Errorf("non-beta body-field flag should have no marker: %+v", plainField)
