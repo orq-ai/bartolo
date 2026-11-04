@@ -491,26 +491,32 @@ func readStdin(stdin *os.File) (string, error) {
 		return "", err
 	}
 
-	body := string(input)
-	// --verbose turns debug logging on, so the body here would walk past
-	// every redactor in http.go.
-	log.Debug().Msgf("Read %d bytes of body from stdin", len(input))
-	return body, nil
+	logStdinRead(len(input))
+	return string(input), nil
+}
+
+// logStdinRead records how much body came from stdin. Only the size: --verbose
+// turns debug logging on, so the body here would walk past every redactor in
+// http.go.
+func logStdinRead(n int) {
+	log.Debug().Msgf("Read %d bytes of body from stdin", n)
 }
 
 // readStdinWithin reads stdin but reports ok=false if nothing has arrived
 // within the grace period. An abandoned read stays parked in its goroutine
-// until the process exits, which is harmless for a short-lived CLI.
+// until the process exits, which is harmless for a short-lived CLI. The
+// goroutine does not log: an abandoned read can finish at any later point,
+// and would report a body the caller never used.
 func readStdinWithin(stdin *os.File, grace time.Duration) (string, bool, error) {
 	type result struct {
-		body string
-		err  error
+		input []byte
+		err   error
 	}
 
 	done := make(chan result, 1)
 	go func() {
-		body, err := readStdin(stdin)
-		done <- result{body: body, err: err}
+		input, err := ioutil.ReadAll(stdin)
+		done <- result{input: input, err: err}
 	}()
 
 	timer := time.NewTimer(grace)
@@ -518,7 +524,11 @@ func readStdinWithin(stdin *os.File, grace time.Duration) (string, bool, error) 
 
 	select {
 	case r := <-done:
-		return r.body, true, r.err
+		if r.err != nil {
+			return "", true, r.err
+		}
+		logStdinRead(len(r.input))
+		return string(r.input), true, nil
 	case <-timer.C:
 		return "", false, nil
 	}

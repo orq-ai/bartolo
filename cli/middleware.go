@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"context"
+	"maps"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -54,6 +56,7 @@ func commandPath(cmd *cobra.Command) string {
 
 // HandleBefore runs any registered pre-request handlers for the given command.
 func HandleBefore(path string, params *viper.Viper, r *gentleman.Request) {
+	bindRequestContext(params, r)
 	if handlers, ok := beforeRegistry[path]; ok {
 		for _, handler := range handlers {
 			handler(path, params, r)
@@ -71,4 +74,77 @@ func HandleAfter(path string, params *viper.Viper, resp *gentleman.Response, dat
 	}
 
 	return tmp
+}
+
+// requestContextKey holds the context an operation's request is bound to. Like
+// passedFlagsKey it is spelled with underscores so no parameter can collide.
+const requestContextKey = "__request_context"
+
+// SetRequestContext binds the requests a generated operation sends with params
+// to ctx, so cancelling ctx aborts the in-flight HTTP call. The MCP server uses
+// it to stop the upstream request when its client cancels a tool call.
+func SetRequestContext(params *viper.Viper, ctx context.Context) {
+	if params == nil || ctx == nil {
+		return
+	}
+	params.Set(requestContextKey, ctx)
+}
+
+// bindRequestContext applies the context SetRequestContext stored, if any,
+// and the headers WithRequestHeaders put on it.
+func bindRequestContext(params *viper.Viper, r *gentleman.Request) {
+	if params == nil || r == nil || r.Context == nil {
+		return
+	}
+	ctx, ok := params.Get(requestContextKey).(context.Context)
+	if !ok {
+		return
+	}
+	r.Context.SetCancelContext(ctx)
+	for name, value := range RequestHeaders(ctx) {
+		if r.Context.Request.Header.Get(name) == "" {
+			r.SetHeader(name, value)
+		}
+	}
+}
+
+// requestHeadersKey carries headers every request made under a context sends.
+type requestHeadersKey struct{}
+
+// WithRequestHeaders returns a context whose generated requests also send
+// headers, without replacing one a request already sets. The MCP server uses
+// it to propagate a caller's W3C trace context to the API. Bind the context
+// with SetRequestContext.
+func WithRequestHeaders(ctx context.Context, headers map[string]string) context.Context {
+	merged := maps.Clone(RequestHeaders(ctx))
+	if merged == nil {
+		merged = make(map[string]string, len(headers))
+	}
+	maps.Copy(merged, headers)
+	return context.WithValue(ctx, requestHeadersKey{}, merged)
+}
+
+// RequestHeaders returns the headers WithRequestHeaders put on ctx.
+func RequestHeaders(ctx context.Context) map[string]string {
+	headers, _ := ctx.Value(requestHeadersKey{}).(map[string]string)
+	return headers
+}
+
+// requestCredentialKey carries the credential of the caller a request acts for.
+type requestCredentialKey struct{}
+
+// WithRequestCredential returns a context whose generated requests send
+// authorization as their Authorization header in place of the configured
+// profile or environment credentials, which are then never consulted. A hosted
+// MCP server uses it to call the API as each of its callers. Bind the context
+// with SetRequestContext.
+func WithRequestCredential(ctx context.Context, authorization string) context.Context {
+	return context.WithValue(ctx, requestCredentialKey{}, authorization)
+}
+
+// RequestCredential returns the caller credential WithRequestCredential put on
+// ctx, for custom code that calls an API outside the generated client.
+func RequestCredential(ctx context.Context) (string, bool) {
+	authorization, _ := ctx.Value(requestCredentialKey{}).(string)
+	return authorization, authorization != ""
 }

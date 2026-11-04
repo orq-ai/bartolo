@@ -5,6 +5,10 @@ package generated
 
 import (
 	bartolocli "github.com/orq-ai/bartolo/cli"
+	{{- if .HasMCPTools }}
+	"github.com/orq-ai/bartolo/mcpserver"
+	"github.com/spf13/viper"
+	{{- end }}
 	"github.com/spf13/cobra"
 )
 
@@ -18,8 +22,32 @@ func Register(root *cobra.Command) {
 	root.Short = "{{ .Title | escapeStr }}"
 	root.Long = bartolocli.Markdown("{{ .Description }}")
 
+	{{- if .TargetCLI }}
 	registerRootCommands(root)
 	{{- range .Groups }}
+	{{- if .HasCLICommands }}
 	register{{ .GoName }}Commands(root)
+	{{- end }}
+	{{- end }}
+	{{- end }}
+	{{- if .HasMCPTools }}
+	mcpCommand := mcpserver.Command(viper.GetString("app-name"), root.Version, mcpTools, mcpOptions()...)
+	root.AddCommand(mcpCommand)
+	{{- if not .TargetCLI }}
+	// MCP-first: with no CLI command surface, the bare binary serves the MCP
+	// stdio transport directly, so `{{ .CommandName }}` with no arguments is
+	// equivalent to `{{ .CommandName }} mcp`. The `mcp`, `doctor`, and
+	// `auth setup` subcommands remain available for inspection and credential
+	// bootstrap. The mcp command's flag set is mirrored onto the root so
+	// `{{ .CommandName }} --http :8484` / `--read-only` etc. work without the
+	// `mcp` subcommand: the flag variables are shared pointers, so the RunE
+	// closure sees them regardless of which command parsed them.
+	root.RunE = mcpCommand.RunE
+	root.Flags().AddFlagSet(mcpCommand.Flags())
+	// Filter flags live on mcp as PersistentFlags (so `mcp list --read-only`
+	// works). Mirror them as root local flags so the MCP-first binary accepts
+	// `--read-only` / `--tools` / `--groups` with no subcommand.
+	root.Flags().AddFlagSet(mcpCommand.PersistentFlags())
+	{{- end }}
 	{{- end }}
 }

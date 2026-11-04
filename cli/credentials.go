@@ -106,6 +106,15 @@ func initAuth() {
 
 	// Install auth middleware
 	Client.UseRequest(func(ctx *context.Context, h context.Handler) {
+		// A request made on a caller's behalf carries that caller's credential
+		// and must not fall back to this process's own: see
+		// WithRequestCredential.
+		if authorization, ok := RequestCredential(ctx.Request.Context()); ok {
+			ctx.Request.Header.Set("Authorization", authorization)
+			h.Next(ctx)
+			return
+		}
+
 		profile := GetProfile()
 		handler := authHandlerFor(profile["type"])
 		if handler == nil {
@@ -460,8 +469,27 @@ func authHandlerFor(typeName string) AuthHandler {
 		}
 	}
 
-	_, handler := soleAuthHandler()
-	return handler
+	if _, handler := soleAuthHandler(); handler != nil {
+		return handler
+	}
+	if typeName == "" && defaultAuthType != "" {
+		return AuthHandlers[defaultAuthType]
+	}
+	return nil
+}
+
+// defaultAuthType is the auth type used when the active profile carries no
+// explicit `type` and more than one handler is registered. Set it via
+// SetDefaultAuthType. This keeps env-var-only (profile-less) invocations working
+// for multi-scheme CLIs.
+var defaultAuthType string
+
+// SetDefaultAuthType records the auth type to fall back to when the active
+// profile has no `type` and multiple auth handlers are registered. Generated
+// CLIs emit this for the first security scheme declared by the spec so that
+// profile-less (environment-variable) callers keep working under multi-auth.
+func SetDefaultAuthType(typeName string) {
+	defaultAuthType = typeName
 }
 
 // soleAuthHandler returns the registered handler when there is exactly one,
