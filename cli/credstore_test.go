@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -487,4 +488,105 @@ func TestStoresReadAnEmptySecretAsMissing(t *testing.T) {
 func TestManualClearHintQuotesTheNames(t *testing.T) {
 	assert.Contains(t, manualClearHint(macKeychainStore{}, "my work"), `-a "my work"`)
 	assert.Contains(t, manualClearHint(secretToolStore{}, "my work"), `account "my work"`)
+}
+
+// countingStore counts store calls, which on macOS each start a process.
+type countingStore struct {
+	*fakeStore
+	loads, saves int
+	saveErr      error
+}
+
+func (c *countingStore) Load(account string) (string, bool, error) {
+	c.loads++
+	return c.fakeStore.Load(account)
+}
+
+func (c *countingStore) Save(account, secret string) error {
+	c.saves++
+	if c.saveErr != nil {
+		return c.saveErr
+	}
+	return c.fakeStore.Save(account, secret)
+}
+
+// This process still holds K1 in memory. Another process rotated to K2 and moved
+// it to the store, so saving K1 would leave the profile on the old key for good.
+func TestMigrationDoesNotOverwriteANewerStoredKey(t *testing.T) {
+	credStoreFixture(t)
+	store := newFakeStore()
+	useStore(t, store)
+	Creds.Set("profiles", map[string]interface{}{
+		"acme": map[string]interface{}{"type": "apikey", apiKeyField: "sk-orq-k1"},
+	})
+
+	other, err := NewCredentialsFile(filepath.Dir(credentialsFile()))
+	require.NoError(t, err)
+	other.Set("profiles", map[string]interface{}{
+		"acme": map[string]interface{}{"type": "apikey", apiKeyStoreField: store.Name()},
+	})
+	require.NoError(t, other.Save(credentialsFile()))
+	require.NoError(t, store.Save("acme", "sk-orq-k2"))
+
+	GetProfile()
+
+	assert.Equal(t, "sk-orq-k2", store.data["acme"])
+}
+
+func TestGetProfileReadsTheStoreOncePerProcess(t *testing.T) {
+	credStoreFixture(t)
+	store := &countingStore{fakeStore: newFakeStore()}
+	useStore(t, store)
+	Creds.SetProfile("acme", map[string]string{"type": "apikey", apiKeyField: "sk-orq-secret"})
+
+	for range 3 {
+		assert.Equal(t, "sk-orq-secret", GetProfile()[apiKeyField])
+	}
+	assert.Equal(t, 1, store.loads)
+}
+
+func TestRotatingAKeyHereIsSeenWithoutARestart(t *testing.T) {
+	credStoreFixture(t)
+	useStore(t, newFakeStore())
+	Creds.SetProfile("acme", map[string]string{"type": "apikey", apiKeyField: "sk-orq-old"})
+	require.Equal(t, "sk-orq-old", GetProfile()[apiKeyField])
+
+	Creds.SetProfile("acme", map[string]string{apiKeyField: "sk-orq-new"})
+
+	assert.Equal(t, "sk-orq-new", GetProfile()[apiKeyField])
+}
+
+func TestAFailedStoreReadRetriesAndWarnsOnce(t *testing.T) {
+	credStoreFixture(t)
+	store := &countingStore{fakeStore: newFakeStore()}
+	useStore(t, store)
+	Creds.SetProfile("acme", map[string]string{"type": "apikey", apiKeyField: "sk-orq-secret"})
+	store.loadErr = errors.New("keychain locked")
+
+	var logs bytes.Buffer
+	orig := zlog.Logger
+	zlog.Logger = zerolog.New(&logs)
+	t.Cleanup(func() { zlog.Logger = orig })
+
+	GetProfile()
+	GetProfile()
+	assert.Equal(t, 1, strings.Count(logs.String(), "could not read the API key"))
+
+	store.loadErr = nil
+	assert.Equal(t, "sk-orq-secret", GetProfile()[apiKeyField], "unlocking the store must work without a restart")
+}
+
+func TestAFailedMigrationIsTriedOncePerProcess(t *testing.T) {
+	credStoreFixture(t)
+	store := &countingStore{fakeStore: newFakeStore(), saveErr: errors.New("keychain locked")}
+	useStore(t, store)
+	Creds.Set("profiles", map[string]interface{}{
+		"acme": map[string]interface{}{"type": "apikey", apiKeyField: "sk-orq-legacy"},
+	})
+	require.NoError(t, Creds.Save(credentialsFile()))
+
+	GetProfile()
+	GetProfile()
+
+	assert.Equal(t, 1, store.saves)
 }

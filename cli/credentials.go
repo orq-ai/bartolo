@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	survey "github.com/AlecAivazis/survey/v2"
 	isatty "github.com/mattn/go-isatty"
@@ -70,58 +71,125 @@ func hydrateProfileAPIKey(name string, profile map[string]string) map[string]str
 		return profile
 	}
 	if key := profile[apiKeyField]; key != "" {
-		migrateAPIKeyToStore(name, key)
+		if Creds.hydrated.once("migrate", name) {
+			migrateAPIKeyToStore(name, key)
+		}
 		return profile
 	}
 	marker, marked := profile[apiKeyStoreField]
 	if !marked {
 		return profile
 	}
+	if secret, ok := Creds.hydrated.key(name); ok {
+		profile[apiKeyField] = secret
+		return profile
+	}
+	warnOnce := func(event *zerolog.Event, format string, args ...any) {
+		if Creds.hydrated.once("warn", name) {
+			event.Msgf(format, args...)
+		}
+	}
 	store := resolveSecretStore()
 	if store == nil {
-		log.Warn().Msgf("the API key of profile %q is in %s, but no secure store is available here", name, marker)
+		warnOnce(log.Warn(), "the API key of profile %q is in %s, but no secure store is available here", name, marker)
 		return profile
 	}
 	secret, ok, err := store.Load(sanitizeProfileName(name))
 	switch {
 	case err != nil:
-		log.Warn().Err(err).Msgf("could not read the API key of profile %q from %s", name, store.Name())
+		warnOnce(log.Warn().Err(err), "could not read the API key of profile %q from %s", name, store.Name())
 	case !ok:
-		log.Warn().Msgf("the API key of profile %q should be in %s, but it has no entry for it", name, store.Name())
+		warnOnce(log.Warn(), "the API key of profile %q should be in %s, but it has no entry for it", name, store.Name())
 	default:
+		Creds.hydrated.setKey(name, secret)
 		profile[apiKeyField] = secret
 	}
 	return profile
 }
 
+// profileHydration keeps GetProfile off the OS store after the first read. The auth
+// middleware calls GetProfile per request, and on macOS each store read starts a
+// process. A key rotated by another process is not seen until this one restarts. A
+// failed read is not cached, so unlocking the store works without a restart, and it
+// only warns once.
+type profileHydration struct {
+	mu   sync.Mutex
+	keys map[string]string
+	seen map[string]bool
+}
+
+func (h *profileHydration) key(name string) (string, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	secret, ok := h.keys[sanitizeProfileName(name)]
+	return secret, ok
+}
+
+func (h *profileHydration) setKey(name, secret string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.keys == nil {
+		h.keys = map[string]string{}
+	}
+	h.keys[sanitizeProfileName(name)] = secret
+}
+
+// once reports true the first time it sees this action for this profile.
+func (h *profileHydration) once(action, name string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	id := action + "/" + sanitizeProfileName(name)
+	if h.seen[id] {
+		return false
+	}
+	if h.seen == nil {
+		h.seen = map[string]bool{}
+	}
+	h.seen[id] = true
+	return true
+}
+
+// forget drops what was learned about a profile whose key just changed here.
+func (h *profileHydration) forget(name string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	name = sanitizeProfileName(name)
+	delete(h.keys, name)
+	delete(h.seen, "migrate/"+name)
+	delete(h.seen, "warn/"+name)
+}
+
 // migrateAPIKeyToStore moves a plaintext key found on read into the store and
 // strips it from the file, best-effort: on any failure the key stays where it is
-// and the next read tries again.
+// and the next process tries again.
 //
 // This runs on a read path, and Creds can be older than the file by the time it
-// gets here, so the rewrite starts from what is on disk now rather than from the
-// in-memory tree, which would drop whatever another process wrote since. There is
-// no lock on this file, so two writers can still race in the moment between that
-// read and the rename, as they can for every writer of it.
+// gets here, so everything starts from what is on disk now. The store is only
+// written while the file still holds this key: another process may have rotated
+// the key and moved it to the store, and saving ours would overwrite the newer one
+// with nothing left to repair it. There is no lock on this file, so two writers can
+// still race in the moment between that read and the rename, as they can for every
+// writer of it.
 func migrateAPIKeyToStore(name, key string) {
 	store := resolveSecretStore()
 	if store == nil {
+		return
+	}
+	onDisk, err := NewCredentialsFile(filepath.Dir(credentialsFile()))
+	if err != nil {
+		log.Warn().Err(err).Msg("could not read credentials.json; keeping the API key where it is")
+		return
+	}
+	if !onDisk.migrateProfileToStore(name, key, store.Name()) {
 		return
 	}
 	if err := store.Save(sanitizeProfileName(name), key); err != nil {
 		log.Warn().Err(err).Msg("could not store the API key securely; keeping it in credentials.json")
 		return
 	}
-	onDisk, err := NewCredentialsFile(filepath.Dir(credentialsFile()))
-	if err != nil {
-		log.Warn().Err(err).Msg("moved the API key to the secure store but could not read credentials.json")
+	if err := onDisk.Save(credentialsFile()); err != nil {
+		log.Warn().Err(err).Msg("moved the API key to the secure store but could not rewrite credentials.json")
 		return
-	}
-	if onDisk.migrateProfileToStore(name, key, store.Name()) {
-		if err := onDisk.Save(credentialsFile()); err != nil {
-			log.Warn().Err(err).Msg("moved the API key to the secure store but could not rewrite credentials.json")
-			return
-		}
 	}
 	Creds.migrateProfileToStore(name, key, store.Name())
 }
@@ -1310,7 +1378,8 @@ func ConfirmDestructive(cmd *cobra.Command, args []string) error {
 // unexported so callers cannot reach viper's own WriteConfigAs, which creates
 // the file 0644; Save is the only write.
 type CredentialsFile struct {
-	viper *viper.Viper
+	viper    *viper.Viper
+	hydrated profileHydration
 }
 
 // Set places a viper override at key. Never call it with a nested profile key
@@ -1340,6 +1409,7 @@ func (c *CredentialsFile) SetProfile(name string, fields map[string]string) {
 	// Keep the API key out of credentials.json: move it to the secure store and
 	// leave the marker. A no-op when there is no key or no store.
 	storeProfileAPIKey(name, merged)
+	c.hydrated.forget(name)
 
 	profiles[name] = merged
 	c.viper.Set("profiles", profiles)
@@ -1360,6 +1430,7 @@ func (c *CredentialsFile) RemoveProfile(name string) {
 		}
 	}
 
+	c.hydrated.forget(name)
 	profiles := c.viper.GetStringMap("profiles")
 	delete(profiles, name)
 	c.viper.Set("profiles", profiles)

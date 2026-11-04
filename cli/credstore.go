@@ -261,8 +261,8 @@ func (macKeychainStore) Save(account, secret string) error {
 
 	// Clear any leftover chunks from a previous, larger secret. Stop at the first
 	// not-found (exit 44). Any OTHER delete error could leave a stale tail chunk
-	// that Load would stitch onto the new value and mis-decode, so remove chunk 0
-	// of what we just wrote and fail: Load then stops at the missing chunk 0 and
+	// that Load would stitch onto the new value and mis-decode, so remove all the
+	// chunks we just wrote and fail: Load then stops at the missing chunk 0 and
 	// the caller keeps the key in the 0600 file, rather than reading a corrupt join.
 	for i := len(chunks); ; i++ {
 		service, acct := chunkTarget(account, i)
