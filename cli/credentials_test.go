@@ -1589,3 +1589,50 @@ func TestAuthProfileRemoveAliases(t *testing.T) {
 		})
 	}
 }
+
+// namedStubAuthHandler is a stub whose handlers compare unequal, so a test can
+// tell which registration authHandlerFor resolved.
+type namedStubAuthHandler struct{ name string }
+
+func (namedStubAuthHandler) ProfileKeys() []string                              { return []string{"api-key"} }
+func (namedStubAuthHandler) OnRequest(_ *zerolog.Logger, _ *http.Request) error { return nil }
+
+func TestAuthHandlerForDefaultAuthType(t *testing.T) {
+	AuthHandlers = make(map[string]AuthHandler)
+	defaultAuthType = ""
+	t.Cleanup(func() {
+		AuthHandlers = make(map[string]AuthHandler)
+		defaultAuthType = ""
+	})
+
+	alpha := namedStubAuthHandler{name: "alpha"}
+	beta := namedStubAuthHandler{name: "beta"}
+	AuthHandlers["alpha"] = alpha
+	AuthHandlers["beta"] = beta
+
+	// Two typed handlers, typeless profile, no default → nil (error preserved).
+	if handler := authHandlerFor(""); handler != nil {
+		t.Fatalf("expected nil handler without default, got %v", handler)
+	}
+
+	// Explicit profile type wins.
+	if handler := authHandlerFor("beta"); handler != beta {
+		t.Fatalf("expected beta handler for explicit type, got %v", handler)
+	}
+
+	// Default handler used for a typeless profile.
+	SetDefaultAuthType("alpha")
+	if handler := authHandlerFor(""); handler != alpha {
+		t.Fatalf("expected alpha handler from default, got %v", handler)
+	}
+
+	// Explicit type still wins over a configured default.
+	if handler := authHandlerFor("beta"); handler != beta {
+		t.Fatalf("expected explicit type to win over default, got %v", handler)
+	}
+
+	// An unknown label never falls back to the default: it names a scheme.
+	if handler := authHandlerFor("gamma"); handler != nil {
+		t.Fatalf("expected nil for an unregistered label, got %v", handler)
+	}
+}

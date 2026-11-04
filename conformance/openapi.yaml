@@ -1,0 +1,83 @@
+# Fixture for `make conformance`: a small API covering what bartolo turns into
+# MCP: reads, writes, a delete, an output schema, and a parameter mirrored into
+# an Mcp-Param-* header (SEP-2243).
+openapi: 3.1.0
+info:
+  title: Conformance Fixture API
+  version: "1.0"
+servers:
+  - url: http://127.0.0.1:18999
+paths:
+  /widgets:
+    get:
+      operationId: ListWidgets
+      tags: [widgets]
+      summary: List widgets
+      parameters:
+        - name: region
+          in: query
+          description: Region to list widgets from.
+          schema: {type: string}
+          x-bartolo-mcp-header: Region
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100}
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: {$ref: "#/components/schemas/Widget"}
+    post:
+      operationId: CreateWidget
+      tags: [widgets]
+      summary: Create a widget
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string, description: Widget name.}
+                size: {type: integer}
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Widget"}
+  /widgets/{id}:
+    parameters:
+      - {name: id, in: path, required: true, schema: {type: string}}
+    get:
+      operationId: GetWidget
+      tags: [widgets]
+      summary: Get a widget
+      responses:
+        2XX:
+          description: ok
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/Widget"}
+    delete:
+      operationId: DeleteWidget
+      tags: [widgets]
+      summary: Delete a widget
+      responses:
+        "204": {description: deleted}
+components:
+  schemas:
+    Widget:
+      type: object
+      required: [id, name]
+      properties:
+        id: {type: string}
+        name: {type: string}
+        size: {type: integer}
