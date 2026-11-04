@@ -2866,6 +2866,86 @@ func TestBetaMarkerCanonicalKey(t *testing.T) {
 	}
 }
 
+// TestBetaMarkerPlacement pins where the marker lands in a help body: at the end
+// of the first line at both the operation and group level, and after the summary
+// when the only body text is generated (a schema, or the body-field help).
+func TestBetaMarkerPlacement(t *testing.T) {
+	const spec = `
+openapi: 3.0.3
+info:
+  title: Beta API
+  version: "1"
+tags:
+  - name: things
+    description: "First group line.\nSecond group line."
+    x-bartolo-beta: true
+paths:
+  /things:
+    get:
+      operationId: ListThings
+      summary: List things
+      tags: [things]
+      responses:
+        "200": {description: ok}
+  /twolines:
+    get:
+      operationId: GetTwoLines
+      summary: Get two lines
+      description: "First line.\nSecond line."
+      x-bartolo-beta: true
+      responses:
+        "200": {description: ok}
+  /nodescription:
+    post:
+      operationId: CreateNoDescription
+      summary: Create no description
+      x-bartolo-beta: true
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: {type: string}
+      responses:
+        "200": {description: ok}
+`
+	api := ProcessAPI("beta", loadTestSpec(t, spec))
+	allOps := append([]*Operation{}, api.Operations...)
+	for _, g := range api.Groups {
+		allOps = append(allOps, g.Operations...)
+	}
+	long := func(path string) string {
+		for _, o := range allOps {
+			if o.Path == path {
+				return o.Long
+			}
+		}
+		t.Fatalf("operation %s not found", path)
+		return ""
+	}
+
+	// Long is escaped for the generated Go source, so a newline in it reads as \n.
+	if got := long("/twolines"); !strings.HasPrefix(got, `First line. (beta)\nSecond line.`) {
+		t.Errorf("two-line description: marker not on the first line: %q", got)
+	}
+	if got := long("/nodescription"); !strings.HasPrefix(got, `Create no description (beta)\n`) {
+		t.Errorf("no description: summary missing from the first line: %q", got)
+	}
+	var things *CommandGroup
+	for _, g := range api.Groups {
+		if g.CLIName == "things" {
+			things = g
+		}
+	}
+	if things == nil {
+		t.Fatal("things group not found")
+	}
+	if !strings.HasPrefix(things.Long, `First group line. (beta)\nSecond group line.`) {
+		t.Errorf("two-line group description: marker not on the first line: %q", things.Long)
+	}
+}
+
 // TestBetaMarker pins that x-cli-beta renders a "(beta)" marker at each level it
 // is read: a tagged group, an operation, and a flag; and that an untagged
 // sibling stays unmarked (ENG-2958).

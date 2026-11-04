@@ -586,13 +586,13 @@ func (b *irBuilder) addOperation(scope pathScope, httpMethod string, operation *
 	// case is covered below, where Long falls back to the already-marked short. Put
 	// the marker at the end of the first line (the summary), not after the
 	// body-fields and renamed-flags sections operationDescription appended, so it
-	// reads as "<summary> (beta)" rather than landing mid-document.
-	if betaSfx != "" && description != "" {
-		if nl := strings.IndexByte(description, '\n'); nl >= 0 {
-			description = description[:nl] + betaSfx + description[nl:]
-		} else {
-			description += betaSfx
-		}
+	// reads as "<summary> (beta)" rather than landing mid-document. Those sections
+	// start with a newline, so a leading newline means the operation has no text of
+	// its own and the first line has to be the already-marked summary.
+	if betaSfx != "" && strings.HasPrefix(description, "\n") {
+		description = short + description
+	} else {
+		description = markFirstLine(description, betaSfx)
 	}
 
 	if args := requiredArgsHelp(requiredParams); args != "" {
@@ -987,6 +987,19 @@ func betaSuffix(exts map[string]interface{}) string {
 	return ""
 }
 
+// markFirstLine appends suffix to the first line of text, the one place the beta
+// marker's position is decided. Empty text stays empty, so callers keep their
+// fallback to the already-marked short.
+func markFirstLine(text, suffix string) string {
+	if text == "" {
+		return ""
+	}
+	if nl := strings.IndexByte(text, '\n'); nl >= 0 {
+		return text[:nl] + suffix + text[nl:]
+	}
+	return text + suffix
+}
+
 func mustDecodeExt(input interface{}, target interface{}) {
 	switch value := input.(type) {
 	case json.RawMessage:
@@ -1165,9 +1178,7 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		// templates render them. Mark them too, so a beta group shows "(beta)" on
 		// its help page and in the README, not only in the parent command list.
 		// When long is empty the templates fall back to the already-marked short.
-		if sfx != "" && long != "" {
-			long += sfx
-		}
+		long = markFirstLine(long, sfx)
 		section = extString(tagDef.Extensions, extKeyHelpSection)
 	}
 
