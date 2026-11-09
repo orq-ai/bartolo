@@ -774,3 +774,42 @@ func TestDoctorFixLeavesAnUnreadableStoreAlone(t *testing.T) {
 	assert.NoError(t, err)
 	assert.False(t, fixed, "`doctor --fix` must not run `auth setup` over a key that is only locked")
 }
+
+// Each branch of the store choice, with its exact reason: the reason is what an
+// unreadable-key error tells the user, so it must match the branch that held.
+func TestChooseSecretStoreNamesTheCauseThatHeld(t *testing.T) {
+	has := func(tools ...string) func(string) bool {
+		return func(tool string) bool {
+			for _, t := range tools {
+				if t == tool {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	up := func() bool { return true }
+	down := func() bool { return false }
+	cases := []struct {
+		name      string
+		env       secretStoreEnv
+		wantStore SecretStore
+		reason    string
+	}{
+		{"under test", secretStoreEnv{goos: "darwin", underTest: true, installed: has("security"), ready: up}, nil, "secure stores are off under go test"},
+		{"forced file", secretStoreEnv{goos: "darwin", forcedFile: true, installed: has("security"), ready: up}, nil, "credential-store is set to file"},
+		{"mac with security", secretStoreEnv{goos: "darwin", installed: has("security"), ready: down}, macKeychainStore{}, ""},
+		{"mac without security", secretStoreEnv{goos: "darwin", installed: has(), ready: up}, nil, "the macOS `security` tool is not installed"},
+		{"linux ready", secretStoreEnv{goos: "linux", installed: has("secret-tool"), ready: up}, secretToolStore{}, ""},
+		{"linux no tool", secretStoreEnv{goos: "linux", installed: has(), ready: up}, nil, "`secret-tool` is not installed"},
+		{"linux no answer", secretStoreEnv{goos: "linux", installed: has("secret-tool"), ready: down}, nil, "`secret-tool` is installed, but its Secret Service did not answer (not running, locked, or no D-Bus session)"},
+		{"windows", secretStoreEnv{goos: "windows", installed: has("security", "secret-tool"), ready: up}, nil, "no secure store is supported on windows"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store, reason := chooseSecretStore(tc.env)
+			assert.Equal(t, tc.wantStore, store)
+			assert.Equal(t, tc.reason, reason)
+		})
+	}
+}

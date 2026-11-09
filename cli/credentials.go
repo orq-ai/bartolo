@@ -127,7 +127,8 @@ func ProfileKeyUnreadable(name string) error {
 
 // ProfileStoreUnreadable is the auth status source for a profile whose key is in
 // a store that could not be read; see ProfileKeyUnreadable. Auth handlers return
-// it from AuthStatus, and `doctor --fix` keys off it, so it is the one spelling.
+// it from AuthStatus, and `doctor --fix` keys off it, so code uses this constant.
+// apikey_test.go asserts the literal on purpose: it pins the value users see.
 const ProfileStoreUnreadable = "profile-store-unreadable"
 
 // profileHydration keeps GetProfile off the OS store after the first read. The auth

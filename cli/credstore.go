@@ -97,58 +97,75 @@ func toolInstalled(name string) bool {
 	return err == nil
 }
 
-// resolveSecretStore chooses the store for this invocation. It returns nil when
-// api keys should stay in credentials.json: the escape hatch is "file", or no
-// secure-store binary is available on this platform. It is a var so a test can
-// inject a fake store without a real keychain or a platform dependency.
-var resolveSecretStore = func() SecretStore {
+// secretStoreEnv is what chooseSecretStore decides from: the platform and the
+// facts about it, gathered by currentSecretStoreEnv.
+type secretStoreEnv struct {
+	goos       string
+	underTest  bool
+	forcedFile bool
+	installed  func(tool string) bool
+	ready      func() bool // secret-tool's Secret Service answered the probe
+}
+
+// chooseSecretStore is the one decision of which secure store to use, and why
+// there is none when it returns nil. The store and the reason come from the same
+// branch, so an error about an unreadable key names the cause that actually held.
+func chooseSecretStore(env secretStoreEnv) (SecretStore, string) {
 	// Never touch the real OS keychain under `go test`: a profile write would
 	// shell out to `security`/`secret-tool` and can block on a keychain prompt,
 	// and this fires for every package that embeds bartolo, not just this one.
-	// Tests that exercise the store inject a fake over this var directly.
-	if testing.Testing() {
-		return nil
+	// Tests that exercise the store inject a fake over resolveSecretStore.
+	if env.underTest {
+		return nil, "secure stores are off under go test"
 	}
-	if secretStoreForcedFile() {
-		return nil
+	if env.forcedFile {
+		return nil, "credential-store is set to file"
 	}
-	switch runtime.GOOS {
+	switch env.goos {
 	case "darwin":
-		if toolInstalled("security") {
-			return macKeychainStore{}
+		if env.installed("security") {
+			return macKeychainStore{}, ""
 		}
+		return nil, "the macOS `security` tool is not installed"
 	case "linux":
-		// secret-tool needs a running Secret Service (gnome-keyring, KWallet).
-		// A probe keeps a headless box from picking a store every call fails on.
-		if toolInstalled("secret-tool") && secretToolReady() {
-			return secretToolStore{}
+		if !env.installed("secret-tool") {
+			return nil, "`secret-tool` is not installed"
 		}
+		// A probe keeps a headless box from picking a store every call fails on.
+		// It cannot tell why the service did not answer, so the reason does not guess.
+		if env.ready() {
+			return secretToolStore{}, ""
+		}
+		return nil, "`secret-tool` is installed, but its Secret Service did not answer (not running, locked, or no D-Bus session)"
 	}
 	// No secure store on this platform (Windows and the rest): keys stay in the
 	// 0600 credentials.json. A Windows credential store is out of scope here.
-	return nil
+	return nil, "no secure store is supported on " + env.goos
 }
 
-// secretStoreUnavailable says why resolveSecretStore found no store here, so an
-// error about a key kept in a store names the actual cause instead of guessing.
-// It mirrors resolveSecretStore's checks; a var so a test can pin the text.
+func currentSecretStoreEnv() secretStoreEnv {
+	return secretStoreEnv{
+		goos:       runtime.GOOS,
+		underTest:  testing.Testing(),
+		forcedFile: secretStoreForcedFile(),
+		installed:  toolInstalled,
+		ready:      secretToolReady,
+	}
+}
+
+// resolveSecretStore chooses the store for this invocation. It returns nil when
+// api keys should stay in credentials.json. It is a var so a test can inject a
+// fake store without a real keychain or a platform dependency.
+var resolveSecretStore = func() SecretStore {
+	store, _ := chooseSecretStore(currentSecretStoreEnv())
+	return store
+}
+
+// secretStoreUnavailable says why resolveSecretStore found no store here, from
+// the same decision. A var so a test can pin the text.
 var secretStoreUnavailable = func() string {
-	switch {
-	case testing.Testing():
-		return "secure stores are off under go test"
-	case secretStoreForcedFile():
-		return "credential-store is set to file"
-	}
-	switch runtime.GOOS {
-	case "darwin":
-		return "the macOS `security` tool is not installed"
-	case "linux":
-		if !toolInstalled("secret-tool") {
-			return "`secret-tool` is not installed"
-		}
-		return "`secret-tool` found no running Secret Service (gnome-keyring or KWallet)"
-	}
-	return "no secure store is supported on " + runtime.GOOS
+	_, reason := chooseSecretStore(currentSecretStoreEnv())
+	return reason
 }
 
 // ---- macOS: security(1) / Keychain ----
