@@ -177,6 +177,9 @@ type CommandGroup struct {
 	HelpSection string
 	Operations  []*Operation
 	Description string
+	// Beta is set when the group's tag is marked beta. Every operation filed
+	// under the group inherits the marker.
+	Beta bool
 }
 
 // cliVisibleOperations returns the operations that generate a CLI command,
@@ -579,6 +582,11 @@ func (b *irBuilder) addOperation(scope pathScope, httpMethod string, operation *
 	group, leafName := b.resolveGroup(path, operation, leafName, method, explicitLeafName != "")
 	short := operationShort(operation.Summary, leafName)
 	betaSfx := betaSuffix(operation.Extensions)
+	if betaSfx == "" && group != nil && group.Beta {
+		// A beta group marks every operation under it, so each command's own
+		// help and the README say so, not only the group's entry.
+		betaSfx = betaMarker
+	}
 	short += betaSfx
 	// Cobra prints Long or Short, never both, so a beta operation that has its own
 	// description (its Long) needs the marker there too, or its own --help page
@@ -975,14 +983,16 @@ func extStr(i interface{}) (decoded string) {
 	return
 }
 
-// betaSuffix returns " (beta)" when x-bartolo-beta (or its x-cli-beta alias) is
+const betaMarker = " (beta)"
+
+// betaSuffix returns betaMarker when x-bartolo-beta (or its x-cli-beta alias) is
 // set truthy on the given extensions, else "". Appended to the Short/description
 // text so the marker shows wherever that text is rendered: command list, command
 // help, flag help, and the generated README. Readable at group, operation, flag
 // and body-field level.
 func betaSuffix(exts map[string]interface{}) string {
 	if extBool(extValueOrNil(exts, extKeyBeta)) {
-		return " (beta)"
+		return betaMarker
 	}
 	return ""
 }
@@ -1153,6 +1163,7 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 	section := ""
 	short := displayNameFromSlug(cliName)
 	long := ""
+	beta := false
 	var aliases []string
 	hidden := false
 
@@ -1178,6 +1189,7 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 			mustDecodeExt(h, &hidden)
 		}
 		sfx := betaSuffix(tagDef.Extensions)
+		beta = sfx != ""
 		short += sfx
 		// Long and Description both come from `long`, and the group/readme
 		// templates render them. Mark them too, so a beta group shows "(beta)" on
@@ -1205,6 +1217,7 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		Hidden:      hidden,
 		HelpSection: section,
 		Description: long,
+		Beta:        beta,
 	}
 }
 

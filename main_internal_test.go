@@ -3049,6 +3049,13 @@ paths:
 	if !strings.Contains(group.Long, "(beta)") || !strings.Contains(group.Description, "(beta)") {
 		t.Errorf("beta group Long/Description missing marker: Long=%q Description=%q", group.Long, group.Description)
 	}
+	// Every operation under a beta group is beta too (ENG-2958 thread), so its own
+	// command help carries the marker, not only the group's entry.
+	if inherited := opByPath("/things"); inherited == nil {
+		t.Fatal("ListThings operation not found")
+	} else if !strings.Contains(inherited.Short, "(beta)") || strings.Count(inherited.Short, "(beta)") != 1 {
+		t.Errorf("operation under a beta group should carry the marker once: %q", inherited.Short)
+	}
 
 	// x-cli-beta: false is explicitly not beta, at every level, so the marker must
 	// be absent even though the key is present.

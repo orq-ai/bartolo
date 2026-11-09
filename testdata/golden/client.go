@@ -136,7 +136,7 @@ func ExampleGetThing(paramId string, paramFrom string, paramFromTime string, par
 	return resp, decoded, nil
 }
 
-// ExampleCreateWidget Create a widget
+// ExampleCreateWidget Create a widget (beta)
 func ExampleCreateWidget(params *viper.Viper, body string) (*gentleman.Response, map[string]interface{}, error) {
 	handlerPath := "widgets create"
 	server := bartolocli.ResolveServer()
@@ -178,7 +178,7 @@ func ExampleCreateWidget(params *viper.Viper, body string) (*gentleman.Response,
 	return resp, decoded, nil
 }
 
-// ExampleDeleteWidget Delete a widget
+// ExampleDeleteWidget Delete a widget (beta)
 func ExampleDeleteWidget(paramId string, params *viper.Viper) (*gentleman.Response, interface{}, error) {
 	handlerPath := "widgets delete id"
 	server := bartolocli.ResolveServer()
@@ -217,7 +217,7 @@ func ExampleDeleteWidget(paramId string, params *viper.Viper) (*gentleman.Respon
 	return resp, decoded, nil
 }
 
-// ExampleQueryWidgets Query widgets
+// ExampleQueryWidgets Query widgets (beta)
 func ExampleQueryWidgets(params *viper.Viper) (*gentleman.Response, map[string]interface{}, error) {
 	handlerPath := "widgets query"
 	server := bartolocli.ResolveServer()
@@ -255,7 +255,7 @@ func ExampleQueryWidgets(params *viper.Viper) (*gentleman.Response, map[string]i
 	return resp, decoded, nil
 }
 
-// ExampleSearchWidgets Search widgets
+// ExampleSearchWidgets Search widgets (beta)
 func ExampleSearchWidgets(params *viper.Viper) (*gentleman.Response, map[string]interface{}, error) {
 	handlerPath := "widgets search"
 	server := bartolocli.ResolveServer()
