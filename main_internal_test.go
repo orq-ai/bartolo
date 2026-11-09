@@ -2886,15 +2886,28 @@ func TestProcessAPIRejectsMalformedListFieldLabels(t *testing.T) {
 		"missing path":    `[{label: ID}]`,
 		"empty label":     `[{path: id, label: " "}]`,
 		"multiline label": `[{path: id, label: "a\nb"}]`,
+		"duplicate label": `[{path: a, label: Key}, {path: b, label: KEY}]`,
+		"label as derived": `[{path: pricing.input.cost, label: Cost}, pricing.output.cost]`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			doc := loadTestSpec(t, listFieldsSpec(fields))
 			defer func() {
-				if recover() == nil {
+				recovered := recover()
+				if recovered == nil {
 					t.Fatalf("%s should fail generation", fields)
+				}
+				if !strings.Contains(fmt.Sprint(recovered), "GET /files") {
+					t.Fatalf("the error should name the operation, got %v", recovered)
 				}
 			}()
 			ProcessAPI("example", doc)
 		})
+	}
+}
+
+func TestProcessAPIKeepsEqualUnlabeledHeadersNextToALabel(t *testing.T) {
+	api := ProcessAPI("example", loadTestSpec(t, listFieldsSpec(`[id, id, {path: name, label: Title}]`)))
+	if got := len(api.Groups[0].Operations[0].ListColumns); got != 3 {
+		t.Fatalf("expected 3 columns, got %d", got)
 	}
 }

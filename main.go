@@ -744,6 +744,25 @@ func (f *listField) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// checkListHeaders rejects a label that prints the same header as another
+// column, ignoring case: the two columns would be indistinguishable. Unlabeled
+// paths that derive equal headers are left alone, as tables already allow.
+func checkListHeaders(httpMethod, path string, columns []ListColumnData) {
+	runtimeColumns := make([]bartolocli.ListColumn, len(columns))
+	for i, column := range columns {
+		runtimeColumns[i] = bartolocli.ListColumn(column)
+	}
+	headers := bartolocli.ListColumnHeaders(runtimeColumns)
+	for i := range headers {
+		for j := 0; j < i; j++ {
+			if (columns[i].Label != "" || columns[j].Label != "") && strings.EqualFold(headers[i], headers[j]) {
+				panic(fmt.Errorf("%s %s: x-bartolo-list-fields columns %q and %q both show the header %q; give one a different label",
+					strings.ToUpper(httpMethod), path, columns[j].Path, columns[i].Path, headers[i]))
+			}
+		}
+	}
+}
+
 // classifyList returns the declared list columns, the same columns with their
 // declared header labels (nil when no entry declares one), and whether the
 // operation renders as a collection: marked by x-bartolo-list or
@@ -752,7 +771,15 @@ func (f *listField) UnmarshalJSON(data []byte) error {
 func classifyList(httpMethod, path string, operation *openapi3.Operation) ([]string, []ListColumnData, bool) {
 	var entries []listField
 	if fields, ok := extValue(operation.Extensions, extKeyListFields); ok {
-		mustDecodeExt(fields, &entries)
+		func() {
+			// Name the operation, so a bad entry is findable in a large spec.
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					panic(fmt.Errorf("%s %s: %v", strings.ToUpper(httpMethod), path, recovered))
+				}
+			}()
+			mustDecodeExt(fields, &entries)
+		}()
 	}
 	var listFields []string
 	var listColumns []ListColumnData
@@ -765,6 +792,7 @@ func classifyList(httpMethod, path string, operation *openapi3.Operation) ([]str
 	if !labelled {
 		listColumns = nil
 	}
+	checkListHeaders(httpMethod, path, listColumns)
 
 	listExt, hasOverride := extValue(operation.Extensions, extKeyList)
 	override := extBool(listExt)

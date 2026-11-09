@@ -577,15 +577,7 @@ func renderTable(data interface{}, requestedColumns []string, declaredLabels []s
 	}
 
 	// Labels before fitting, so widths are budgeted on what is printed.
-	labels := tableHeaders(headers, literal)
-	// A label the spec declared replaces the derived header, as written.
-	if len(declaredLabels) == len(labels) {
-		for i, declared := range declaredLabels {
-			if declared != "" {
-				labels[i] = declared
-			}
-		}
-	}
+	labels := columnHeaders(headers, literal, declaredLabels)
 	// Columns someone asked for — by spec or on the command line — are never dropped.
 	if len(requestedColumns) == 0 {
 		labels, values = fitColumns(labels, values, terminalWidth())
@@ -614,6 +606,44 @@ func renderTable(data interface{}, requestedColumns []string, declaredLabels []s
 		fmt.Fprintln(Stdout, footer)
 	}
 	return true, nil
+}
+
+// columnHeaders labels each column: a declared label as written, otherwise the
+// shortest unique suffix among the unlabeled columns only. A labeled sibling is
+// not a header to stay distinct from, so labeling pricing.input.cost leaves
+// pricing.output.cost as COST rather than OUTPUT . COST.
+func columnHeaders(columns []string, literal []bool, declared []string) []string {
+	if len(declared) != len(columns) {
+		return tableHeaders(columns, literal)
+	}
+	var unlabeled []int
+	var unlabeledColumns []string
+	var unlabeledLiteral []bool
+	for i, column := range columns {
+		if declared[i] == "" {
+			unlabeled = append(unlabeled, i)
+			unlabeledColumns = append(unlabeledColumns, column)
+			unlabeledLiteral = append(unlabeledLiteral, literal[i])
+		}
+	}
+	headers := append([]string(nil), declared...)
+	for j, derived := range tableHeaders(unlabeledColumns, unlabeledLiteral) {
+		headers[unlabeled[j]] = derived
+	}
+	return headers
+}
+
+// ListColumnHeaders is the header each declared column gets in a table, for
+// the generator to check before it writes the columns into a command. It reads
+// every path as dotted, so a literal key containing a dot can still derive a
+// different header at runtime.
+func ListColumnHeaders(columns []ListColumn) []string {
+	paths := make([]string, len(columns))
+	labels := make([]string, len(columns))
+	for i, column := range columns {
+		paths[i], labels[i] = column.Path, column.Label
+	}
+	return columnHeaders(paths, make([]bool, len(columns)), labels)
 }
 
 // tableHeaders labels each column by its shortest unique suffix of path

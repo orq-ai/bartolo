@@ -328,8 +328,11 @@ paths:
 ```
 
 An entry is a field path, or an object with a `path` and a `label`. The label
-replaces the derived header exactly as written. `--columns` and `--jmespath`
-replace the declared columns, so their tables keep derived headers.
+replaces the derived header exactly as written, and unlabeled columns only
+stay distinct from each other: labeling `pricing.input.cost` leaves
+`pricing.output.cost` as `COST`. A label that matches another column's header,
+ignoring case, fails generation. `--columns` and `--jmespath` replace the
+declared columns, so their tables keep derived headers.
 
 Without `x-cli-list-fields` the columns are inferred from the response: nested
 objects are skipped, a list shows its first three entries followed by `…`,

@@ -1164,3 +1164,12 @@ func (r *listRecorder) FormatList(_ interface{}, columns ...string) error {
 	r.columns = columns
 	return nil
 }
+
+func TestListColumnHeadersDeriveAmongUnlabeledColumnsOnly(t *testing.T) {
+	assert.Equal(t, []string{"$/1M IN", "COST"}, ListColumnHeaders([]ListColumn{
+		{Path: "pricing.input.cost", Label: "$/1M IN"}, {Path: "pricing.output.cost"},
+	}), "a labeled sibling no longer forces the unlabeled one to extend")
+	assert.Equal(t, []string{"Key", "INPUT . COST", "OUTPUT . COST"}, ListColumnHeaders([]ListColumn{
+		{Path: "id", Label: "Key"}, {Path: "pricing.input.cost"}, {Path: "pricing.output.cost"},
+	}), "unlabeled columns still stay distinct from each other")
+}
