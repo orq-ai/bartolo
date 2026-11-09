@@ -129,6 +129,28 @@ var resolveSecretStore = func() SecretStore {
 	return nil
 }
 
+// secretStoreUnavailable says why resolveSecretStore found no store here, so an
+// error about a key kept in a store names the actual cause instead of guessing.
+// It mirrors resolveSecretStore's checks; a var so a test can pin the text.
+var secretStoreUnavailable = func() string {
+	switch {
+	case testing.Testing():
+		return "secure stores are off under go test"
+	case secretStoreForcedFile():
+		return "credential-store is set to file"
+	}
+	switch runtime.GOOS {
+	case "darwin":
+		return "the macOS `security` tool is not installed"
+	case "linux":
+		if !toolInstalled("secret-tool") {
+			return "`secret-tool` is not installed"
+		}
+		return "`secret-tool` found no running Secret Service (gnome-keyring or KWallet)"
+	}
+	return "no secure store is supported on " + runtime.GOOS
+}
+
 // ---- macOS: security(1) / Keychain ----
 
 type macKeychainStore struct{}

@@ -91,8 +91,9 @@ func hydrateProfileAPIKey(name string, profile map[string]string) map[string]str
 	}
 	store := resolveSecretStore()
 	if store == nil {
-		Creds.hydrated.setUnreadable(name, fmt.Errorf("the API key of profile %q is in %s, but no secure store is available here", name, marker))
-		warnOnce(log.Warn(), "the API key of profile %q is in %s, but no secure store is available here", name, marker)
+		reason := secretStoreUnavailable()
+		Creds.hydrated.setUnreadable(name, fmt.Errorf("the API key of profile %q is in %s, but %s", name, marker, reason))
+		warnOnce(log.Warn(), "the API key of profile %q is in %s, but %s", name, marker, reason)
 		return profile
 	}
 	secret, ok, err := store.Load(sanitizeProfileName(name))
@@ -124,9 +125,10 @@ func ProfileKeyUnreadable(name string) error {
 	return Creds.hydrated.unreadableErr(name)
 }
 
-// profileStoreUnreadable is the auth status source for a profile whose key is in
-// a store that could not be read; see ProfileKeyUnreadable.
-const profileStoreUnreadable = "profile-store-unreadable"
+// ProfileStoreUnreadable is the auth status source for a profile whose key is in
+// a store that could not be read; see ProfileKeyUnreadable. Auth handlers return
+// it from AuthStatus, and `doctor --fix` keys off it, so it is the one spelling.
+const ProfileStoreUnreadable = "profile-store-unreadable"
 
 // profileHydration keeps GetProfile off the OS store after the first read. The auth
 // middleware calls GetProfile per request, and on macOS each store read starts a
@@ -798,7 +800,7 @@ func GetAuthStatus() map[string]interface{} {
 	if configured {
 		status["source"] = "profile"
 	} else if err := ProfileKeyUnreadable(ActiveProfileName()); err != nil {
-		status["source"] = profileStoreUnreadable
+		status["source"] = ProfileStoreUnreadable
 		status["store_error"] = err.Error()
 	}
 
@@ -811,7 +813,7 @@ func GetAuthStatus() map[string]interface{} {
 func authFixableBySetup(auth map[string]interface{}) bool {
 	configured, _ := auth["configured"].(bool)
 	source, _ := auth["source"].(string)
-	return !configured && source != profileStoreUnreadable
+	return !configured && source != ProfileStoreUnreadable
 }
 
 // profileHoldsRequiredKeys reports whether the profile has a value for every
@@ -1437,9 +1439,10 @@ type CredentialsFile struct {
 	viper *viper.Viper
 	// hydrated is only ever read through the package Creds: hydrateProfileAPIKey
 	// reads Creds.hydrated, and SetProfile and RemoveProfile forget on their own
-	// receiver. No production path writes a profile through another instance
-	// today. One that does must call Creds.hydrated.forget too, or Creds keeps
-	// serving the old key.
+	// receiver. migrateAPIKeyToStore writes through another instance (from
+	// NewCredentialsFile), but it stores the same key value it read, so Creds
+	// needs no forget there. A path that changes a key through another instance
+	// must call Creds.hydrated.forget too, or Creds keeps serving the old key.
 	hydrated profileHydration
 }
 

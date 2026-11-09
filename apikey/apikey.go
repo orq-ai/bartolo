@@ -102,7 +102,7 @@ func (h *Handler) AuthStatus(profile map[string]string) map[string]interface{} {
 
 	// The key exists in a store that could not be read: say so, or the status reads
 	// as a missing key that `auth setup` would fix by replacing it.
-	if source == "profile-store-unreadable" {
+	if source == cli.ProfileStoreUnreadable {
 		if err := cli.ProfileKeyUnreadable(cli.ActiveProfileName()); err != nil {
 			status["store_error"] = err.Error()
 		}
@@ -135,7 +135,7 @@ func (h *Handler) lookupKey(profile map[string]string, activeProfile string) (ke
 			// A key in a store that could not be read still exists; telling the
 			// user to run `auth setup` would have them replace it.
 			if cli.ProfileKeyUnreadable(activeProfile) != nil {
-				return "", "profile-store-unreadable", ""
+				return "", cli.ProfileStoreUnreadable, ""
 			}
 			return "", "profile-incomplete", ""
 		}
@@ -158,9 +158,9 @@ func (h *Handler) missingKeyError(name string, source string) error {
 	switch source {
 	case "profile-unknown":
 		return fmt.Errorf("profile %q is not configured; run `auth setup --profile %s` or pick one with `auth profile list`", name, name)
-	case "profile-store-unreadable":
+	case cli.ProfileStoreUnreadable:
 		if err := cli.ProfileKeyUnreadable(name); err != nil {
-			return fmt.Errorf("%w; the key is still stored there, so make that store readable (for example, unlock the keychain) and retry. Running `auth setup --profile %s` would replace it", err, name)
+			return fmt.Errorf("%w; the key is still stored there, so make that store readable and retry. Running `auth setup --profile %s` would replace it", err, name)
 		}
 		return fmt.Errorf("profile %q has no API key; run `auth setup --profile %s`", name, name)
 	case "profile-incomplete":

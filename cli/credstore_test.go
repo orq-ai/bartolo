@@ -427,7 +427,7 @@ func TestUnreadableStoreWarnsAndNamesTheStore(t *testing.T) {
 			return s
 		}(), []string{"Fake Store", "keychain is locked"}},
 		"entry gone": {newFakeStore(), []string{"Fake Store", "no entry"}},
-		"no store":   {nil, []string{"Fake Store", "no secure store"}},
+		"no store":   {nil, []string{"Fake Store", secretStoreUnavailable()}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -614,7 +614,7 @@ func TestAStoreThatCannotBeReadIsNotReportedAsMissing(t *testing.T) {
 			s.loadErr = errors.New("keychain is locked")
 			return s
 		}(), []string{"Fake Store", "keychain is locked"}},
-		"no store here": {nil, []string{"Fake Store", "no secure store"}},
+		"no store here": {nil, []string{"Fake Store", secretStoreUnavailable()}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -627,7 +627,7 @@ func TestAStoreThatCannotBeReadIsNotReportedAsMissing(t *testing.T) {
 			status := GetAuthStatus()
 
 			assert.Equal(t, false, status["configured"])
-			assert.Equal(t, profileStoreUnreadable, status["source"])
+			assert.Equal(t, ProfileStoreUnreadable, status["source"])
 			for _, want := range tc.want {
 				assert.Contains(t, status["store_error"], want)
 			}
@@ -660,7 +660,7 @@ func TestUnlockingTheStoreClearsTheUnreadableState(t *testing.T) {
 	useStore(t, store)
 	Creds.SetProfile("acme", map[string]string{"type": "", apiKeyField: "sk-orq-secret"})
 	store.loadErr = errors.New("keychain is locked")
-	require.Equal(t, profileStoreUnreadable, GetAuthStatus()["source"])
+	require.Equal(t, ProfileStoreUnreadable, GetAuthStatus()["source"])
 
 	store.loadErr = nil
 
@@ -713,4 +713,64 @@ func TestMigrationLeavesTheStoreEmptyWhenTheFileHoldsANewerPlaintextKey(t *testi
 	assert.Equal(t, 0, store.saves)
 	assert.Empty(t, store.data)
 	assert.Contains(t, credentialsOnDisk(t), "sk-orq-k2")
+}
+
+func TestALostEntryClearsAStaleStoreError(t *testing.T) {
+	credStoreFixtureWithAuth(t)
+	store := newFakeStore()
+	useStore(t, store)
+	Creds.SetProfile("acme", map[string]string{"type": "", apiKeyField: "sk-orq-secret"})
+	store.loadErr = errors.New("keychain is locked")
+	require.Equal(t, ProfileStoreUnreadable, GetAuthStatus()["source"])
+
+	store.loadErr = nil
+	require.NoError(t, store.Delete(sanitizeProfileName("acme")))
+
+	status := GetAuthStatus()
+	assert.Nil(t, ProfileKeyUnreadable("acme"), "a lost entry is missing, not unreadable")
+	assert.NotEqual(t, ProfileStoreUnreadable, status["source"])
+	assert.True(t, authFixableBySetup(status), "with the key gone, `auth setup` is the remedy")
+}
+
+func TestForgetClearsTheUnreadableState(t *testing.T) {
+	credStoreFixtureWithAuth(t)
+	store := newFakeStore()
+	useStore(t, store)
+	Creds.SetProfile("acme", map[string]string{"type": "", apiKeyField: "sk-orq-secret"})
+	store.loadErr = errors.New("keychain is locked")
+	GetAuthStatus()
+	require.Error(t, ProfileKeyUnreadable("acme"))
+
+	Creds.hydrated.forget("acme")
+
+	assert.Nil(t, ProfileKeyUnreadable("acme"))
+}
+
+func TestNoStoreHereNamesTheCause(t *testing.T) {
+	credStoreFixtureWithAuth(t)
+	useStore(t, nil)
+	orig := secretStoreUnavailable
+	secretStoreUnavailable = func() string { return "no secure store is supported on windows" }
+	t.Cleanup(func() { secretStoreUnavailable = orig })
+	Creds.Set("profiles", map[string]interface{}{
+		"acme": map[string]interface{}{"type": "", apiKeyStoreField: "macOS Keychain"},
+	})
+
+	GetAuthStatus()
+
+	err := ProfileKeyUnreadable("acme")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no secure store is supported on windows")
+	assert.NotContains(t, err.Error(), "unlock")
+}
+
+func TestDoctorFixLeavesAnUnreadableStoreAlone(t *testing.T) {
+	credStoreFixtureWithAuth(t)
+
+	fixed, err := runDoctorFixes(map[string]interface{}{
+		"auth": map[string]interface{}{"configured": false, "source": ProfileStoreUnreadable},
+	})
+
+	assert.NoError(t, err)
+	assert.False(t, fixed, "`doctor --fix` must not run `auth setup` over a key that is only locked")
 }
