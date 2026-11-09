@@ -1114,3 +1114,53 @@ func TestDefaultFormatterFooterStaysQuietWithoutMorePages(t *testing.T) {
 	}))
 	assert.NotContains(t, out.String(), "more available")
 }
+
+func TestFormatListColumnsUsesDeclaredHeadersUntilColumnsAreReplaced(t *testing.T) {
+	rows := []interface{}{
+		map[string]interface{}{"id": "one", "metadata": map[string]interface{}{"created_at": "2026-01-01"}},
+	}
+	columns := []ListColumn{{Path: "id"}, {Path: "metadata.created_at", Label: "Created on"}}
+	render := func(columnsFlag, query string) string {
+		viper.Reset()
+		viper.Set("output-format", tableFormat)
+		viper.Set("jmespath", query)
+		viper.Set("columns", columnsFlag)
+		viper.Set("raw", false)
+		out := new(bytes.Buffer)
+		original := Stdout
+		Stdout = out
+		t.Cleanup(func() { Stdout = original })
+		assert.NoError(t, NewDefaultFormatter(true, true).FormatListColumns(rows, columns...))
+		return out.String()
+	}
+
+	out := render("", "")
+	assert.Contains(t, out, "│ ID  │ Created on │", "a declared label replaces the header as written; an empty one derives")
+
+	// Same column count as the spec's, so a leaked label would land on "id".
+	out = render("metadata.created_at,id", "")
+	assert.Contains(t, out, "│ CREATED AT │ ID  │")
+	assert.NotContains(t, out, "Created on", "--columns replaces the spec's columns, so their labels go too")
+
+	out = render("", "[].{when: metadata.created_at, key: id}")
+	assert.Contains(t, out, "WHEN")
+	assert.Contains(t, out, "KEY")
+	assert.NotContains(t, out, "Created on", "a projection replaces the rows the labels named")
+}
+
+func TestPackageFormatListColumnsFallsBackToPathsForCustomFormatters(t *testing.T) {
+	original := Formatter
+	t.Cleanup(func() { Formatter = original })
+	recorder := &listRecorder{}
+	Formatter = recorder
+	assert.NoError(t, FormatListColumns([]interface{}{}, ListColumn{Path: "id", Label: "Key"}))
+	assert.Equal(t, []string{"id"}, recorder.columns)
+}
+
+type listRecorder struct{ columns []string }
+
+func (r *listRecorder) Format(interface{}) error { return nil }
+func (r *listRecorder) FormatList(_ interface{}, columns ...string) error {
+	r.columns = columns
+	return nil
+}

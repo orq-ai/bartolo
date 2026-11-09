@@ -208,7 +208,7 @@ rather than calling log.Fatal so cobra can classify them — a usage error exits
 		return bartolocli.OperationError(err)
 	}
 
-	if err := bartolocli.{{ if .IsList }}FormatList{{ else }}Formatter.Format{{ end }}(decoded{{ if .IsList }}{{ range .ListFields }}, "{{ . | escapeStr }}"{{ end }}{{ end }}); err != nil {
+	if err := bartolocli.{{ if .ListColumns }}FormatListColumns(decoded{{ range .ListColumns }}, bartolocli.ListColumn{Path: "{{ .Path | escapeStr }}", Label: "{{ .Label | escapeStr }}"}{{ end }}){{ else if .IsList }}FormatList(decoded{{ range .ListFields }}, "{{ . | escapeStr }}"{{ end }}){{ else }}Formatter.Format(decoded){{ end }}; err != nil {
 		return errors.Wrap(err, "formatting failed")
 	}
 

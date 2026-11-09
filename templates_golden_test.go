@@ -77,7 +77,7 @@ paths:
     post:
       operationId: SearchWidgets
       summary: Search widgets
-      x-cli-list-fields: [name, "tools[].key"]
+      x-cli-list-fields: [name, {path: "tools[].key", label: "Tool keys"}]
       responses:
         "200":
           description: ok

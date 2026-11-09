@@ -2845,3 +2845,56 @@ paths:
 		t.Errorf("CLI examples lost the group command:\n%s", cli)
 	}
 }
+
+func listFieldsSpec(fields string) string {
+	return `
+openapi: 3.0.3
+info:
+  title: List labels API
+  version: "1"
+paths:
+  /files:
+    get:
+      operationId: listFiles
+      x-cli-list-fields: ` + fields + `
+      responses:
+        "200":
+          description: ok
+`
+}
+
+func TestProcessAPIReadsListFieldLabels(t *testing.T) {
+	api := ProcessAPI("example", loadTestSpec(t, listFieldsSpec(`[name, {path: "metadata.created_at", label: "Created"}, {path: id}]`)))
+	op := api.Groups[0].Operations[0]
+	if got := strings.Join(op.ListFields, ","); got != "name,metadata.created_at,id" {
+		t.Fatalf("unexpected list fields %q", got)
+	}
+	want := []ListColumnData{{Path: "name"}, {Path: "metadata.created_at", Label: "Created"}, {Path: "id"}}
+	if fmt.Sprint(op.ListColumns) != fmt.Sprint(want) {
+		t.Fatalf("expected columns %v, got %v", want, op.ListColumns)
+	}
+
+	api = ProcessAPI("example", loadTestSpec(t, listFieldsSpec(`[name, {path: id}]`)))
+	if columns := api.Groups[0].Operations[0].ListColumns; columns != nil {
+		t.Fatalf("no label declared, so generation should keep FormatList; got %v", columns)
+	}
+}
+
+func TestProcessAPIRejectsMalformedListFieldLabels(t *testing.T) {
+	for name, fields := range map[string]string{
+		"unknown key":     `[{path: id, title: ID}]`,
+		"missing path":    `[{label: ID}]`,
+		"empty label":     `[{path: id, label: " "}]`,
+		"multiline label": `[{path: id, label: "a\nb"}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			doc := loadTestSpec(t, listFieldsSpec(fields))
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("%s should fail generation", fields)
+				}
+			}()
+			ProcessAPI("example", doc)
+		})
+	}
+}

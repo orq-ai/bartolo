@@ -63,6 +63,29 @@ type ResponseFormatter interface {
 	Format(interface{}) error
 }
 
+// ListColumn is a default column for a collection: the field path, and the
+// header to show for it. An empty Label keeps the header derived from the path.
+type ListColumn struct {
+	Path  string
+	Label string
+}
+
+// FormatListColumns is FormatList with a declared header for each column. A
+// custom ResponseFormatter without label support gets FormatList, so the paths
+// still apply and only the labels are dropped.
+func FormatListColumns(data interface{}, columns ...ListColumn) error {
+	if labelled, ok := Formatter.(interface {
+		FormatListColumns(interface{}, ...ListColumn) error
+	}); ok {
+		return labelled.FormatListColumns(data, columns...)
+	}
+	paths := make([]string, len(columns))
+	for i, column := range columns {
+		paths[i] = column.Path
+	}
+	return FormatList(data, paths...)
+}
+
 // FormatList renders a collection through the formatter's collection-aware
 // output, falling back to Format for custom ResponseFormatter implementations.
 func FormatList(data interface{}, columns ...string) error {
@@ -95,18 +118,31 @@ func NewDefaultFormatter(tty, terminal bool) *DefaultFormatter {
 
 // Format will filter, prettify, colorize and output the data.
 func (f *DefaultFormatter) Format(data interface{}) error {
-	return f.format(data, false, nil)
+	return f.format(data, false, nil, nil)
 }
 
 // FormatList renders a collection as a table for a human at a terminal and
 // keeps the serialized output for pipes and explicit format flags.
 func (f *DefaultFormatter) FormatList(data interface{}, columns ...string) error {
-	return f.format(data, true, columns)
+	return f.format(data, true, columns, nil)
 }
 
-func (f *DefaultFormatter) format(data interface{}, list bool, columns []string) error {
+// FormatListColumns is FormatList with the spec's header label for each column.
+func (f *DefaultFormatter) FormatListColumns(data interface{}, columns ...ListColumn) error {
+	paths := make([]string, len(columns))
+	labels := make([]string, len(columns))
+	for i, column := range columns {
+		paths[i], labels[i] = column.Path, column.Label
+	}
+	return f.format(data, true, paths, labels)
+}
+
+// labels, when set, holds the declared header for each of columns ("" derives
+// it). They belong to those columns only, so whatever replaces the columns
+// below (a projection, --columns) drops them too.
+func (f *DefaultFormatter) format(data interface{}, list bool, columns []string, labels []string) error {
 	if !list {
-		columns = nil
+		columns, labels = nil, nil
 	}
 	if data == nil {
 		data = nil
@@ -120,7 +156,7 @@ func (f *DefaultFormatter) format(data interface{}, list bool, columns []string)
 		}
 
 		// The schema's columns describe the original rows, not the projection.
-		data, columns = result, nil
+		data, columns, labels = result, nil, nil
 	}
 
 	override := ""
@@ -136,10 +172,11 @@ func (f *DefaultFormatter) format(data interface{}, list bool, columns []string)
 				return err
 			}
 
-			columns, userColumns = selected, true
+			// Typed columns keep derived headers: the labels named the spec's columns.
+			columns, labels, userColumns = selected, nil, true
 		}
 
-		if rendered, err := renderTable(data, columns, userColumns); err != nil {
+		if rendered, err := renderTable(data, columns, labels, userColumns); err != nil {
 			return err
 		} else if rendered {
 			return nil
@@ -500,7 +537,7 @@ func objectField(row map[string]interface{}, column string) (interface{}, bool) 
 
 // renderTable reports false for anything that is not a collection so callers
 // can fall back to the requested serialization format.
-func renderTable(data interface{}, requestedColumns []string, userColumns bool) (bool, error) {
+func renderTable(data interface{}, requestedColumns []string, declaredLabels []string, userColumns bool) (bool, error) {
 	rows, label, metadata, ok := tableRows(data, requestedColumns)
 	if !ok {
 		return false, nil
@@ -541,6 +578,14 @@ func renderTable(data interface{}, requestedColumns []string, userColumns bool) 
 
 	// Labels before fitting, so widths are budgeted on what is printed.
 	labels := tableHeaders(headers, literal)
+	// A label the spec declared replaces the derived header, as written.
+	if len(declaredLabels) == len(labels) {
+		for i, declared := range declaredLabels {
+			if declared != "" {
+				labels[i] = declared
+			}
+		}
+	}
 	// Columns someone asked for — by spec or on the command line — are never dropped.
 	if len(requestedColumns) == 0 {
 		labels, values = fitColumns(labels, values, terminalWidth())

@@ -216,7 +216,7 @@ func registerwidgetsCommands(root *cobra.Command) {
 					return bartolocli.OperationError(err)
 				}
 
-				if err := bartolocli.FormatList(decoded, "name", "tools[].key"); err != nil {
+				if err := bartolocli.FormatListColumns(decoded, bartolocli.ListColumn{Path: "name", Label: ""}, bartolocli.ListColumn{Path: "tools[].key", Label: "Tool keys"}); err != nil {
 					return errors.Wrap(err, "formatting failed")
 				}
 
