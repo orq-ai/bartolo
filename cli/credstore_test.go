@@ -51,6 +51,16 @@ func useStore(t *testing.T, s SecretStore) {
 	t.Cleanup(func() { resolveSecretStore = orig })
 }
 
+// credStoreFixtureWithAuth is credStoreFixture with an auth handler registered,
+// for tests that read auth status. UseAuth initializes Creds itself.
+func credStoreFixtureWithAuth(t *testing.T) {
+	t.Helper()
+	resetAuthState(t)
+	Init(&Config{AppName: "test-auth", EnvPrefix: "TEST_AUTH"})
+	UseAuth("", stubAuthHandler{})
+	viper.Set("profile", "acme")
+}
+
 // credStoreFixture gives a CLI with Creds initialized and the "acme" profile
 // active, ready for SetProfile/GetProfile.
 func credStoreFixture(t *testing.T) {
@@ -589,4 +599,118 @@ func TestAFailedMigrationIsTriedOncePerProcess(t *testing.T) {
 	GetProfile()
 
 	assert.Equal(t, 1, store.saves)
+}
+
+// A store that cannot be read must not look like a missing key: the key still
+// exists, and the remedy `auth setup` would replace it. The status says so and
+// `doctor --fix` leaves it alone.
+func TestAStoreThatCannotBeReadIsNotReportedAsMissing(t *testing.T) {
+	cases := map[string]struct {
+		store SecretStore
+		want  []string
+	}{
+		"locked": {func() SecretStore {
+			s := newFakeStore()
+			s.loadErr = errors.New("keychain is locked")
+			return s
+		}(), []string{"Fake Store", "keychain is locked"}},
+		"no store here": {nil, []string{"Fake Store", "no secure store"}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			credStoreFixtureWithAuth(t)
+			useStore(t, tc.store)
+			Creds.Set("profiles", map[string]interface{}{
+				"acme": map[string]interface{}{"type": "", apiKeyStoreField: "Fake Store"},
+			})
+
+			status := GetAuthStatus()
+
+			assert.Equal(t, false, status["configured"])
+			assert.Equal(t, profileStoreUnreadable, status["source"])
+			for _, want := range tc.want {
+				assert.Contains(t, status["store_error"], want)
+			}
+			assert.False(t, authFixableBySetup(status), "doctor --fix must not run auth setup over a stored key")
+			assert.NotContains(t, doctorStatus()["checks"].(map[string]interface{})["fixable"], "auth")
+		})
+	}
+}
+
+// An entry that is gone from the store is a lost key, so it stays "missing" and
+// `auth setup` is the right fix.
+func TestAMissingStoreEntryIsStillMissing(t *testing.T) {
+	credStoreFixtureWithAuth(t)
+	useStore(t, newFakeStore())
+	Creds.Set("profiles", map[string]interface{}{
+		"acme": map[string]interface{}{"type": "", apiKeyStoreField: "Fake Store"},
+	})
+
+	status := GetAuthStatus()
+
+	assert.Equal(t, "missing", status["source"])
+	assert.NotContains(t, status, "store_error")
+	assert.Nil(t, ProfileKeyUnreadable("acme"))
+	assert.True(t, authFixableBySetup(status))
+}
+
+func TestUnlockingTheStoreClearsTheUnreadableState(t *testing.T) {
+	credStoreFixtureWithAuth(t)
+	store := newFakeStore()
+	useStore(t, store)
+	Creds.SetProfile("acme", map[string]string{"type": "", apiKeyField: "sk-orq-secret"})
+	store.loadErr = errors.New("keychain is locked")
+	require.Equal(t, profileStoreUnreadable, GetAuthStatus()["source"])
+
+	store.loadErr = nil
+
+	status := GetAuthStatus()
+	assert.Equal(t, "profile", status["source"])
+	assert.NotContains(t, status, "store_error")
+	assert.Nil(t, ProfileKeyUnreadable("acme"))
+}
+
+// The cache is keyed by profile: each marked profile must get its own key, on the
+// first read and from the cache after it.
+func TestEachProfileGetsItsOwnStoredKey(t *testing.T) {
+	credStoreFixture(t)
+	store := &countingStore{fakeStore: newFakeStore()}
+	useStore(t, store)
+	Creds.SetProfile("acme", map[string]string{"type": "apikey", apiKeyField: "sk-orq-acme"})
+	Creds.SetProfile("beta", map[string]string{"type": "apikey", apiKeyField: "sk-orq-beta"})
+	require.Equal(t, "sk-orq-acme", store.data["acme"])
+	require.Equal(t, "sk-orq-beta", store.data["beta"])
+
+	for range 2 {
+		viper.Set("profile", "acme")
+		assert.Equal(t, "sk-orq-acme", GetProfile()[apiKeyField])
+		viper.Set("profile", "beta")
+		assert.Equal(t, "sk-orq-beta", GetProfile()[apiKeyField])
+	}
+	assert.Equal(t, 2, store.loads, "each profile is read from the store once, then served from the cache")
+}
+
+// This process still holds K1 in plaintext. Another process rotated to K2 and left
+// it in plaintext on disk, so the store must stay empty: saving K1 there would
+// make the stale key the one a later migration reads back.
+func TestMigrationLeavesTheStoreEmptyWhenTheFileHoldsANewerPlaintextKey(t *testing.T) {
+	credStoreFixture(t)
+	store := &countingStore{fakeStore: newFakeStore()}
+	useStore(t, store)
+	Creds.Set("profiles", map[string]interface{}{
+		"acme": map[string]interface{}{"type": "apikey", apiKeyField: "sk-orq-k1"},
+	})
+
+	other, err := NewCredentialsFile(filepath.Dir(credentialsFile()))
+	require.NoError(t, err)
+	other.Set("profiles", map[string]interface{}{
+		"acme": map[string]interface{}{"type": "apikey", apiKeyField: "sk-orq-k2"},
+	})
+	require.NoError(t, other.Save(credentialsFile()))
+
+	GetProfile()
+
+	assert.Equal(t, 0, store.saves)
+	assert.Empty(t, store.data)
+	assert.Contains(t, credentialsOnDisk(t), "sk-orq-k2")
 }

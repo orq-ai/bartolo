@@ -91,21 +91,42 @@ func hydrateProfileAPIKey(name string, profile map[string]string) map[string]str
 	}
 	store := resolveSecretStore()
 	if store == nil {
+		Creds.hydrated.setUnreadable(name, fmt.Errorf("the API key of profile %q is in %s, but no secure store is available here", name, marker))
 		warnOnce(log.Warn(), "the API key of profile %q is in %s, but no secure store is available here", name, marker)
 		return profile
 	}
 	secret, ok, err := store.Load(sanitizeProfileName(name))
 	switch {
 	case err != nil:
+		Creds.hydrated.setUnreadable(name, fmt.Errorf("could not read the API key of profile %q from %s: %w", name, store.Name(), err))
 		warnOnce(log.Warn().Err(err), "could not read the API key of profile %q from %s", name, store.Name())
 	case !ok:
+		// The entry is gone, so the key is lost: `auth setup` is the right remedy here.
+		Creds.hydrated.setUnreadable(name, nil)
 		warnOnce(log.Warn(), "the API key of profile %q should be in %s, but it has no entry for it", name, store.Name())
 	default:
+		Creds.hydrated.setUnreadable(name, nil)
 		Creds.hydrated.setKey(name, secret)
 		profile[apiKeyField] = secret
 	}
 	return profile
 }
+
+// ProfileKeyUnreadable reports why the named profile's API key is in a secure
+// store this process could not read (locked, or no store available here), or nil.
+// A non-nil error means the key still exists, so the remedy is to make the store
+// readable, not `auth setup`, which would replace it. It reflects the last
+// GetProfile for that profile in this process.
+func ProfileKeyUnreadable(name string) error {
+	if Creds == nil {
+		return nil
+	}
+	return Creds.hydrated.unreadableErr(name)
+}
+
+// profileStoreUnreadable is the auth status source for a profile whose key is in
+// a store that could not be read; see ProfileKeyUnreadable.
+const profileStoreUnreadable = "profile-store-unreadable"
 
 // profileHydration keeps GetProfile off the OS store after the first read. The auth
 // middleware calls GetProfile per request, and on macOS each store read starts a
@@ -113,9 +134,31 @@ func hydrateProfileAPIKey(name string, profile map[string]string) map[string]str
 // failed read is not cached, so unlocking the store works without a restart, and it
 // only warns once.
 type profileHydration struct {
-	mu   sync.Mutex
-	keys map[string]string
-	seen map[string]bool
+	mu         sync.Mutex
+	keys       map[string]string
+	seen       map[string]bool
+	unreadable map[string]error
+}
+
+// setUnreadable records why a marked profile's key could not be read; nil clears it.
+func (h *profileHydration) setUnreadable(name string, err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	name = sanitizeProfileName(name)
+	if err == nil {
+		delete(h.unreadable, name)
+		return
+	}
+	if h.unreadable == nil {
+		h.unreadable = map[string]error{}
+	}
+	h.unreadable[name] = err
+}
+
+func (h *profileHydration) unreadableErr(name string) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.unreadable[sanitizeProfileName(name)]
 }
 
 func (h *profileHydration) key(name string) (string, bool) {
@@ -157,6 +200,7 @@ func (h *profileHydration) forget(name string) {
 	delete(h.keys, name)
 	delete(h.seen, "migrate/"+name)
 	delete(h.seen, "warn/"+name)
+	delete(h.unreadable, name)
 }
 
 // migrateAPIKeyToStore moves a plaintext key found on read into the store and
@@ -753,9 +797,21 @@ func GetAuthStatus() map[string]interface{} {
 	status["source"] = "missing"
 	if configured {
 		status["source"] = "profile"
+	} else if err := ProfileKeyUnreadable(ActiveProfileName()); err != nil {
+		status["source"] = profileStoreUnreadable
+		status["store_error"] = err.Error()
 	}
 
 	return status
+}
+
+// authFixableBySetup reports whether `doctor --fix` may run `auth setup` for this
+// auth status. A key in a store that could not be read is not missing, and setup
+// would replace it, so that state is left for the user to unlock.
+func authFixableBySetup(auth map[string]interface{}) bool {
+	configured, _ := auth["configured"].(bool)
+	source, _ := auth["source"].(string)
+	return !configured && source != profileStoreUnreadable
 }
 
 // profileHoldsRequiredKeys reports whether the profile has a value for every
@@ -1378,7 +1434,12 @@ func ConfirmDestructive(cmd *cobra.Command, args []string) error {
 // unexported so callers cannot reach viper's own WriteConfigAs, which creates
 // the file 0644; Save is the only write.
 type CredentialsFile struct {
-	viper    *viper.Viper
+	viper *viper.Viper
+	// hydrated is only ever read through the package Creds: hydrateProfileAPIKey
+	// reads Creds.hydrated, and SetProfile and RemoveProfile forget on their own
+	// receiver. No production path writes a profile through another instance
+	// today. One that does must call Creds.hydrated.forget too, or Creds keeps
+	// serving the old key.
 	hydrated profileHydration
 }
 
