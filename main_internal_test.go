@@ -2970,6 +2970,16 @@ paths:
       tags: [things]
       responses:
         "200": {description: ok}
+  /things/{id}:
+    get:
+      operationId: GetThingOptedOut
+      summary: Get thing opted out
+      tags: [things]
+      x-cli-beta: false
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string}}
+      responses:
+        "200": {description: ok}
   /stable:
     get:
       operationId: GetStable
@@ -3055,6 +3065,11 @@ paths:
 		t.Fatal("ListThings operation not found")
 	} else if !strings.Contains(inherited.Short, "(beta)") || strings.Count(inherited.Short, "(beta)") != 1 {
 		t.Errorf("operation under a beta group should carry the marker once: %q", inherited.Short)
+	}
+	if optedOut := opByPath("/things/{id}"); optedOut == nil {
+		t.Fatal("GetThingOptedOut operation not found")
+	} else if strings.Contains(optedOut.Short, "(beta)") {
+		t.Errorf("x-cli-beta: false under a beta group must opt out of the marker: %q", optedOut.Short)
 	}
 
 	// x-cli-beta: false is explicitly not beta, at every level, so the marker must

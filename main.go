@@ -582,7 +582,8 @@ func (b *irBuilder) addOperation(scope pathScope, httpMethod string, operation *
 	group, leafName := b.resolveGroup(path, operation, leafName, method, explicitLeafName != "")
 	short := operationShort(operation.Summary, leafName)
 	betaSfx := betaSuffix(operation.Extensions)
-	if betaSfx == "" && group != nil && group.Beta {
+	// An operation that sets the key itself, even to false, keeps its own answer.
+	if _, set := extValue(operation.Extensions, extKeyBeta); betaSfx == "" && group != nil && group.Beta && !set {
 		// A beta group marks every operation under it, so each command's own
 		// help and the README say so, not only the group's entry.
 		betaSfx = betaMarker
