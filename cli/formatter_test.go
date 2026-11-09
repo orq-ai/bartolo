@@ -1173,3 +1173,22 @@ func TestListColumnHeadersDeriveAmongUnlabeledColumnsOnly(t *testing.T) {
 		{Path: "id", Label: "Key"}, {Path: "pricing.input.cost"}, {Path: "pricing.output.cost"},
 	}), "unlabeled columns still stay distinct from each other")
 }
+
+// Generated code calls the package-level FormatListColumns, which finds the
+// method on the formatter through an interface. Pin that it reaches
+// DefaultFormatter, or a signature drift would drop every label silently.
+func TestPackageFormatListColumnsReachesTheDefaultFormatter(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	originalOut, originalFormatter := Stdout, Formatter
+	Stdout, Formatter = out, NewDefaultFormatter(true, true)
+	t.Cleanup(func() { Stdout, Formatter = originalOut, originalFormatter })
+
+	err := FormatListColumns([]interface{}{map[string]interface{}{"id": "one"}}, ListColumn{Path: "id", Label: "Key"})
+
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "Key")
+	assert.NotContains(t, out.String(), "ID")
+}

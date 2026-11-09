@@ -709,6 +709,8 @@ type ListColumnData struct {
 	Label string
 }
 
+var errListFieldNeedsPath = fmt.Errorf("an x-bartolo-list-fields entry needs a path")
+
 // listField is one x-bartolo-list-fields entry: a field path, or an object with
 // that path and a header label for its column.
 type listField ListColumnData
@@ -716,6 +718,11 @@ type listField ListColumnData
 func (f *listField) UnmarshalJSON(data []byte) error {
 	var path string
 	if err := json.Unmarshal(data, &path); err == nil {
+		// null decodes to "" here, so it and a blank string are both a missing path,
+		// as they are in the object form.
+		if strings.TrimSpace(path) == "" {
+			return errListFieldNeedsPath
+		}
 		f.Path = path
 		return nil
 	}
@@ -729,7 +736,7 @@ func (f *listField) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("an x-bartolo-list-fields entry is a field path or an object with path and label: %w", err)
 	}
 	if entry.Path == nil || strings.TrimSpace(*entry.Path) == "" {
-		return fmt.Errorf("an x-bartolo-list-fields object entry needs a path")
+		return errListFieldNeedsPath
 	}
 	f.Path = *entry.Path
 	if entry.Label == nil {

@@ -2881,23 +2881,26 @@ func TestProcessAPIReadsListFieldLabels(t *testing.T) {
 }
 
 func TestProcessAPIRejectsMalformedListFieldLabels(t *testing.T) {
-	for name, fields := range map[string]string{
-		"unknown key":     `[{path: id, title: ID}]`,
-		"missing path":    `[{label: ID}]`,
-		"empty label":     `[{path: id, label: " "}]`,
-		"multiline label": `[{path: id, label: "a\nb"}]`,
-		"duplicate label": `[{path: a, label: Key}, {path: b, label: KEY}]`,
-		"label as derived": `[{path: pricing.input.cost, label: Cost}, pricing.output.cost]`,
+	for name, tc := range map[string]struct{ fields, want string }{
+		"unknown key":      {`[{path: id, title: ID}]`, `unknown field "title"`},
+		"missing path":     {`[{label: ID}]`, "needs a path"},
+		"null entry":       {`[id, null]`, "needs a path"},
+		"empty string":     {`[id, ""]`, "needs a path"},
+		"empty label":      {`[{path: id, label: " "}]`, "non-empty text on one line"},
+		"multiline label":  {`[{path: id, label: "a\nb"}]`, "non-empty text on one line"},
+		"duplicate label":  {`[{path: a, label: Key}, {path: b, label: KEY}]`, "both show the header"},
+		"label as derived": {`[{path: pricing.input.cost, label: Cost}, pricing.output.cost]`, "both show the header"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			doc := loadTestSpec(t, listFieldsSpec(fields))
+			doc := loadTestSpec(t, listFieldsSpec(tc.fields))
 			defer func() {
 				recovered := recover()
 				if recovered == nil {
-					t.Fatalf("%s should fail generation", fields)
+					t.Fatalf("%s should fail generation", tc.fields)
 				}
-				if !strings.Contains(fmt.Sprint(recovered), "GET /files") {
-					t.Fatalf("the error should name the operation, got %v", recovered)
+				msg := fmt.Sprint(recovered)
+				if !strings.Contains(msg, "GET /files") || !strings.Contains(msg, tc.want) {
+					t.Fatalf("want an error naming the operation and %q, got %v", tc.want, msg)
 				}
 			}()
 			ProcessAPI("example", doc)
