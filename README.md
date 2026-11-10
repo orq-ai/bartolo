@@ -272,7 +272,7 @@ Bartolo's canonical extension namespace is `x-bartolo-*`. Shared extensions affe
 | Extension | Purpose |
 | --- | --- |
 | `x-bartolo-aliases` | Add command aliases for operations (rendered in the CLI). |
-| `x-bartolo-beta` | Set to `true` on a group, operation, or flag to append a `(beta)` marker to its help text, so an unstable surface is discoverable but clearly flagged (CLI only). Every operation under a beta group is marked too. |
+| `x-bartolo-beta` | Set to `true` on a group, operation, or flag to append a `(beta)` marker to its help text, so an unstable surface is discoverable but clearly flagged (CLI only). Every operation under a beta group is marked too, unless it sets `x-bartolo-beta: false` itself. |
 | `x-bartolo-description` | Override generated help/description text. |
 | `x-bartolo-group` | Force an operation into a higher-level noun. |
 | `x-bartolo-help-section` | Put a top-level command under a titled section in `--help` (CLI only). |
