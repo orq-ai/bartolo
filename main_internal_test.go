@@ -2886,6 +2886,8 @@ func TestProcessAPIRejectsMalformedListFieldLabels(t *testing.T) {
 		"missing path":     {`[{label: ID}]`, "needs a path"},
 		"null entry":       {`[id, null]`, "needs a path"},
 		"empty string":     {`[id, ""]`, "needs a path"},
+		"blank string":     {`[id, " "]`, "needs a path"},
+		"blank path":       {`[{path: " ", label: A}]`, "needs a path"},
 		"empty label":      {`[{path: id, label: " "}]`, "non-empty text on one line"},
 		"multiline label":  {`[{path: id, label: "a\nb"}]`, "non-empty text on one line"},
 		"duplicate label":  {`[{path: a, label: Key}, {path: b, label: KEY}]`, "both show the header"},
