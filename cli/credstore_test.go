@@ -42,13 +42,19 @@ func (f *fakeStore) Name() string {
 	return "Fake Store"
 }
 
-// useStore points resolveSecretStore at s for the test (nil models the file
-// fallback), and restores it after.
+// useStore points currentSecretStore at s for the test, and restores it after.
+// A nil s models the file fallback and keeps the real reason, which under
+// `go test` is that secure stores are off.
 func useStore(t *testing.T, s SecretStore) {
 	t.Helper()
-	orig := resolveSecretStore
-	resolveSecretStore = func() SecretStore { return s }
-	t.Cleanup(func() { resolveSecretStore = orig })
+	orig := currentSecretStore
+	currentSecretStore = func() (SecretStore, string) {
+		if s == nil {
+			return chooseSecretStore(currentSecretStoreEnv())
+		}
+		return s, ""
+	}
+	t.Cleanup(func() { currentSecretStore = orig })
 }
 
 // credStoreFixtureWithAuth is credStoreFixture with an auth handler registered,
@@ -427,7 +433,7 @@ func TestUnreadableStoreWarnsAndNamesTheStore(t *testing.T) {
 			return s
 		}(), []string{"Fake Store", "keychain is locked"}},
 		"entry gone": {newFakeStore(), []string{"Fake Store", "no entry"}},
-		"no store":   {nil, []string{"Fake Store", secretStoreUnavailable()}},
+		"no store":   {nil, []string{"Fake Store", "secure stores are off under go test"}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -458,6 +464,9 @@ func TestStoreMarkerIsNotTreatedAsASecret(t *testing.T) {
 
 func TestResolveSecretStoreStaysOffTheKeychainUnderGoTest(t *testing.T) {
 	assert.Nil(t, resolveSecretStore())
+	store, reason := currentSecretStore()
+	assert.Nil(t, store)
+	assert.Equal(t, "secure stores are off under go test", reason)
 }
 
 func TestMacKeychainStoreHandlesAProfileNameWithASpace(t *testing.T) {
@@ -614,7 +623,7 @@ func TestAStoreThatCannotBeReadIsNotReportedAsMissing(t *testing.T) {
 			s.loadErr = errors.New("keychain is locked")
 			return s
 		}(), []string{"Fake Store", "keychain is locked"}},
-		"no store here": {nil, []string{"Fake Store", secretStoreUnavailable()}},
+		"no store here": {nil, []string{"Fake Store", "secure stores are off under go test"}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -748,10 +757,9 @@ func TestForgetClearsTheUnreadableState(t *testing.T) {
 
 func TestNoStoreHereNamesTheCause(t *testing.T) {
 	credStoreFixtureWithAuth(t)
-	useStore(t, nil)
-	orig := secretStoreUnavailable
-	secretStoreUnavailable = func() string { return "no secure store is supported on windows" }
-	t.Cleanup(func() { secretStoreUnavailable = orig })
+	orig := currentSecretStore
+	currentSecretStore = func() (SecretStore, string) { return nil, "no secure store is supported on windows" }
+	t.Cleanup(func() { currentSecretStore = orig })
 	Creds.Set("profiles", map[string]interface{}{
 		"acme": map[string]interface{}{"type": "", apiKeyStoreField: "macOS Keychain"},
 	})
@@ -780,8 +788,8 @@ func TestDoctorFixLeavesAnUnreadableStoreAlone(t *testing.T) {
 func TestChooseSecretStoreNamesTheCauseThatHeld(t *testing.T) {
 	has := func(tools ...string) func(string) bool {
 		return func(tool string) bool {
-			for _, t := range tools {
-				if t == tool {
+			for _, want := range tools {
+				if want == tool {
 					return true
 				}
 			}

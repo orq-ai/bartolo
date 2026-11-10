@@ -89,9 +89,9 @@ func hydrateProfileAPIKey(name string, profile map[string]string) map[string]str
 			event.Msgf(format, args...)
 		}
 	}
-	store := resolveSecretStore()
+	// One decision: a second probe could find a store and leave reason empty.
+	store, reason := currentSecretStore()
 	if store == nil {
-		reason := secretStoreUnavailable()
 		Creds.hydrated.setUnreadable(name, fmt.Errorf("the API key of profile %q is in %s, but %s", name, marker, reason))
 		warnOnce(log.Warn(), "the API key of profile %q is in %s, but %s", name, marker, reason)
 		return profile

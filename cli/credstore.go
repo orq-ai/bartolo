@@ -153,19 +153,18 @@ func currentSecretStoreEnv() secretStoreEnv {
 	}
 }
 
-// resolveSecretStore chooses the store for this invocation. It returns nil when
-// api keys should stay in credentials.json. It is a var so a test can inject a
-// fake store without a real keychain or a platform dependency.
-var resolveSecretStore = func() SecretStore {
-	store, _ := chooseSecretStore(currentSecretStoreEnv())
-	return store
+// currentSecretStore is the store for this invocation, with the reason when
+// there is none, from one call to chooseSecretStore. It is a var so a test can
+// inject a fake store without a real keychain or a platform dependency.
+var currentSecretStore = func() (SecretStore, string) {
+	return chooseSecretStore(currentSecretStoreEnv())
 }
 
-// secretStoreUnavailable says why resolveSecretStore found no store here, from
-// the same decision. A var so a test can pin the text.
-var secretStoreUnavailable = func() string {
-	_, reason := chooseSecretStore(currentSecretStoreEnv())
-	return reason
+// resolveSecretStore returns the store for this invocation, or nil when api
+// keys should stay in credentials.json.
+func resolveSecretStore() SecretStore {
+	store, _ := currentSecretStore()
+	return store
 }
 
 // ---- macOS: security(1) / Keychain ----
