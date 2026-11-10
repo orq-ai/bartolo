@@ -8,6 +8,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
+	"unicode"
 
 	"github.com/alecthomas/chroma"
 	"github.com/alecthomas/chroma/quick"
@@ -72,6 +74,30 @@ func FormatList(data interface{}, columns ...string) error {
 		return listFormatter.FormatList(data, columns...)
 	}
 	return Formatter.Format(data)
+}
+
+// HumanOutput reports whether a result goes to a person, so built-in commands
+// print a sentence instead of their record. A custom Formatter opts in by
+// implementing HumanOutput() bool, which a wrapper can delegate.
+func HumanOutput() bool {
+	formatter, ok := Formatter.(interface{ HumanOutput() bool })
+	return ok && formatter.HumanOutput()
+}
+
+// HumanOutput is true when stdout is a terminal and no machine format, --raw or
+// --jmespath was asked for.
+func (f *DefaultFormatter) HumanOutput() bool {
+	return f.shouldRenderTable() && viper.GetString("jmespath") == ""
+}
+
+// formatResult prints text for a person and record for a script. text is a
+// func so the machine path never builds a sentence it would not print.
+func formatResult(record interface{}, text func() string) error {
+	if HumanOutput() {
+		fmt.Fprintln(Stdout, text())
+		return nil
+	}
+	return Formatter.Format(record)
 }
 
 // DefaultFormatter can apply JMESPath queries and can render a table or output
@@ -145,8 +171,11 @@ func (f *DefaultFormatter) format(data interface{}, list bool, columns []string)
 			return nil
 		}
 
-		// Falling back silently looks exactly like the bug this path exists to fix.
-		fmt.Fprintf(Stderr, "Not shown as a table: this response is not a recognizable collection. Showing %s instead.\n", configuredSerialization)
+		// Falling back silently looks exactly like the bug this path exists to
+		// fix, but a single record is the expected shape of a get.
+		if !isPlainRecord(data) {
+			fmt.Fprintf(Stderr, "Not shown as a table: this response is not a recognizable collection. Showing %s instead.\n", configuredSerialization)
+		}
 	} else if override != "" {
 		fmt.Fprintf(Stderr, "--columns was ignored: this output is not a table. Showing %s instead.\n", serializationFormat())
 	}
@@ -295,6 +324,21 @@ func splitColumns(value string) ([]string, error) {
 	}
 
 	return columns, nil
+}
+
+// isPlainRecord reports an object holding no array, so nothing it could be a
+// collection of.
+func isPlainRecord(data interface{}) bool {
+	object, ok := data.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for _, value := range object {
+		if value != nil && reflect.TypeOf(value).Kind() == reflect.Slice {
+			return false
+		}
+	}
+	return true
 }
 
 func (f *DefaultFormatter) shouldRenderTable() bool {
@@ -561,7 +605,7 @@ func renderTable(data interface{}, requestedColumns []string, userColumns bool) 
 		return false, err
 	}
 
-	footer, err := tableFooter(len(rows), label, metadata)
+	footer, err := tableFooter(rows, label, metadata)
 	if err != nil {
 		return false, err
 	}
@@ -640,16 +684,24 @@ func formatTableHeader(value string) string {
 // rows are shown out of how many exist, then whatever else the envelope holds.
 // Pagination plumbing is for scripts reading `-o json`, not for a reader looking
 // at a table.
-func tableFooter(shown int, label string, metadata map[string]interface{}) (string, error) {
+func tableFooter(rows []map[string]interface{}, label string, metadata map[string]interface{}) (string, error) {
 	if label == "" {
 		return "", nil
 	}
+	shown := len(rows)
 
 	parts := make([]string, 0, len(metadata))
+	count := ""
 	if total, ok := metadataInt(metadata, "total", "total_count"); ok {
-		parts = append(parts, fmt.Sprintf("%d of %d", shown, total))
+		count = fmt.Sprintf("%d of %d", shown, total)
 	} else if moreAvailable(metadata) {
-		parts = append(parts, fmt.Sprintf("%d shown, more available", shown))
+		count = fmt.Sprintf("%d shown, more available", shown)
+	}
+	if hint := nextPageHint(rows, metadata); count != "" && hint != "" {
+		count += "; next page: " + hint
+	}
+	if count != "" {
+		parts = append(parts, count)
 	}
 
 	keys := make([]string, 0, len(metadata))
@@ -677,13 +729,58 @@ func moreAvailable(metadata map[string]interface{}) bool {
 			return true
 		}
 	}
-	for _, key := range []string{"next_page_token", "next_page", "next_cursor", "cursor", "starting_after"} {
-		if token, ok := metadata[key].(string); ok && token != "" {
+	for _, pair := range nextPageTokens {
+		if token, ok := metadata[pair.key].(string); ok && token != "" {
 			return true
 		}
 	}
 	pages, ok := metadataInt(metadata, "total_pages")
 	return ok && pages > 1
+}
+
+// nextPageTokens are the envelope keys holding the next page's token, with the
+// flag a generated list command takes it as. next_page is often a URL, so no
+// flag is guessed for it.
+var nextPageTokens = []struct{ key, flag string }{
+	{"next_page_token", "page-token"},
+	{"next_page", ""},
+	{"next_cursor", "cursor"},
+	{"cursor", "cursor"},
+	{"starting_after", "starting-after"},
+}
+
+// nextPageHint names the flag and value that fetch the next page, or nothing
+// when the running command has no flag to take it.
+func nextPageHint(rows []map[string]interface{}, metadata map[string]interface{}) string {
+	for _, pair := range nextPageTokens {
+		if token, ok := metadata[pair.key].(string); ok && token != "" && pair.flag != "" && runningCommandHasFlag(pair.flag) {
+			return flagHint(pair.flag, token)
+		}
+	}
+
+	// A bare has_more carries no token: the next page starts after the last row.
+	if more, _ := metadata["has_more"].(bool); more && len(rows) > 0 && runningCommandHasFlag("starting-after") {
+		if id, ok := rows[len(rows)-1]["id"].(string); ok && id != "" {
+			return flagHint("starting-after", id)
+		}
+	}
+	return ""
+}
+
+// flagHint renders `--flag value` safe to paste into a shell. The value came
+// from the server, so one that cannot be shown verbatim yields no hint.
+func flagHint(flag, value string) string {
+	if strings.IndexFunc(value, func(r rune) bool { return !unicode.IsPrint(r) }) >= 0 {
+		return ""
+	}
+	if strings.Trim(value, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.:=+/") != "" {
+		value = "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+	}
+	return "--" + flag + " " + value
+}
+
+func runningCommandHasFlag(name string) bool {
+	return runningCommand != nil && runningCommand.Flags().Lookup(name) != nil
 }
 
 func metadataInt(metadata map[string]interface{}, keys ...string) (int, bool) {
@@ -969,7 +1066,7 @@ func tableValue(value interface{}) (string, error) {
 	case nil:
 		return "", nil
 	case string:
-		return typed, nil
+		return shortTimestamp(typed), nil
 	case []interface{}:
 		return listValue(typed)
 	case []map[string]interface{}:
@@ -985,6 +1082,16 @@ func tableValue(value interface{}) (string, error) {
 		return "", err
 	}
 	return string(encoded), nil
+}
+
+// shortTimestamp shows an RFC 3339 cell to the minute in UTC; the full value
+// is one -o json away.
+func shortTimestamp(value string) string {
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return value
+	}
+	return parsed.UTC().Format("2006-01-02 15:04")
 }
 
 func listValue(items []interface{}) (string, error) {
