@@ -29,6 +29,21 @@ var (
 	ErrCannotUnmarshal = errors.New("Unable to unmarshal response")
 )
 
+// HTTPError represents a non-2xx HTTP response from an upstream API call. It
+// carries the structured status/headers/body so callers (such as the MCP
+// server) can surface them as structured error results rather than a bare
+// string. Body is already redacted by ResponseError.
+type HTTPError struct {
+	StatusCode int
+	Headers    http.Header
+	Body       []byte
+}
+
+// Error renders the "HTTP <status>:\n<body>" message the CLI prints.
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("HTTP %d:\n%s", e.StatusCode, string(e.Body))
+}
+
 func indent(value string) string {
 	trimmed := strings.TrimSuffix(value, "\x1b[0m")
 	trimmed = strings.TrimRight(trimmed, "\n")
@@ -325,21 +340,8 @@ func ResponseError(resp *gentleman.Response) error {
 		return fmt.Errorf("the request failed with no response")
 	}
 
-	return &HTTPError{
-		StatusCode: resp.StatusCode,
-		Body:       redactBody(resp.Header.Get("content-type"), string(resp.Bytes())),
-	}
-}
-
-// HTTPError is a failed response, so a caller can read the status and body
-// with errors.As instead of parsing the message. Body is redacted.
-type HTTPError struct {
-	StatusCode int
-	Body       string
-}
-
-func (e *HTTPError) Error() string {
-	return fmt.Sprintf("HTTP %d:\n%s", e.StatusCode, e.Body)
+	body := redactBody(resp.Header.Get("content-type"), string(resp.Bytes()))
+	return &HTTPError{StatusCode: resp.StatusCode, Headers: resp.Header, Body: []byte(body)}
 }
 
 func unmarshalBody(headers http.Header, data []byte, s interface{}) error {

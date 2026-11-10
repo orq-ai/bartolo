@@ -10,10 +10,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
+
+// echoRequestCount counts requests that actually reached the upstream /echo
+// handler. The MCP e2e test asserts it does not advance when a tool call fails
+// server-side input validation (no HTTP call must be made).
+var echoRequestCount int64
 
 func TestMain(m *testing.M) {
 	// Set up a test server that implements the API described in
@@ -25,6 +31,8 @@ func TestMain(m *testing.M) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
+
+		atomic.AddInt64(&echoRequestCount, 1)
 
 		body, err := ioutil.ReadAll(r.Body)
 		if err != nil {
@@ -39,6 +47,9 @@ func TestMain(m *testing.M) {
 		// For the test, add the param values to the echoed response.
 		var decoded map[string]interface{}
 		json.Unmarshal(body, &decoded)
+		if decoded == nil {
+			decoded = map[string]interface{}{}
+		}
 
 		q := r.URL.Query().Get("q")
 		if q != "" {
@@ -50,8 +61,29 @@ func TestMain(m *testing.M) {
 			decoded["request-id"] = rid
 		}
 
+		// Reflect the inbound Authorization header so the MCP e2e test can
+		// assert that outbound auth propagated from the CLI's env var. Only set
+		// when present, so the existing no-auth TestEchoSuccess stays green.
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			decoded["authorization"] = auth
+		}
+
 		marshalled, _ := json.Marshal(decoded)
 		w.Write(marshalled)
+	})
+
+	// A read-only GET operation for the MCP e2e test's annotation assertion.
+	http.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"pong":true}`))
+	})
+
+	// An operation that always fails upstream, for the MCP e2e test's
+	// upstream-error mapping assertion (422 with a JSON body).
+	http.HandleFunc("/error", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		w.Write([]byte(`{"message":"unprocessable"}`))
 	})
 
 	go func() {
