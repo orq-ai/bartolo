@@ -764,6 +764,11 @@ func TestResponseErrorRedactsTheBody(t *testing.T) {
 		if !strings.Contains(msg, "invalid audience") {
 			t.Errorf("%s dropped the error message: %s", name, msg)
 		}
+		// A caller reads the status from the type, not by parsing the message.
+		var httpErr *HTTPError
+		if !errors.As(OperationError(got), &httpErr) || httpErr.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s: want an *HTTPError with status 401 through OperationError, got %#v", name, got)
+		}
 	}
 }
 

@@ -432,7 +432,7 @@ func TestAProfileWithNoKeyIsStillIncomplete(t *testing.T) {
 	r := cli.Client.Get()
 	r.Do()
 
-	assert.ErrorContains(t, r.Context.Error, `profile "acme" has no API key; run `+"`auth setup --profile acme`")
+	assert.ErrorContains(t, r.Context.Error, `profile "acme" has no API key; run `+"`"+cli.SetupCommand("acme")+"`")
 	status := cli.AuthHandlers[""].(*Handler).AuthStatus(cli.GetProfile())
 	assert.Equal(t, "profile-incomplete", status["source"])
 	assert.NotContains(t, status, "store_error")

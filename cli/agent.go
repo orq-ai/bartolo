@@ -195,27 +195,46 @@ func warnServerOnce(key, msg string) {
 // write path. A value that cannot be normalized is returned as-is: this is the
 // request path, and a transport error naming the bad URL beats swallowing it.
 func ResolveServer() string {
-	return normalizeResolved(resolveServerRaw())
+	server, _ := resolveServerWithOrigin()
+	return server
 }
 
-func resolveServerRaw() string {
+// serverOrigin is the rung of resolveServerRaw's precedence chain that won.
+type serverOrigin int
+
+const (
+	serverFromFlag serverOrigin = iota
+	serverFromProfile
+	serverFromSetting
+	serverFromCustom
+	serverFromRegistered
+)
+
+// resolveServerWithOrigin is ResolveServer plus where its value came from, from
+// one resolution so the two cannot disagree.
+func resolveServerWithOrigin() (string, serverOrigin) {
+	server, origin := resolveServerRaw()
+	return normalizeResolved(server), origin
+}
+
+func resolveServerRaw() (string, serverOrigin) {
 	if override, _ := flagValueIfChanged(Root, "server"); override != "" {
-		return override
+		return override, serverFromFlag
 	}
 
 	if server := ProfileServer(); server != "" {
-		return server
+		return server, serverFromProfile
 	}
 
 	if override := strings.TrimSpace(viper.GetString("server")); override != "" {
-		return override
+		return override, serverFromSetting
 	}
 
 	if persisted := strings.TrimSpace(viper.GetString("server-default")); persisted != "" {
-		return persisted
+		return persisted, serverFromCustom
 	}
 
-	return SelectedServer()
+	return SelectedServer(), serverFromRegistered
 }
 
 // normalizeResolved is normalizeServerURLWarn for the read path, where an
