@@ -13,8 +13,8 @@ import (
 func registerwidgetsCommands(root *cobra.Command) {
 	widgetsCmd := &cobra.Command{
 		Use:   "widgets",
-		Short: "Widgets",
-		Long:  bartolocli.Markdown("Widgets"),
+		Short: "widgets (beta)",
+		Long:  bartolocli.Markdown("widgets (beta)"),
 	}
 	bartolocli.HelpSection(root, widgetsCmd, "Writes")
 	root.AddCommand(widgetsCmd)
@@ -30,8 +30,8 @@ func registerwidgetsCommands(root *cobra.Command) {
 
 		cmd := &cobra.Command{
 			Use:     "create",
-			Short:   "Create a widget",
-			Long:    bartolocli.Markdown("\n\nRequest body: `application/json`. Provide it via stdin or CLI shorthand.\nRun `help-input` for body syntax details.\n\nTop-level fields:\n- `created_after` (string)\n- `status` (string)\n\nAll top-level body fields are exposed as flags for this command. Scalar, nullable scalar (pass `null` for JSON null), enum, repeatable list (`--field a --field b`), and string map (`--field key=value`) fields use typed flags. Nested objects, arrays of objects, and polymorphic unions accept a JSON string (e.g. `--field '{\"k\":1}'`). Timestamp fields (`format: date-time`) also accept a bare date or a relative value such as `24h`, `7d` or `now-24h`."),
+			Short:   "Create a widget (beta)",
+			Long:    bartolocli.Markdown("Create a widget (beta)\n\nRequest body: `application/json`. Provide it via stdin or CLI shorthand.\nRun `help-input` for body syntax details.\n\nTop-level fields:\n- `created_after` (string)\n- `status` (string)\n\nAll top-level body fields are exposed as flags for this command. Scalar, nullable scalar (pass `null` for JSON null), enum, repeatable list (`--field a --field b`), and string map (`--field key=value`) fields use typed flags. Nested objects, arrays of objects, and polymorphic unions accept a JSON string (e.g. `--field '{\"k\":1}'`). Timestamp fields (`format: date-time`) also accept a bare date or a relative value such as `24h`, `7d` or `now-24h`."),
 			Example: examples,
 			Args:    cobra.MinimumNArgs(0),
 			RunE: func(cmd *cobra.Command, args []string) error {
@@ -119,8 +119,8 @@ func registerwidgetsCommands(root *cobra.Command) {
 
 		cmd := &cobra.Command{
 			Use:     "delete id",
-			Short:   "Delete a widget",
-			Long:    bartolocli.Markdown("Delete a widget\n\n## Arguments\n\n- `id`"),
+			Short:   "Delete a widget (beta)",
+			Long:    bartolocli.Markdown("Delete a widget (beta)\n\n## Arguments\n\n- `id`"),
 			Example: examples,
 			Args:    cobra.MinimumNArgs(1),
 			RunE: func(cmd *cobra.Command, args []string) error {
@@ -163,7 +163,7 @@ func registerwidgetsCommands(root *cobra.Command) {
 
 		cmd := &cobra.Command{
 			Use:     "query",
-			Short:   "Query widgets",
+			Short:   "Query widgets (beta)",
 			Long:    bartolocli.Markdown(""),
 			Example: examples,
 			Args:    cobra.MinimumNArgs(0),
@@ -203,7 +203,7 @@ func registerwidgetsCommands(root *cobra.Command) {
 
 		cmd := &cobra.Command{
 			Use:     "search",
-			Short:   "Search widgets",
+			Short:   "Search widgets (beta)",
 			Long:    bartolocli.Markdown(""),
 			Example: examples,
 			Args:    cobra.MinimumNArgs(0),
