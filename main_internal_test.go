@@ -3171,3 +3171,74 @@ paths:
 		t.Errorf("non-beta body-field flag should have no marker: %+v", plainField)
 	}
 }
+
+func listFieldsSpec(fields string) string {
+	return `
+openapi: 3.0.3
+info:
+  title: List labels API
+  version: "1"
+paths:
+  /files:
+    get:
+      operationId: listFiles
+      x-cli-list-fields: ` + fields + `
+      responses:
+        "200":
+          description: ok
+`
+}
+
+func TestProcessAPIReadsListFieldLabels(t *testing.T) {
+	api := ProcessAPI("example", loadTestSpec(t, listFieldsSpec(`[name, {path: "metadata.created_at", label: "Created"}, {path: id}]`)))
+	op := api.Groups[0].Operations[0]
+	if got := strings.Join(op.ListFields, ","); got != "name,metadata.created_at,id" {
+		t.Fatalf("unexpected list fields %q", got)
+	}
+	want := []ListColumnData{{Path: "name"}, {Path: "metadata.created_at", Label: "Created"}, {Path: "id"}}
+	if fmt.Sprint(op.ListColumns) != fmt.Sprint(want) {
+		t.Fatalf("expected columns %v, got %v", want, op.ListColumns)
+	}
+
+	api = ProcessAPI("example", loadTestSpec(t, listFieldsSpec(`[name, {path: id}]`)))
+	if columns := api.Groups[0].Operations[0].ListColumns; columns != nil {
+		t.Fatalf("no label declared, so generation should keep FormatList; got %v", columns)
+	}
+}
+
+func TestProcessAPIRejectsMalformedListFieldLabels(t *testing.T) {
+	for name, tc := range map[string]struct{ fields, want string }{
+		"unknown key":      {`[{path: id, title: ID}]`, `unknown field "title"`},
+		"missing path":     {`[{label: ID}]`, "needs a path"},
+		"null entry":       {`[id, null]`, "needs a path"},
+		"empty string":     {`[id, ""]`, "needs a path"},
+		"blank string":     {`[id, " "]`, "needs a path"},
+		"blank path":       {`[{path: " ", label: A}]`, "needs a path"},
+		"empty label":      {`[{path: id, label: " "}]`, "non-empty text on one line"},
+		"multiline label":  {`[{path: id, label: "a\nb"}]`, "non-empty text on one line"},
+		"duplicate label":  {`[{path: a, label: Key}, {path: b, label: KEY}]`, "both show the header"},
+		"label as derived": {`[{path: pricing.input.cost, label: Cost}, pricing.output.cost]`, "both show the header"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			doc := loadTestSpec(t, listFieldsSpec(tc.fields))
+			defer func() {
+				recovered := recover()
+				if recovered == nil {
+					t.Fatalf("%s should fail generation", tc.fields)
+				}
+				msg := fmt.Sprint(recovered)
+				if !strings.Contains(msg, "GET /files") || !strings.Contains(msg, tc.want) {
+					t.Fatalf("want an error naming the operation and %q, got %v", tc.want, msg)
+				}
+			}()
+			ProcessAPI("example", doc)
+		})
+	}
+}
+
+func TestProcessAPIKeepsEqualUnlabeledHeadersNextToALabel(t *testing.T) {
+	api := ProcessAPI("example", loadTestSpec(t, listFieldsSpec(`[id, id, {path: name, label: Title}]`)))
+	if got := len(api.Groups[0].Operations[0].ListColumns); got != 3 {
+		t.Fatalf("expected 3 columns, got %d", got)
+	}
+}
