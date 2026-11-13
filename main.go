@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"cmp"
 	"embed"
 	"encoding/json"
@@ -142,6 +143,7 @@ type Operation struct {
 	NeedsResponse  bool
 	IsList         bool
 	ListFields     []string
+	ListColumns    []ListColumnData // ListFields with declared headers; nil unless an entry has a label
 	Waiters        []*WaiterParams
 	Group          *CommandGroup
 	HelpSection    string
@@ -564,7 +566,7 @@ func (b *irBuilder) addOperation(scope pathScope, httpMethod string, operation *
 	if a, ok := extValue(operation.Extensions, extKeyAliases); ok {
 		mustDecodeExt(a, &aliases)
 	}
-	listFields, isList := classifyList(httpMethod, path, operation)
+	listFields, listColumns, isList := classifyList(httpMethod, path, operation)
 
 	params := getParams(scope.item, httpMethod)
 	requiredParams := getRequiredParams(params)
@@ -612,6 +614,7 @@ func (b *irBuilder) addOperation(scope pathScope, httpMethod string, operation *
 		Hidden:         operationHidden(scope.hidden, operation),
 		IsList:         isList,
 		ListFields:     listFields,
+		ListColumns:    listColumns,
 		Group:          group,
 		HelpSection:    extString(operation.Extensions, extKeyHelpSection),
 		CommandPath:    commandPath,
@@ -699,14 +702,104 @@ func operationName(httpMethod, path string, operation *openapi3.Operation) strin
 	return strings.Trim(name, "-")
 }
 
-// classifyList returns the declared list columns and whether the operation
-// renders as a collection: marked by x-bartolo-list or x-bartolo-list-fields,
-// or inferred, unless x-bartolo-list: false turns inference off.
-func classifyList(httpMethod, path string, operation *openapi3.Operation) ([]string, bool) {
-	var listFields []string
-	if fields, ok := extValue(operation.Extensions, extKeyListFields); ok {
-		mustDecodeExt(fields, &listFields)
+// ListColumnData is one declared list column as the templates see it: the
+// field path and the header the spec gave it ("" keeps the derived header).
+type ListColumnData struct {
+	Path  string
+	Label string
+}
+
+var errListFieldNeedsPath = fmt.Errorf("an x-bartolo-list-fields entry needs a path")
+
+// listField is one x-bartolo-list-fields entry: a field path, or an object with
+// that path and a header label for its column.
+type listField ListColumnData
+
+func (f *listField) UnmarshalJSON(data []byte) error {
+	var path string
+	if err := json.Unmarshal(data, &path); err == nil {
+		// null decodes to "" here, so it and a blank string are both a missing path,
+		// as they are in the object form.
+		if strings.TrimSpace(path) == "" {
+			return errListFieldNeedsPath
+		}
+		f.Path = path
+		return nil
 	}
+	var entry struct {
+		Path  *string `json:"path"`
+		Label *string `json:"label"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&entry); err != nil {
+		return fmt.Errorf("an x-bartolo-list-fields entry is a field path or an object with path and label: %w", err)
+	}
+	if entry.Path == nil || strings.TrimSpace(*entry.Path) == "" {
+		return errListFieldNeedsPath
+	}
+	f.Path = *entry.Path
+	if entry.Label == nil {
+		return nil
+	}
+	// The label is printed as given and written into generated Go source, so it
+	// must be one visible line.
+	if strings.TrimSpace(*entry.Label) == "" || strings.IndexFunc(*entry.Label, unicode.IsControl) >= 0 {
+		return fmt.Errorf("x-bartolo-list-fields label for %q must be non-empty text on one line", *entry.Path)
+	}
+	f.Label = *entry.Label
+	return nil
+}
+
+// checkListHeaders rejects a label that prints the same header as another
+// column, ignoring case: the two columns would be indistinguishable. Unlabeled
+// paths that derive equal headers are left alone, as tables already allow.
+func checkListHeaders(httpMethod, path string, columns []ListColumnData) {
+	runtimeColumns := make([]bartolocli.ListColumn, len(columns))
+	for i, column := range columns {
+		runtimeColumns[i] = bartolocli.ListColumn(column)
+	}
+	headers := bartolocli.ListColumnHeaders(runtimeColumns)
+	for i := range headers {
+		for j := 0; j < i; j++ {
+			if (columns[i].Label != "" || columns[j].Label != "") && strings.EqualFold(headers[i], headers[j]) {
+				panic(fmt.Errorf("%s %s: x-bartolo-list-fields columns %q and %q both show the header %q; give one a different label",
+					strings.ToUpper(httpMethod), path, columns[j].Path, columns[i].Path, headers[i]))
+			}
+		}
+	}
+}
+
+// classifyList returns the declared list columns, the same columns with their
+// declared header labels (nil when no entry declares one), and whether the
+// operation renders as a collection: marked by x-bartolo-list or
+// x-bartolo-list-fields, or inferred, unless x-bartolo-list: false turns
+// inference off.
+func classifyList(httpMethod, path string, operation *openapi3.Operation) ([]string, []ListColumnData, bool) {
+	var entries []listField
+	if fields, ok := extValue(operation.Extensions, extKeyListFields); ok {
+		func() {
+			// Name the operation, so a bad entry is findable in a large spec.
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					panic(fmt.Errorf("%s %s: %v", strings.ToUpper(httpMethod), path, recovered))
+				}
+			}()
+			mustDecodeExt(fields, &entries)
+		}()
+	}
+	var listFields []string
+	var listColumns []ListColumnData
+	labelled := false
+	for _, entry := range entries {
+		listFields = append(listFields, entry.Path)
+		listColumns = append(listColumns, ListColumnData(entry))
+		labelled = labelled || entry.Label != ""
+	}
+	if !labelled {
+		listColumns = nil
+	}
+	checkListHeaders(httpMethod, path, listColumns)
 
 	listExt, hasOverride := extValue(operation.Extensions, extKeyList)
 	override := extBool(listExt)
@@ -715,9 +808,9 @@ func classifyList(httpMethod, path string, operation *openapi3.Operation) ([]str
 			panic(fmt.Errorf("%s %s: %s is false but %s declares columns; remove one of them",
 				strings.ToUpper(httpMethod), path, "x-bartolo-list", "x-bartolo-list-fields"))
 		}
-		return listFields, false
+		return listFields, nil, false
 	}
-	return listFields, len(listFields) > 0 || override || isInferredList(httpMethod, path, operation)
+	return listFields, listColumns, len(listFields) > 0 || override || isInferredList(httpMethod, path, operation)
 }
 
 func warnRenamedFlags(httpMethod, path string, renamed []renamedFlag) {

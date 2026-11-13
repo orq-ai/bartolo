@@ -1121,6 +1121,84 @@ func TestDefaultFormatterFooterStaysQuietWithoutMorePages(t *testing.T) {
 	assert.NotContains(t, out.String(), "more available")
 }
 
+func TestFormatListColumnsUsesDeclaredHeadersUntilColumnsAreReplaced(t *testing.T) {
+	rows := []interface{}{
+		map[string]interface{}{"id": "one", "metadata": map[string]interface{}{"created_at": "2026-01-01"}},
+	}
+	columns := []ListColumn{{Path: "id"}, {Path: "metadata.created_at", Label: "Created on"}}
+	render := func(columnsFlag, query string) string {
+		viper.Reset()
+		viper.Set("output-format", tableFormat)
+		viper.Set("jmespath", query)
+		viper.Set("columns", columnsFlag)
+		viper.Set("raw", false)
+		out := new(bytes.Buffer)
+		original := Stdout
+		Stdout = out
+		t.Cleanup(func() { Stdout = original })
+		assert.NoError(t, NewDefaultFormatter(true, true).FormatListColumns(rows, columns...))
+		return out.String()
+	}
+
+	out := render("", "")
+	assert.Contains(t, out, "│ ID  │ Created on │", "a declared label replaces the header as written; an empty one derives")
+
+	// Same column count as the spec's, so a leaked label would land on "id".
+	out = render("metadata.created_at,id", "")
+	assert.Contains(t, out, "│ CREATED AT │ ID  │")
+	assert.NotContains(t, out, "Created on", "--columns replaces the spec's columns, so their labels go too")
+
+	out = render("", "[].{when: metadata.created_at, key: id}")
+	assert.Contains(t, out, "WHEN")
+	assert.Contains(t, out, "KEY")
+	assert.NotContains(t, out, "Created on", "a projection replaces the rows the labels named")
+}
+
+func TestPackageFormatListColumnsFallsBackToPathsForCustomFormatters(t *testing.T) {
+	original := Formatter
+	t.Cleanup(func() { Formatter = original })
+	recorder := &listRecorder{}
+	Formatter = recorder
+	assert.NoError(t, FormatListColumns([]interface{}{}, ListColumn{Path: "id", Label: "Key"}))
+	assert.Equal(t, []string{"id"}, recorder.columns)
+}
+
+type listRecorder struct{ columns []string }
+
+func (r *listRecorder) Format(interface{}) error { return nil }
+func (r *listRecorder) FormatList(_ interface{}, columns ...string) error {
+	r.columns = columns
+	return nil
+}
+
+func TestListColumnHeadersDeriveAmongUnlabeledColumnsOnly(t *testing.T) {
+	assert.Equal(t, []string{"$/1M IN", "COST"}, ListColumnHeaders([]ListColumn{
+		{Path: "pricing.input.cost", Label: "$/1M IN"}, {Path: "pricing.output.cost"},
+	}), "a labeled sibling no longer forces the unlabeled one to extend")
+	assert.Equal(t, []string{"Key", "INPUT . COST", "OUTPUT . COST"}, ListColumnHeaders([]ListColumn{
+		{Path: "id", Label: "Key"}, {Path: "pricing.input.cost"}, {Path: "pricing.output.cost"},
+	}), "unlabeled columns still stay distinct from each other")
+}
+
+// Generated code calls the package-level FormatListColumns, which finds the
+// method on the formatter through an interface. Pin that it reaches
+// DefaultFormatter, or a signature drift would drop every label silently.
+func TestPackageFormatListColumnsReachesTheDefaultFormatter(t *testing.T) {
+	viper.Reset()
+	viper.Set("output-format", tableFormat)
+	viper.Set("raw", false)
+	out := new(bytes.Buffer)
+	originalOut, originalFormatter := Stdout, Formatter
+	Stdout, Formatter = out, NewDefaultFormatter(true, true)
+	t.Cleanup(func() { Stdout, Formatter = originalOut, originalFormatter })
+
+	err := FormatListColumns([]interface{}{map[string]interface{}{"id": "one"}}, ListColumn{Path: "id", Label: "Key"})
+
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "Key")
+	assert.NotContains(t, out.String(), "ID")
+}
+
 // The footer names the flag that fetches the next page when the running command
 // has one, and timestamps are cut to the minute.
 func TestTableFooterNamesNextPageFlagAndShortensTimestamps(t *testing.T) {

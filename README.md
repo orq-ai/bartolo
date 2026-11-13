@@ -278,7 +278,7 @@ Bartolo's canonical extension namespace is `x-bartolo-*`. Shared extensions affe
 | `x-bartolo-hidden` | Hide a path or operation from normal CLI help. |
 | `x-bartolo-ignore` | Exclude a path, operation, or parameter entirely (from CLI **and** MCP). |
 | `x-bartolo-list` | Set to `true` to mark an operation as a collection, or `false` to suppress automatic collection detection (CLI only). |
-| `x-bartolo-list-fields` | Set and order the default columns for an interactive collection response; a non-empty list also marks the operation as a collection (CLI only). |
+| `x-bartolo-list-fields` | Set and order the default columns for an interactive collection response; an entry can be `{path, label}` to name its header. A non-empty list also marks the operation as a collection (CLI only). |
 | `x-bartolo-name` | Override a generated name for an API, operation, or parameter. |
 | `x-bartolo-no-validate` | Set to `true` to skip the client-side `enum`/`format` check for a parameter, for a schema that is stricter than the API it describes. Applies to CLI flags and MCP tool arguments alike. |
 | `x-bartolo-waiters` | Add polling-based waiter commands and follow-up flags. |
@@ -323,7 +323,16 @@ paths:
         - id
         - name
         - status
+        - path: metadata.created_at
+          label: Created
 ```
+
+An entry is a field path, or an object with a `path` and a `label`. The label
+replaces the derived header exactly as written, and unlabeled columns only
+stay distinct from each other: labeling `pricing.input.cost` leaves
+`pricing.output.cost` as `COST`. A label that matches another column's header,
+ignoring case, fails generation. `--columns` and `--jmespath` replace the
+declared columns, so their tables keep derived headers.
 
 Without `x-cli-list-fields` the columns are inferred from the response: nested
 objects are skipped, a list shows its first three entries followed by `…`,
