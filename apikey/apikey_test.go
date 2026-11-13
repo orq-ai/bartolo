@@ -392,3 +392,48 @@ func TestHeaderAuthResolvesAStoredTypeLabel(t *testing.T) {
 
 	assert.Equal(t, "test", r.Context.Request.Header.Get("x-auth"))
 }
+
+// A profile whose key is in a secure store this process cannot read (under go test
+// no store is ever available) must not tell the user to run `auth setup`: the key
+// still exists, and setup would replace it. The status carries the store error.
+func TestAnUnreadableStoredKeyIsNotReportedAsMissing(t *testing.T) {
+	resetCLI(t)
+	cli.Init(&cli.Config{AppName: "test", EnvPrefix: "TEST"})
+	Init("x-auth", LocationHeader)
+	cli.Creds.Set("profiles", map[string]interface{}{
+		"acme": map[string]interface{}{"api_key_store": "macOS Keychain"},
+	})
+	viper.Set("profile", "acme")
+
+	r := cli.Client.Get()
+	r.Do()
+
+	assert.ErrorContains(t, r.Context.Error, `the API key of profile "acme" is in macOS Keychain`)
+	assert.ErrorContains(t, r.Context.Error, "the key is still stored there")
+	assert.NotContains(t, r.Context.Error.Error(), "has no API key")
+	assert.Empty(t, r.Context.Request.Header.Get("x-auth"))
+
+	status := cli.AuthHandlers[""].(*Handler).AuthStatus(cli.GetProfile())
+	assert.Equal(t, false, status["configured"])
+	assert.Equal(t, "profile-store-unreadable", status["source"])
+	assert.Contains(t, status["store_error"], "macOS Keychain")
+}
+
+// A profile with no key and no store marker is still incomplete, with the setup remedy.
+func TestAProfileWithNoKeyIsStillIncomplete(t *testing.T) {
+	resetCLI(t)
+	cli.Init(&cli.Config{AppName: "test", EnvPrefix: "TEST"})
+	Init("x-auth", LocationHeader)
+	cli.Creds.Set("profiles", map[string]interface{}{
+		"acme": map[string]interface{}{"type": ""},
+	})
+	viper.Set("profile", "acme")
+
+	r := cli.Client.Get()
+	r.Do()
+
+	assert.ErrorContains(t, r.Context.Error, `profile "acme" has no API key; run `+"`"+cli.SetupCommand("acme")+"`")
+	status := cli.AuthHandlers[""].(*Handler).AuthStatus(cli.GetProfile())
+	assert.Equal(t, "profile-incomplete", status["source"])
+	assert.NotContains(t, status, "store_error")
+}

@@ -100,6 +100,14 @@ func (h *Handler) AuthStatus(profile map[string]string) map[string]interface{} {
 		"source":     source,
 	}
 
+	// The key exists in a store that could not be read: say so, or the status reads
+	// as a missing key that `auth setup` would fix by replacing it.
+	if source == cli.ProfileStoreUnreadable {
+		if err := cli.ProfileKeyUnreadable(cli.ActiveProfileName()); err != nil {
+			status["store_error"] = err.Error()
+		}
+	}
+
 	// A key from a .env is otherwise indistinguishable from an exported one.
 	if dotEnvFile != "" {
 		status["dotenv_file"] = dotEnvFile
@@ -124,6 +132,11 @@ func (h *Handler) lookupKey(profile map[string]string, activeProfile string) (ke
 	// to avoid, so an incomplete or unknown profile is an error instead.
 	if activeProfile != "" {
 		if cli.ProfileExists(activeProfile) {
+			// A key in a store that could not be read still exists; telling the
+			// user to run `auth setup` would have them replace it.
+			if cli.ProfileKeyUnreadable(activeProfile) != nil {
+				return "", cli.ProfileStoreUnreadable, ""
+			}
 			return "", "profile-incomplete", ""
 		}
 		return "", "profile-unknown", ""
@@ -145,6 +158,11 @@ func (h *Handler) missingKeyError(name string, source string) error {
 	switch source {
 	case "profile-unknown":
 		return fmt.Errorf("profile %q is not configured; run `%s` or pick one with `auth profile list`", name, cli.SetupCommand(name))
+	case cli.ProfileStoreUnreadable:
+		if err := cli.ProfileKeyUnreadable(name); err != nil {
+			return fmt.Errorf("%w; the key is still stored there, so make that store readable and retry. Running `%s` would replace it", err, cli.SetupCommand(name))
+		}
+		return fmt.Errorf("profile %q has no API key; run `%s`", name, cli.SetupCommand(name))
 	case "profile-incomplete":
 		return fmt.Errorf("profile %q has no API key; run `%s`", name, cli.SetupCommand(name))
 	}

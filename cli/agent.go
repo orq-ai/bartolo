@@ -310,7 +310,7 @@ func newDoctorCommand() *cobra.Command {
 func doctorStatus() map[string]interface{} {
 	auth := GetAuthStatus()
 	fixable := make([]string, 0, 1)
-	if configured, _ := auth["configured"].(bool); !configured {
+	if authFixableBySetup(auth) {
 		fixable = append(fixable, "auth")
 	}
 
@@ -341,7 +341,7 @@ func doctorStatus() map[string]interface{} {
 
 func runDoctorFixes(status map[string]interface{}) (bool, error) {
 	auth, _ := status["auth"].(map[string]interface{})
-	if configured, _ := auth["configured"].(bool); !configured {
+	if authFixableBySetup(auth) {
 		if err := RunAuthSetup(ActiveProfileName(), "", ""); err != nil {
 			return false, err
 		}
