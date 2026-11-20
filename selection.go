@@ -124,11 +124,11 @@ func (c *CommandSelection) check() error {
 // matches no operation is an error, so a renamed tag, section or group cannot
 // silently produce an empty CLI.
 func applyCommandSelection(api *OpenAPI, selection *CommandSelection) error {
-	if selection == nil || (selection.Include.empty() && selection.Exclude.empty()) {
-		return nil
-	}
 	if err := selection.check(); err != nil {
 		return err
+	}
+	if selection == nil || (selection.Include.empty() && selection.Exclude.empty()) {
+		return nil
 	}
 
 	ops := api.allOperations()
@@ -217,36 +217,6 @@ func dropUnselectedWaiters(api *OpenAPI) {
 	for _, op := range api.allOperations() {
 		op.Waiters = slices.DeleteFunc(op.Waiters, func(w *WaiterParams) bool { return dropped[w.Waiter] })
 	}
-}
-
-// allOperations returns every operation in the IR, root ones first.
-func (o *OpenAPI) allOperations() []*Operation {
-	ops := slices.Clone(o.Operations)
-	for _, group := range o.Groups {
-		ops = append(ops, group.Operations...)
-	}
-	return ops
-}
-
-func (o *OpenAPI) hasCLICommands() bool {
-	return len(o.CLIOperations()) > 0 || len(o.CLIGroups()) > 0
-}
-
-// CLIGroups returns the groups that generate a command, for the README and
-// examples, which should not list a group whose commands were all left out.
-func (o *OpenAPI) CLIGroups() []*CommandGroup {
-	var groups []*CommandGroup
-	for _, group := range o.Groups {
-		if group.HasCLICommands() {
-			groups = append(groups, group)
-		}
-	}
-	return groups
-}
-
-// CLIOperations returns the root operations that generate a command.
-func (o *OpenAPI) CLIOperations() []*Operation {
-	return cliVisibleOperations(o.Operations)
 }
 
 // helpSectionOrder resolves the help_sections list from .bartolo.json into the

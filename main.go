@@ -223,6 +223,36 @@ func (g *CommandGroup) HasCLICommands() bool {
 	return false
 }
 
+// allOperations returns every operation in the IR, root ones first.
+func (o *OpenAPI) allOperations() []*Operation {
+	ops := slices.Clone(o.Operations)
+	for _, group := range o.Groups {
+		ops = append(ops, group.Operations...)
+	}
+	return ops
+}
+
+func (o *OpenAPI) hasCLICommands() bool {
+	return len(o.CLIOperations()) > 0 || len(o.CLIGroups()) > 0
+}
+
+// CLIGroups returns the groups that generate a command, for the README and
+// examples, which should not list a group whose commands were all left out.
+func (o *OpenAPI) CLIGroups() []*CommandGroup {
+	var groups []*CommandGroup
+	for _, group := range o.Groups {
+		if group.HasCLICommands() {
+			groups = append(groups, group)
+		}
+	}
+	return groups
+}
+
+// CLIOperations returns the root operations that generate a command.
+func (o *OpenAPI) CLIOperations() []*Operation {
+	return cliVisibleOperations(o.Operations)
+}
+
 // Waiter describes a special command that blocks until a condition has been
 // met, after which it exits.
 type Waiter struct {
@@ -1342,10 +1372,21 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		if a, ok := extValue(tagDef.Extensions, extKeyAliases); ok {
 			mustDecodeExt(a, &aliases)
 		}
-		if h, ok := extValue(tagDef.Extensions, extKeyHidden); ok {
+	}
+
+	// When x-bartolo-group names no declared tag, the operation's own first tag
+	// still sets the flags below, but not the group's name, aliases or
+	// description: one tag can span several groups (an Audio tag holding speech,
+	// transcriptions and translations).
+	flagTag := tagDef
+	if flagTag == nil && len(operation.Tags) > 0 {
+		flagTag = tagDefs[operation.Tags[0]]
+	}
+	if flagTag != nil {
+		if h, ok := extValue(flagTag.Extensions, extKeyHidden); ok {
 			mustDecodeExt(h, &hidden)
 		}
-		sfx := betaSuffix(tagDef.Extensions)
+		sfx := betaSuffix(flagTag.Extensions)
 		beta = sfx != ""
 		short += sfx
 		// Long and Description both come from `long`, and the group/readme
@@ -1353,15 +1394,11 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		// its help page and in the README, not only in the parent command list.
 		// When long is empty the templates fall back to the already-marked short.
 		long = markFirstLine(long, sfx)
-		section = extString(tagDef.Extensions, extKeyHelpSection)
+		section = extString(flagTag.Extensions, extKeyHelpSection)
 	}
 
 	if override := extString(operation.Extensions, extKeyGroup); override != "" {
 		cliName = slug(override)
-	}
-
-	if tagDef == nil {
-		section, hidden, beta, short = applyOwnTagFallback(operation, tagDefs, section, hidden, beta, short)
 	}
 
 	return &CommandGroup{
@@ -1376,33 +1413,6 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		Description: long,
 		Beta:        beta,
 	}
-}
-
-// applyOwnTagFallback covers an operation whose x-bartolo-group names no
-// declared tag: its own first tag still decides the group's help section,
-// hidden flag and beta marker. The tag's name, aliases and description are not
-// carried over, because one tag can span several groups (an Audio tag holding
-// speech, transcriptions and translations) and those describe the tag, not
-// each group.
-func applyOwnTagFallback(operation *openapi3.Operation, tagDefs map[string]*openapi3.Tag, section string, hidden, beta bool, short string) (string, bool, bool, string) {
-	if len(operation.Tags) == 0 {
-		return section, hidden, beta, short
-	}
-	tagDef := tagDefs[operation.Tags[0]]
-	if tagDef == nil {
-		return section, hidden, beta, short
-	}
-	if s := extString(tagDef.Extensions, extKeyHelpSection); s != "" {
-		section = s
-	}
-	if h, ok := extValue(tagDef.Extensions, extKeyHidden); ok {
-		mustDecodeExt(h, &hidden)
-	}
-	if sfx := betaSuffix(tagDef.Extensions); sfx != "" {
-		beta = true
-		short += sfx
-	}
-	return section, hidden, beta, short
 }
 
 func inferGroupFromPath(path string) string {
@@ -3790,7 +3800,7 @@ func buildREADMEExamples(api *OpenAPI) []*READMEExample {
 				Description: description,
 			})
 		}
-	} else if op := pickREADMEOperation(api.Operations); op != nil {
+	} else if op := pickREADMEOperation(api.CLIOperations()); op != nil {
 		examples = append(examples, &READMEExample{
 			Title:       "Inspect an operation",
 			Command:     binary + " " + op.Use + " --help",
@@ -3831,15 +3841,13 @@ func pickRawRequestOperation(api *OpenAPI) *Operation {
 		return nil
 	}
 
-	if len(api.Groups) > 0 {
-		for _, group := range api.Groups {
-			if operation := pickREADMEOperation(group.Operations); operation != nil {
-				return operation
-			}
+	for _, group := range api.CLIGroups() {
+		if operation := pickREADMEOperation(cliVisibleOperations(group.Operations)); operation != nil {
+			return operation
 		}
 	}
 
-	return pickREADMEOperation(api.Operations)
+	return pickREADMEOperation(api.CLIOperations())
 }
 
 func writeGeneratedREADME(api *OpenAPI) {

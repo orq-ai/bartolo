@@ -192,6 +192,62 @@ func TestCommandSelectionRejectsUnknownMCPMode(t *testing.T) {
 	}
 }
 
+func TestCommandSelectionRejectsUnknownMCPModeWithoutSelectors(t *testing.T) {
+	api := selectionAPI(t)
+	if err := applyCommandSelection(api, &CommandSelection{MCP: "bogus"}); err == nil {
+		t.Fatal("an unknown mcp mode should fail even when nothing is selected")
+	}
+}
+
+// The README must not suggest a command the selection removed, including the
+// raw-request example, which picks any operation's path.
+func TestREADMEExamplesSkipUnselectedOperations(t *testing.T) {
+	api := selectionAPI(t)
+	if err := applyCommandSelection(api, &CommandSelection{Include: &CommandSelector{Groups: []string{"speech"}}}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if op := pickRawRequestOperation(api); op == nil || op.Path != "/audio/speech" {
+		t.Fatalf("raw-request example should use a selected operation, got %+v", op)
+	}
+
+	api = selectionAPI(t)
+	if err := applyCommandSelection(api, &CommandSelection{Include: &CommandSelector{Commands: []string{"agents list"}}}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if op := pickRawRequestOperation(api); op == nil || op.Path != "/agents" || !strings.EqualFold(op.Method, "GET") {
+		t.Fatalf("raw-request example should use the selected GET /agents, got %+v", op)
+	}
+}
+
+// A group whose x-cli-group names no declared tag takes its beta marker from
+// its own tag, on both the short line and the long description.
+func TestOwnTagFallbackMarksBetaLikeDeclaredTag(t *testing.T) {
+	doc := loadTestSpec(t, `
+openapi: 3.0.3
+info: {title: T, version: "1"}
+tags:
+  - name: Audio
+    x-cli-help-section: AI Gateway
+    x-bartolo-beta: true
+    x-cli-hidden: true
+paths:
+  /audio/speech:
+    post:
+      operationId: CreateSpeech
+      tags: [Audio]
+      x-cli-group: speech
+      responses: {"200": {description: ok}}
+`)
+	api := ProcessAPI("example", doc)
+	group := api.Groups[0]
+	if group.HelpSection != "AI Gateway" || !group.Hidden || !group.Beta {
+		t.Fatalf("expected section, hidden and beta from the own tag, got %q hidden=%v beta=%v", group.HelpSection, group.Hidden, group.Beta)
+	}
+	if !strings.HasPrefix(group.Short, "Speech") || group.Short == "Speech" {
+		t.Fatalf("expected the group's own name with a beta marker, got %q", group.Short)
+	}
+}
+
 func TestUnselectedOperationsKeepClientButLoseMCPToolByDefault(t *testing.T) {
 	api := selectionAPI(t)
 	if err := applyCommandSelection(api, &CommandSelection{Include: &CommandSelector{Groups: []string{"chat"}}}); err != nil {
