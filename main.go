@@ -146,14 +146,22 @@ type Operation struct {
 	ListColumns    []ListColumnData // ListFields with declared headers; nil unless an entry has a label
 	Waiters        []*WaiterParams
 	Group          *CommandGroup
-	HelpSection    string
-	CommandPath    string
-	LeafName       string
-	MCP            *MCPTool
+	// HelpSection is the top-level help section of a root command. A grouped
+	// operation's x-bartolo-help-section places its group instead (see
+	// CommandGroup.HelpSection), so it stays empty there.
+	HelpSection string
+	// Tags are the operation's OpenAPI tags, for .bartolo.json selection.
+	Tags        []string
+	CommandPath string
+	LeafName    string
+	MCP         *MCPTool
 	// CLIExcluded marks an operation that must not generate a CLI command
 	// (x-bartolo-cli-ignore) while still entering the IR so it can be exposed
 	// as an MCP tool and have its generated client func emitted.
 	CLIExcluded bool
+	// Unselected marks an operation the .bartolo.json commands selection left
+	// out. It is also CLIExcluded.
+	Unselected bool
 }
 
 // BodyField describes a generated request-body flag for a simple top-level
@@ -182,6 +190,11 @@ type CommandGroup struct {
 	// Beta is set when the group's tag is marked beta. Every operation filed
 	// under the group inherits the marker.
 	Beta bool
+	// opSection is the section the group's operations set themselves, and
+	// opSectionFrom the operation that set it first, so a disagreeing
+	// operation can be reported against it.
+	opSection     string
+	opSectionFrom string
 }
 
 // cliVisibleOperations returns the operations that generate a CLI command,
@@ -208,6 +221,36 @@ func (g *CommandGroup) HasCLICommands() bool {
 		}
 	}
 	return false
+}
+
+// allOperations returns every operation in the IR, root ones first.
+func (o *OpenAPI) allOperations() []*Operation {
+	ops := slices.Clone(o.Operations)
+	for _, group := range o.Groups {
+		ops = append(ops, group.Operations...)
+	}
+	return ops
+}
+
+func (o *OpenAPI) hasCLICommands() bool {
+	return len(o.CLIOperations()) > 0 || len(o.CLIGroups()) > 0
+}
+
+// CLIGroups returns the groups that generate a command, for the README and
+// examples, which should not list a group whose commands were all left out.
+func (o *OpenAPI) CLIGroups() []*CommandGroup {
+	var groups []*CommandGroup
+	for _, group := range o.Groups {
+		if group.HasCLICommands() {
+			groups = append(groups, group)
+		}
+	}
+	return groups
+}
+
+// CLIOperations returns the root operations that generate a command.
+func (o *OpenAPI) CLIOperations() []*Operation {
+	return cliVisibleOperations(o.Operations)
 }
 
 // Waiter describes a special command that blocks until a condition has been
@@ -279,6 +322,11 @@ type ProjectConfig struct {
 	Targets []string `json:"targets,omitempty"`
 	// MCP holds the generated MCP server's protocol-level options.
 	MCP *MCPConfig `json:"mcp,omitempty"`
+	// Commands selects which operations become commands. See CommandSelection.
+	Commands *CommandSelection `json:"commands,omitempty"`
+	// HelpSections orders the top-level help sections. Sections not listed
+	// follow, in the order commands first use them.
+	HelpSections []string `json:"help_sections,omitempty"`
 }
 
 // defaultTargets is the surface set used when a project does not record an
@@ -416,6 +464,21 @@ type OpenAPI struct {
 	// MCPConfig is the project's `mcp` block, rendered into the generated
 	// server's options.
 	MCPConfig *MCPConfig
+	// HelpSectionOrder is the project's help_sections list: the sections the
+	// generated Register declares before adding any command, so their headings
+	// print in this order rather than in the order commands first use them.
+	HelpSectionOrder []string
+	// problems collects spec errors found while building the IR, such as two
+	// operations in one group naming different help sections.
+	problems []string
+}
+
+// Err reports the spec errors found while building the IR.
+func (o *OpenAPI) Err() error {
+	if len(o.problems) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s", strings.Join(o.problems, "\n"))
 }
 
 // AuthScheme is a recognized (or explicitly unsupported) OpenAPI security
@@ -642,7 +705,8 @@ func (b *irBuilder) addOperation(scope pathScope, httpMethod string, operation *
 		ListFields:     listFields,
 		ListColumns:    listColumns,
 		Group:          group,
-		HelpSection:    extString(operation.Extensions, extKeyHelpSection),
+		HelpSection:    rootHelpSection(group, operation),
+		Tags:           operation.Tags,
 		CommandPath:    commandPath,
 		LeafName:       leafName,
 		// The op still enters the IR (so it can become an MCP tool) but is
@@ -686,12 +750,41 @@ func (b *irBuilder) resolveGroup(path string, operation *openapi3.Operation, lea
 		b.groups[group.CLIName] = group
 		b.groupOrder = append(b.groupOrder, group.CLIName)
 	}
+	b.mergeOperationSection(group, operation, strings.ToUpper(method)+" "+path)
 
 	leafName = inferGroupedLeafName(leafName, strings.ToLower(method), path, group.CLIName, explicit)
 	if leafName == "" {
 		leafName = slug(method)
 	}
 	return group, leafName
+}
+
+// mergeOperationSection applies an operation-level x-bartolo-help-section to
+// the operation's group. Any operation in the group may set it, not only the
+// first one seen, and operations that set different sections are an error
+// rather than leaving the group's section to path order.
+func (b *irBuilder) mergeOperationSection(group *CommandGroup, operation *openapi3.Operation, where string) {
+	section := extString(operation.Extensions, extKeyHelpSection)
+	switch {
+	case section == "":
+	case group.opSection == "":
+		group.opSection = section
+		group.opSectionFrom = where
+		group.HelpSection = section
+	case group.opSection != section:
+		b.result.problems = append(b.result.problems, fmt.Sprintf(
+			"group %q: %s sets help section %q but %s sets %q; give every operation in a group the same x-bartolo-help-section",
+			group.CLIName, where, section, group.opSectionFrom, group.opSection))
+	}
+}
+
+// rootHelpSection is the operation-level help section of a root command. A
+// grouped operation's section places its group, not the command inside it.
+func rootHelpSection(group *CommandGroup, operation *openapi3.Operation) string {
+	if group != nil {
+		return ""
+	}
+	return extString(operation.Extensions, extKeyHelpSection)
 }
 
 // collectGroups appends the groups in first-seen order, each with its
@@ -1279,10 +1372,21 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		if a, ok := extValue(tagDef.Extensions, extKeyAliases); ok {
 			mustDecodeExt(a, &aliases)
 		}
-		if h, ok := extValue(tagDef.Extensions, extKeyHidden); ok {
+	}
+
+	// When x-bartolo-group names no declared tag, the operation's own first tag
+	// still sets the flags below, but not the group's name, aliases or
+	// description: one tag can span several groups (an Audio tag holding speech,
+	// transcriptions and translations).
+	flagTag := tagDef
+	if flagTag == nil && len(operation.Tags) > 0 {
+		flagTag = tagDefs[operation.Tags[0]]
+	}
+	if flagTag != nil {
+		if h, ok := extValue(flagTag.Extensions, extKeyHidden); ok {
 			mustDecodeExt(h, &hidden)
 		}
-		sfx := betaSuffix(tagDef.Extensions)
+		sfx := betaSuffix(flagTag.Extensions)
 		beta = sfx != ""
 		short += sfx
 		// Long and Description both come from `long`, and the group/readme
@@ -1290,15 +1394,11 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		// its help page and in the README, not only in the parent command list.
 		// When long is empty the templates fall back to the already-marked short.
 		long = markFirstLine(long, sfx)
-		section = extString(tagDef.Extensions, extKeyHelpSection)
+		section = extString(flagTag.Extensions, extKeyHelpSection)
 	}
 
 	if override := extString(operation.Extensions, extKeyGroup); override != "" {
 		cliName = slug(override)
-	}
-
-	if override := extString(operation.Extensions, extKeyHelpSection); override != "" {
-		section = override
 	}
 
 	return &CommandGroup{
@@ -3680,14 +3780,14 @@ func buildREADMEExamples(api *OpenAPI) []*READMEExample {
 		},
 	}
 
-	if len(api.Groups) > 0 {
-		group := api.Groups[0]
+	if groups := api.CLIGroups(); len(groups) > 0 {
+		group := groups[0]
 		examples = append(examples, &READMEExample{
 			Title:       "Explore a command group",
 			Command:     binary + " " + group.CLIName + " --help",
 			Description: "Inspect the grouped product commands synthesized from the OpenAPI tags.",
 		})
-		if op := pickREADMEOperation(group.Operations); op != nil {
+		if op := pickREADMEOperation(cliVisibleOperations(group.Operations)); op != nil {
 			command := binary + " " + op.CommandPath
 			description := "Replace any positional placeholders with real values from your environment."
 			if len(op.RequiredParams) > 0 {
@@ -3700,7 +3800,7 @@ func buildREADMEExamples(api *OpenAPI) []*READMEExample {
 				Description: description,
 			})
 		}
-	} else if op := pickREADMEOperation(api.Operations); op != nil {
+	} else if op := pickREADMEOperation(api.CLIOperations()); op != nil {
 		examples = append(examples, &READMEExample{
 			Title:       "Inspect an operation",
 			Command:     binary + " " + op.Use + " --help",
@@ -3741,15 +3841,13 @@ func pickRawRequestOperation(api *OpenAPI) *Operation {
 		return nil
 	}
 
-	if len(api.Groups) > 0 {
-		for _, group := range api.Groups {
-			if operation := pickREADMEOperation(group.Operations); operation != nil {
-				return operation
-			}
+	for _, group := range api.CLIGroups() {
+		if operation := pickREADMEOperation(cliVisibleOperations(group.Operations)); operation != nil {
+			return operation
 		}
 	}
 
-	return pickREADMEOperation(api.Operations)
+	return pickREADMEOperation(api.CLIOperations())
 }
 
 func writeGeneratedREADME(api *OpenAPI) {
@@ -4054,8 +4152,15 @@ func generateFromSpec(specPath string) error {
 	shortName := normalizeSpecName(specPath)
 
 	templateData := ProcessAPI(shortName, swagger)
+	if err := templateData.Err(); err != nil {
+		return err
+	}
 	config := loadProjectConfig()
 	if config != nil {
+		if err := applyCommandSelection(templateData, config.Commands); err != nil {
+			return err
+		}
+		templateData.HelpSectionOrder = helpSectionOrder(templateData, config.HelpSections)
 		if err := ensureConfigTargets(config); err != nil {
 			return err
 		}

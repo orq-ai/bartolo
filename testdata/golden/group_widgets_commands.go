@@ -77,7 +77,6 @@ func registerwidgetsCommands(root *cobra.Command) {
 
 			},
 		}
-		bartolocli.HelpSection(parent, cmd, "Writes")
 		parent.AddCommand(cmd)
 		bartolocli.AddBodyFlags(cmd)
 		bartolocli.AddExampleFlag(cmd)

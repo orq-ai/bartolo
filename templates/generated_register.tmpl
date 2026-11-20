@@ -23,6 +23,9 @@ func Register(root *cobra.Command) {
 	root.Long = bartolocli.Markdown("{{ .Description }}")
 
 	{{- if .TargetCLI }}
+	{{- if .HelpSectionOrder }}
+	bartolocli.DeclareHelpSections(root{{ range .HelpSectionOrder }}, "{{ . | escapeStr }}"{{ end }})
+	{{- end }}
 	registerRootCommands(root)
 	{{- range .Groups }}
 	{{- if .HasCLICommands }}
