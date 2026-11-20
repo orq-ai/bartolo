@@ -183,15 +183,32 @@ func HelpSection(parent *cobra.Command, cmd *cobra.Command, title string) {
 	cmd.GroupID = title
 }
 
+// DeclareHelpSections adds the given sections to parent in order, before any
+// command uses them. Cobra prints sections in the order they were added, so
+// without this the headings follow whichever command registers first. Titles
+// that already exist keep their place. A declared section that no command
+// ends up in still prints its heading, so declare only sections that get
+// commands.
+func DeclareHelpSections(parent *cobra.Command, titles ...string) {
+	if parent == nil {
+		return
+	}
+	for _, title := range titles {
+		if title != "" {
+			ensureHelpSection(parent, title)
+		}
+	}
+}
+
 // sweepIntoOtherHelpSection puts every remaining ungrouped command under
 // HelpSectionOther, so a command tree that uses sections at all does not also
 // show cobra's "Additional Commands" block. It runs at execute time because
 // that is the first point where every command is registered, including the ones
 // a consuming CLI adds after Register.
 //
-// It recurses because operations inside a generated group get their sections
-// from the same x-cli-help-section extension as top-level ones, so a group can
-// hold a mix of sectioned and unsectioned subcommands.
+// It recurses because a consuming CLI can section the subcommands of any
+// command itself, so a group can hold a mix of sectioned and unsectioned
+// subcommands.
 func sweepIntoOtherHelpSection(root *cobra.Command) {
 	if root == nil {
 		return
