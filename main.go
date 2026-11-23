@@ -902,6 +902,9 @@ func bodyFieldsHelp(bodyFields []*BodyField) string {
 		"Scalar, nullable scalar (pass `null` for JSON null), enum, repeatable list (`--field a --field b`), " +
 		"and string map (`--field key=value`) fields use typed flags. " +
 		"Nested objects, arrays of objects, and polymorphic unions accept a JSON string (e.g. `--field '{\"k\":1}'`)."
+	if slices.ContainsFunc(bodyFields, func(f *BodyField) bool { return f != nil && f.Type == "json-map" }) {
+		help += " Map fields whose values are not always strings accept either a JSON object (keeps value types) or `key=value` pairs (sent as strings)."
+	}
 	// An enum or array date-time keeps its own flag type and is sent
 	// as typed, so the syntax must not be promised there.
 	if slices.ContainsFunc(bodyFields, func(f *BodyField) bool {
@@ -2065,16 +2068,9 @@ func bodyFieldType(schema *openapi3.Schema) string {
 			// silently dropping the field.
 			return "json"
 		}
-		// Only string-valued maps get key=value strings. Any other value type
-		// (`{}`, `true`, an anyOf of scalars) needs JSON to keep numbers and
-		// booleans typed.
 		ap := effective.AdditionalProperties
 		if ap.Schema != nil && ap.Schema.Value != nil {
-			apEffective, _ := effectiveBodySchema(ap.Schema.Value)
-			if apEffective != nil && apEffective.Type != nil && apEffective.Type.Is("string") {
-				return "string-map"
-			}
-			return "json-map"
+			return mapValueFlagType(ap.Schema.Value)
 		}
 		if ap.Has != nil && *ap.Has {
 			return "json-map"
@@ -2117,6 +2113,24 @@ func isDateTimeSchema(effective, original *openapi3.Schema) bool {
 		}
 	}
 	return false
+}
+
+// mapValueFlagType picks the flag type for a map by what its values can be.
+func mapValueFlagType(value *openapi3.Schema) string {
+	effective, _ := effectiveBodySchema(value)
+	switch {
+	case effective == nil:
+		if unionHasStringBranch(value) {
+			return "json-map"
+		}
+		return "json"
+	case scalarType(effective) == "string":
+		return "string-map"
+	case effective.Type == nil && len(effective.AllOf) == 0:
+		return "json-map"
+	default:
+		return "json"
+	}
 }
 
 // unionHasStringBranch reports whether a multi-branch `oneOf`/`anyOf` schema has

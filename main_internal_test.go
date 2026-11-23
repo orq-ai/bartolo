@@ -1170,6 +1170,9 @@ func TestBodyFieldTypeCoversCommonShapes(t *testing.T) {
                   "metadata": {"type": "object", "additionalProperties": {"type": "string"}},
                   "metadata_any": {"type": "object", "additionalProperties": true},
                   "metadata_free": {"type": "object", "additionalProperties": {}},
+                  "headers_map": {"type": "object", "additionalProperties": {"type": "object", "properties": {"value": {"type": "string"}, "encrypted": {"type": "boolean"}}}},
+                  "counts_map": {"type": "object", "additionalProperties": {"type": "integer"}},
+                  "metadata_nums": {"type": "object", "additionalProperties": {"anyOf": [{"type": "number"}, {"type": "boolean"}]}},
                   "metadata_mixed": {"type": "object", "additionalProperties": {"anyOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]}},
                   "color": {"type": "string", "enum": ["red", "green", "blue"]},
                   "from": {"type": "string", "format": "date-time"},
@@ -1203,17 +1206,18 @@ func TestBodyFieldTypeCoversCommonShapes(t *testing.T) {
 	}
 
 	want := map[string]string{
-		"name":         "string",
-		"display_name": "string-nullable",
-		"count":        "int64-nullable",
-		"tags":         "string-slice",
-		"scores":       "int64-slice",
-		"metadata":     "string-map",
-		// Maps whose values are not all strings take JSON so numbers and
-		// booleans keep their types (ENG-3622).
+		"name":           "string",
+		"display_name":   "string-nullable",
+		"count":          "int64-nullable",
+		"tags":           "string-slice",
+		"scores":         "int64-slice",
+		"metadata":       "string-map",
 		"metadata_any":   "json-map",
 		"metadata_free":  "json-map",
 		"metadata_mixed": "json-map",
+		"headers_map":    "json",
+		"counts_map":     "json",
+		"metadata_nums":  "json",
 		"color":          "enum-string",
 		"from":           "datetime",
 		// Nullable date-time keeps both behaviours; any other format stays plain.

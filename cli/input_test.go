@@ -439,8 +439,6 @@ func TestApplyBodyFlagsJSONMapKeyValueStaysString(t *testing.T) {
 		{Name: "metadata", FlagName: "metadata", Type: "json-map"},
 	}
 
-	// key=value keeps the old string-map behaviour, including a
-	// comma-separated list in one value, so existing scripts don't change.
 	body := applyBody(t, fields, map[string][]string{
 		"metadata": {"price=499", "region=eu,tier=gold"},
 	}, ``)
@@ -460,25 +458,58 @@ func TestApplyBodyFlagsJSONMapMergesInOrder(t *testing.T) {
 	assert.JSONEq(t, `{"metadata":{"price":499,"tier":"enterprise"}}`, body)
 }
 
-func TestApplyBodyFlagsJSONMapRejectsBadValues(t *testing.T) {
+func TestJSONMapFlagRejectsBadValues(t *testing.T) {
 	fields := []cli.BodyField{
 		{Name: "metadata", FlagName: "metadata", Type: "json-map"},
 	}
 
-	for _, value := range []string{`{"price":`, `["price"]`, "price"} {
-		cmd := &cobra.Command{Use: "test"}
-		cli.AddBodyFieldFlags(cmd, fields)
-		if err := cmd.Flags().Set("metadata", value); err != nil {
-			t.Fatalf("set metadata %q: %v", value, err)
-		}
-		params := viper.New()
-		if err := params.BindPFlags(cmd.Flags()); err != nil {
-			t.Fatalf("bind flags: %v", err)
-		}
-
-		_, err := cli.ApplyBodyFlags(cmd, params, "application/json", ``, fields)
-		assert.Error(t, err, "value %q", value)
+	tests := []struct {
+		value   string
+		wantErr string
+	}{
+		{`{"price":`, `invalid argument "{\"price\":" for "--metadata" flag: invalid JSON object: unexpected end of JSON input`},
+		{`["price"]`, `invalid argument "[\"price\"]" for "--metadata" flag: must be a JSON object, got an array`},
+		{"price", `invalid argument "price" for "--metadata" flag: price must be formatted as key=value`},
 	}
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			cmd := &cobra.Command{Use: "test"}
+			cli.AddBodyFieldFlags(cmd, fields)
+
+			err := cmd.Flags().Set("metadata", tt.value)
+			assert.EqualError(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestApplyBodyFlagsJSONMapQuotedKeyValue(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "metadata", FlagName: "metadata", Type: "json-map"},
+	}
+
+	body := applyBody(t, fields, map[string][]string{"metadata": {`"a=b"`}}, ``)
+
+	assert.JSONEq(t, `{"metadata":{"a":"b"}}`, body)
+}
+
+func TestApplyBodyFlagsJSONMapEmptyObjectSendsEmpty(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "metadata", FlagName: "metadata", Type: "json-map"},
+	}
+
+	body := applyBody(t, fields, map[string][]string{"metadata": {`{}`}}, ``)
+
+	assert.JSONEq(t, `{"metadata":{}}`, body)
+}
+
+func TestApplyBodyFlagsJSONMapValueWithEquals(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "metadata", FlagName: "metadata", Type: "json-map"},
+	}
+
+	body := applyBody(t, fields, map[string][]string{"metadata": {"a=b=c"}}, ``)
+
+	assert.JSONEq(t, `{"metadata":{"a":"b=c"}}`, body)
 }
 
 func TestApplyBodyFlagsJSONFallback(t *testing.T) {
@@ -830,6 +861,5 @@ func TestAddBodyFieldFlagsJSONMapHelp(t *testing.T) {
 
 	usage := cmd.Flags().Lookup("metadata").Usage
 	assert.Contains(t, usage, "Metadata of the chunk")
-	assert.Contains(t, usage, "JSON object")
-	assert.Contains(t, usage, "key=value sends the value as a string")
+	assert.Contains(t, usage, cli.JSONMapFlagHelp)
 }
