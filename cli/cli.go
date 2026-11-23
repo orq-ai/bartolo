@@ -153,6 +153,7 @@ func Init(config *Config) {
 
 	Root.SetOut(Stdout)
 	Root.SetErr(Stderr)
+	hideEmptyHelpSections(Root)
 
 	// Flag parsing failures are usage errors. Setting this on the root is
 	// enough: cobra walks up to the nearest parent that has one.

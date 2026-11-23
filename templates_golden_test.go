@@ -145,7 +145,7 @@ paths:
 // Run `go test . -update` after an intentional template change, and read the
 // diff rather than trusting it.
 func TestGeneratedOutputMatchesGolden(t *testing.T) {
-	api := ProcessAPI("example", loadTestSpec(t, goldenSpec))
+	api := mustProcessAPI(t, "example", loadTestSpec(t, goldenSpec))
 
 	renders := map[string]string{
 		"root_commands.go": renderCommandTemplate("templates/generated_root_commands.tmpl", &CommandsTemplateData{

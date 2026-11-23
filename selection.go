@@ -120,7 +120,8 @@ func (c *CommandSelection) check() error {
 // applyCommandSelection marks every operation the selection leaves out as
 // CLI-excluded, like x-bartolo-cli-ignore: its command is not generated but
 // its client function is, so hand-written code calling it still compiles.
-// Unless commands.mcp is "all", the MCP tool goes too. A selector value that
+// Unless commands.mcp is "all", the MCP tool goes too. Its waiters lose their
+// `wait` command the same way (see cliVisibleWaiters). A selector value that
 // matches no operation is an error, so a renamed tag, section or group cannot
 // silently produce an empty CLI.
 func applyCommandSelection(api *OpenAPI, selection *CommandSelection) error {
@@ -145,7 +146,6 @@ func applyCommandSelection(api *OpenAPI, selection *CommandSelection) error {
 		if included && !selection.Exclude.matches(op) {
 			continue
 		}
-		op.Unselected = true
 		op.CLIExcluded = true
 		if dropMCP && op.MCP != nil && !op.MCP.Excluded {
 			op.MCP.Excluded = true
@@ -153,7 +153,6 @@ func applyCommandSelection(api *OpenAPI, selection *CommandSelection) error {
 		}
 	}
 
-	dropUnselectedWaiters(api)
 	if !api.hasCLICommands() {
 		return fmt.Errorf(".bartolo.json commands: the selection leaves no CLI commands")
 	}
@@ -197,33 +196,11 @@ func sortedKeys(set map[string]bool) []string {
 	return keys
 }
 
-// dropUnselectedWaiters removes the waiters whose operation the selection
-// left out, and the follow-up flags other operations carry for them, since
-// those flags call the waiter's command.
-func dropUnselectedWaiters(api *OpenAPI) {
-	dropped := map[*Waiter]bool{}
-	kept := api.Waiters[:0]
-	for _, waiter := range api.Waiters {
-		if waiter.Operation != nil && waiter.Operation.Unselected {
-			dropped[waiter] = true
-			continue
-		}
-		kept = append(kept, waiter)
-	}
-	api.Waiters = kept
-	if len(dropped) == 0 {
-		return
-	}
-	for _, op := range api.allOperations() {
-		op.Waiters = slices.DeleteFunc(op.Waiters, func(w *WaiterParams) bool { return dropped[w.Waiter] })
-	}
-}
-
 // helpSectionOrder resolves the help_sections list from .bartolo.json into the
 // sections the generated Register declares up front, in that order. A listed
 // section no generated command uses is kept, because the consuming CLI may
-// fill it with hand-written commands, but it is reported: if nothing fills it,
-// it prints as an empty heading.
+// fill it with hand-written commands. It is reported in case it is a typo; if
+// nothing fills it, help hides it.
 func helpSectionOrder(api *OpenAPI, listed []string) []string {
 	used := map[string]bool{}
 	for _, op := range api.CLIOperations() {
@@ -244,7 +221,7 @@ func helpSectionOrder(api *OpenAPI, listed []string) []string {
 			continue
 		}
 		if !used[title] {
-			log.Printf("warning: help_sections lists %q, which no generated command uses; it stays empty unless the CLI adds commands to it", title)
+			log.Printf("warning: help_sections lists %q, which no generated command uses; help hides it unless the CLI adds commands to it", title)
 		}
 		order = append(order, title)
 	}

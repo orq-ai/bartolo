@@ -102,7 +102,7 @@ paths:
           description: ok
 `)
 
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	if len(api.Groups) != 1 {
 		t.Fatalf("expected 1 group, got %d", len(api.Groups))
 	}
@@ -147,7 +147,7 @@ paths:
           description: ok
 `)
 
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	if len(api.Groups) != 1 {
 		t.Fatalf("expected 1 group, got %d", len(api.Groups))
 	}
@@ -186,7 +186,7 @@ paths:
           description: ok
 `)
 
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	op := api.Groups[0].Operations[0]
 	if op.Use != "list" {
 		t.Fatalf("expected grouped operation use %q, got %q", "list", op.Use)
@@ -225,7 +225,7 @@ paths:
                       type: string
 `)
 
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	var op *Operation
 	if len(api.Operations) > 0 {
 		op = api.Operations[0]
@@ -316,7 +316,7 @@ paths:
                         name: {type: string}
 `, tt.path, tt.method, tt.extensions))
 
-			byRoute := operationsByRoute(ProcessAPI("example", doc))
+			byRoute := operationsByRoute(mustProcessAPI(t, "example", doc))
 			if len(byRoute) != 1 {
 				t.Fatalf("expected one generated operation, got %d", len(byRoute))
 			}
@@ -364,7 +364,7 @@ paths:
 		}
 	}()
 
-	ProcessAPI("example", doc)
+	mustProcessAPI(t, "example", doc)
 }
 
 func TestProcessAPIRejectsContradictoryListMetadata(t *testing.T) {
@@ -395,7 +395,7 @@ paths:
 		}
 	}()
 
-	ProcessAPI("example", doc)
+	mustProcessAPI(t, "example", doc)
 }
 
 func TestProcessAPIRejectsNonBooleanListExtension(t *testing.T) {
@@ -425,7 +425,7 @@ paths:
 		}
 	}()
 
-	ProcessAPI("example", doc)
+	mustProcessAPI(t, "example", doc)
 }
 
 // The two routes below are annotated in the vendored fixture so the classifier
@@ -435,7 +435,7 @@ paths:
 func TestProcessAPIMarksOrqPostCollections(t *testing.T) {
 	doc := loadOrqSpec(t)
 
-	byRoute := operationsByRoute(ProcessAPI("orq", doc))
+	byRoute := operationsByRoute(mustProcessAPI(t, "orq", doc))
 	marked := map[string][]string{
 		"POST /v2/knowledge/{knowledge_id}/search":                                  {"id", "text"},
 		"POST /v2/knowledge/{knowledge_id}/datasources/{datasource_id}/chunks/list": {"_id", "text", "status"},
@@ -467,7 +467,7 @@ func TestProcessAPIClassifiesOrqNonGetListsExactly(t *testing.T) {
 		delete(item.Post.Extensions, "x-cli-list")
 		delete(item.Post.Extensions, "x-cli-list-fields")
 
-		op, ok := operationsByRoute(ProcessAPI("orq", doc))[chunksRoute]
+		op, ok := operationsByRoute(mustProcessAPI(t, "orq", doc))[chunksRoute]
 		if !ok {
 			t.Fatalf("%s is missing from the generated CLI", chunksRoute)
 		}
@@ -488,7 +488,7 @@ func TestProcessAPIClassifiesOrqNonGetListsExactly(t *testing.T) {
 		}
 
 		got := map[string]bool{}
-		for route, op := range operationsByRoute(ProcessAPI("orq", loadOrqSpec(t))) {
+		for route, op := range operationsByRoute(mustProcessAPI(t, "orq", loadOrqSpec(t))) {
 			if !op.IsList || strings.HasPrefix(route, "GET ") {
 				continue
 			}
@@ -538,7 +538,7 @@ paths:
                       type: string
 `)
 
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	var op *Operation
 	if len(api.Operations) > 0 {
 		op = api.Operations[0]
@@ -598,7 +598,7 @@ paths:
           description: ok
 `)
 
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	if len(api.Groups) != 1 {
 		t.Fatalf("expected 1 group, got %d", len(api.Groups))
 	}
@@ -641,8 +641,8 @@ paths:
 }
 
 func TestProcessAPICanonicalNameMatchesLegacy(t *testing.T) {
-	legacy := ProcessAPI("example", loadTestSpec(t, specWithOpExt("x-cli-name", "fetch")))
-	canonical := ProcessAPI("example", loadTestSpec(t, specWithOpExt("x-bartolo-name", "fetch")))
+	legacy := mustProcessAPI(t, "example", loadTestSpec(t, specWithOpExt("x-cli-name", "fetch")))
+	canonical := mustProcessAPI(t, "example", loadTestSpec(t, specWithOpExt("x-bartolo-name", "fetch")))
 
 	legacyOp := findOp(legacy, "/widgets/{widget_id}", "get")
 	canonicalOp := findOp(canonical, "/widgets/{widget_id}", "get")
@@ -658,8 +658,8 @@ func TestProcessAPICanonicalNameMatchesLegacy(t *testing.T) {
 }
 
 func TestProcessAPICanonicalGroupMatchesLegacy(t *testing.T) {
-	legacy := ProcessAPI("example", loadTestSpec(t, specWithOpExt("x-cli-group", "admin")))
-	canonical := ProcessAPI("example", loadTestSpec(t, specWithOpExt("x-bartolo-group", "admin")))
+	legacy := mustProcessAPI(t, "example", loadTestSpec(t, specWithOpExt("x-cli-group", "admin")))
+	canonical := mustProcessAPI(t, "example", loadTestSpec(t, specWithOpExt("x-bartolo-group", "admin")))
 
 	if len(legacy.Groups) != 1 || len(canonical.Groups) != 1 {
 		t.Fatalf("expected 1 group each, legacy=%d canonical=%d", len(legacy.Groups), len(canonical.Groups))
@@ -670,8 +670,8 @@ func TestProcessAPICanonicalGroupMatchesLegacy(t *testing.T) {
 }
 
 func TestProcessAPISharedIgnoreCanonicalMatchesLegacy(t *testing.T) {
-	legacy := ProcessAPI("example", loadTestSpec(t, specWithOpExt("x-cli-ignore", "true")))
-	canonical := ProcessAPI("example", loadTestSpec(t, specWithOpExt("x-bartolo-ignore", "true")))
+	legacy := mustProcessAPI(t, "example", loadTestSpec(t, specWithOpExt("x-cli-ignore", "true")))
+	canonical := mustProcessAPI(t, "example", loadTestSpec(t, specWithOpExt("x-bartolo-ignore", "true")))
 
 	if findOp(legacy, "/widgets/{widget_id}", "get") != nil {
 		t.Fatalf("legacy x-cli-ignore op should be absent from the IR")
@@ -705,7 +705,7 @@ paths:
         "200":
           description: ok
 `)
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	op := findOp(api, "/widgets/{widget_id}", "get")
 	if op == nil {
 		t.Fatal("expected op present")
@@ -731,7 +731,7 @@ paths:
             application/json:
               schema: {type: object, properties: {ok: {type: boolean}}}
 `)
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	op := findOp(api, "/internal", "get")
 	if op == nil {
 		t.Fatal("cli-ignored op must still enter the IR")
@@ -773,7 +773,7 @@ paths:
             application/json:
               schema: {type: object, properties: {ok: {type: boolean}}}
 `)
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	if len(api.Groups) != 1 {
 		t.Fatalf("expected the group to remain in the IR, got %d", len(api.Groups))
 	}
@@ -806,7 +806,7 @@ paths:
             application/json:
               schema: {type: object, properties: {ok: {type: boolean}}}
 `)
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	if findOp(api, "/gone", "get") != nil {
 		t.Fatal("shared ignore must drop the op from the IR entirely")
 	}
@@ -835,7 +835,7 @@ paths:
         "200":
           description: ok
 `)
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	op := findOp(api, "/widgets", "get")
 	if op == nil {
 		t.Fatal("expected op present")
@@ -1047,7 +1047,7 @@ paths:
 		t.Fatalf("write spec: %v", err)
 	}
 
-	api := ProcessAPI("nested", loadTestSpec(t, spec))
+	api := mustProcessAPI(t, "nested", loadTestSpec(t, spec))
 	var commandPath string
 	if len(api.Operations) == 1 {
 		commandPath = api.Operations[0].CommandPath
@@ -1642,7 +1642,7 @@ paths:
           description: ok
 `)
 
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	if len(api.Groups) != 1 || len(api.Groups[0].Operations) != 1 {
 		t.Fatalf("expected a single grouped operation, got %+v", api.Groups)
 	}
@@ -1742,7 +1742,7 @@ paths:
           description: ok
 `)
 
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 
 	if !api.Imports.Url {
 		t.Fatal("expected Imports.Url to be true when path params are present")
@@ -1797,7 +1797,7 @@ paths:
                       type: object
 `)
 
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	var op *Operation
 	if len(api.Operations) > 0 {
 		op = api.Operations[0]
@@ -1833,7 +1833,7 @@ paths:
           description: ok
 `)
 
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	seen := map[string]bool{}
 	count := 0
 	for _, op := range api.Operations {
@@ -1897,7 +1897,7 @@ paths:
           description: ok
 `)
 
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 
 	sections := map[string]string{}
 	for _, group := range api.Groups {
@@ -2033,7 +2033,7 @@ paths:
           description: ok
 `)
 
-	rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", doc))
+	rendered := renderCommandTemplate("templates/generated_client.tmpl", mustProcessAPI(t, "example", doc))
 
 	if !strings.Contains(rendered, `bartolocli.NormalizeParam("argument agent-id", paramAgentId, "uuid"`) {
 		t.Errorf("required path param with format: uuid should be checked, got:\n%s", rendered)
@@ -2098,7 +2098,7 @@ paths:
           description: ok
 `)
 
-	rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", doc))
+	rendered := renderCommandTemplate("templates/generated_client.tmpl", mustProcessAPI(t, "example", doc))
 
 	// Required and optional alike.
 	for _, want := range []string{
@@ -2152,7 +2152,7 @@ paths:
           description: ok
 `)
 
-	rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", doc))
+	rendered := renderCommandTemplate("templates/generated_client.tmpl", mustProcessAPI(t, "example", doc))
 
 	normalize := strings.Index(rendered, `NormalizeParam("argument at"`)
 	substitute := strings.Index(rendered, `strings.Replace(url, "{at}"`)
@@ -2189,7 +2189,7 @@ paths:
           description: ok
 `)
 
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	if len(api.Groups) != 1 {
 		t.Fatalf("expected the operation to land in one group, got %d", len(api.Groups))
 	}
@@ -2245,7 +2245,7 @@ paths:
 		{"array of date-times", "                at: {type: array, items: {type: string, format: date-time}}", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			api := ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(specFmt, tc.props)))
+			api := mustProcessAPI(t, "example", loadTestSpec(t, fmt.Sprintf(specFmt, tc.props)))
 			if len(api.Groups) != 1 {
 				t.Fatalf("expected one group, got %d", len(api.Groups))
 			}
@@ -2288,11 +2288,11 @@ paths:
           description: ok
 `
 
-	if rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(spec, "false")))); !strings.Contains(rendered, `NormalizeParam("--cursor"`) {
+	if rendered := renderCommandTemplate("templates/generated_client.tmpl", mustProcessAPI(t, "example", loadTestSpec(t, fmt.Sprintf(spec, "false")))); !strings.Contains(rendered, `NormalizeParam("--cursor"`) {
 		t.Errorf("x-cli-no-validate: false should leave the check in place, got:\n%s", rendered)
 	}
 
-	if rendered := renderCommandTemplate("templates/generated_client.tmpl", ProcessAPI("example", loadTestSpec(t, fmt.Sprintf(spec, "true")))); strings.Contains(rendered, `NormalizeParam("--cursor"`) {
+	if rendered := renderCommandTemplate("templates/generated_client.tmpl", mustProcessAPI(t, "example", loadTestSpec(t, fmt.Sprintf(spec, "true")))); strings.Contains(rendered, `NormalizeParam("--cursor"`) {
 		t.Errorf("x-cli-no-validate: true should suppress the check, got:\n%s", rendered)
 	}
 }
@@ -2326,7 +2326,7 @@ paths:
           description: ok
 `)
 
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	rendered := renderCommandTemplate("templates/generated_client.tmpl", api)
 
 	if !strings.Contains(rendered, `NormalizeParam("--from", paramFrom, "date-time"`) {
@@ -2437,7 +2437,7 @@ paths:
 func renderRootAndGroup(t *testing.T, spec string) (string, string) {
 	t.Helper()
 
-	api := ProcessAPI("example", loadTestSpec(t, spec))
+	api := mustProcessAPI(t, "example", loadTestSpec(t, spec))
 
 	root := renderCommandTemplate("templates/generated_root_commands.tmpl", &CommandsTemplateData{
 		API:        api,
@@ -2513,7 +2513,7 @@ paths:
           description: ok
 `)
 
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	if len(api.Groups) != 1 || len(api.Groups[0].Operations) != 1 {
 		t.Fatalf("expected 1 grouped operation, got %d groups", len(api.Groups))
 	}
@@ -2693,7 +2693,7 @@ paths:
                 properties:
 %s`, tt.path, tt.method, mediaType, tt.properties))
 
-			byRoute := operationsByRoute(ProcessAPI("example", doc))
+			byRoute := operationsByRoute(mustProcessAPI(t, "example", doc))
 			op, ok := byRoute[strings.ToUpper(tt.method)+" "+tt.path]
 			if !ok {
 				t.Fatalf("%s %s is missing from the generated CLI", tt.method, tt.path)
@@ -2731,7 +2731,7 @@ paths:
                   has_more: {type: boolean}
 `)
 
-	op, ok := operationsByRoute(ProcessAPI("example", doc))["POST /traces/search"]
+	op, ok := operationsByRoute(mustProcessAPI(t, "example", doc))["POST /traces/search"]
 	if !ok {
 		t.Fatal("POST /traces/search is missing from the generated CLI")
 	}
@@ -2758,7 +2758,7 @@ paths:
       responses: {"200": {description: ok}}
 `
 	for range 5 {
-		api := ProcessAPI("t", loadTestSpec(t, spec))
+		api := mustProcessAPI(t, "t", loadTestSpec(t, spec))
 		var names []string
 		for _, w := range api.Waiters {
 			names = append(names, w.CLIName)
@@ -2785,7 +2785,7 @@ paths:
 			t.Errorf("recovered %v, want a named unknown-operation error", err)
 		}
 	}()
-	ProcessAPI("t", loadTestSpec(t, spec))
+	mustProcessAPI(t, "t", loadTestSpec(t, spec))
 }
 
 // The scaffolded .env.example names the bearer-token variable the generated MCP
@@ -2825,7 +2825,7 @@ func TestEnvExampleNamesThePrefixedMCPToken(t *testing.T) {
 // An MCP-only binary has no per-operation commands, so its examples show the
 // server instead of `<group> --help` invocations that would not exist.
 func TestExamplesForMCPOnlyProjects(t *testing.T) {
-	api := ProcessAPI("acme", loadTestSpec(t, `
+	api := mustProcessAPI(t, "acme", loadTestSpec(t, `
 openapi: 3.1.0
 info: {title: Acme API, version: "1"}
 paths:
@@ -2910,7 +2910,7 @@ paths:
       responses:
         "200": {description: ok}
 `
-	api := ProcessAPI("beta", loadTestSpec(t, spec))
+	api := mustProcessAPI(t, "beta", loadTestSpec(t, spec))
 	allOps := append([]*Operation{}, api.Operations...)
 	for _, g := range api.Groups {
 		allOps = append(allOps, g.Operations...)
@@ -3034,7 +3034,7 @@ paths:
       responses:
         "200": {description: ok}
 `
-	api := ProcessAPI("beta", loadTestSpec(t, spec))
+	api := mustProcessAPI(t, "beta", loadTestSpec(t, spec))
 
 	groupByName := func(name string) *CommandGroup {
 		for _, g := range api.Groups {
@@ -3190,7 +3190,7 @@ paths:
 }
 
 func TestProcessAPIReadsListFieldLabels(t *testing.T) {
-	api := ProcessAPI("example", loadTestSpec(t, listFieldsSpec(`[name, {path: "metadata.created_at", label: "Created"}, {path: id}]`)))
+	api := mustProcessAPI(t, "example", loadTestSpec(t, listFieldsSpec(`[name, {path: "metadata.created_at", label: "Created"}, {path: id}]`)))
 	op := api.Groups[0].Operations[0]
 	if got := strings.Join(op.ListFields, ","); got != "name,metadata.created_at,id" {
 		t.Fatalf("unexpected list fields %q", got)
@@ -3200,7 +3200,7 @@ func TestProcessAPIReadsListFieldLabels(t *testing.T) {
 		t.Fatalf("expected columns %v, got %v", want, op.ListColumns)
 	}
 
-	api = ProcessAPI("example", loadTestSpec(t, listFieldsSpec(`[name, {path: id}]`)))
+	api = mustProcessAPI(t, "example", loadTestSpec(t, listFieldsSpec(`[name, {path: id}]`)))
 	if columns := api.Groups[0].Operations[0].ListColumns; columns != nil {
 		t.Fatalf("no label declared, so generation should keep FormatList; got %v", columns)
 	}
@@ -3231,13 +3231,13 @@ func TestProcessAPIRejectsMalformedListFieldLabels(t *testing.T) {
 					t.Fatalf("want an error naming the operation and %q, got %v", tc.want, msg)
 				}
 			}()
-			ProcessAPI("example", doc)
+			mustProcessAPI(t, "example", doc)
 		})
 	}
 }
 
 func TestProcessAPIKeepsEqualUnlabeledHeadersNextToALabel(t *testing.T) {
-	api := ProcessAPI("example", loadTestSpec(t, listFieldsSpec(`[id, id, {path: name, label: Title}]`)))
+	api := mustProcessAPI(t, "example", loadTestSpec(t, listFieldsSpec(`[id, id, {path: name, label: Title}]`)))
 	if got := len(api.Groups[0].Operations[0].ListColumns); got != 3 {
 		t.Fatalf("expected 3 columns, got %d", got)
 	}

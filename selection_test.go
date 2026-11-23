@@ -4,6 +4,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/getkin/kin-openapi/openapi3"
 )
 
 // selectionSpec has two sectioned groups, a group whose x-cli-group names no
@@ -106,8 +108,15 @@ paths:
 
 func selectionAPI(t *testing.T) *OpenAPI {
 	t.Helper()
-	api := ProcessAPI("example", loadTestSpec(t, selectionSpec))
-	if err := api.Err(); err != nil {
+	return mustProcessAPI(t, "example", loadTestSpec(t, selectionSpec))
+}
+
+// mustProcessAPI builds the IR with no .bartolo.json selection, failing the
+// test on a spec error.
+func mustProcessAPI(t testing.TB, shortName string, doc *openapi3.T) *OpenAPI {
+	t.Helper()
+	api, err := ProcessAPI(shortName, doc, nil)
+	if err != nil {
 		t.Fatalf("process: %v", err)
 	}
 	return api
@@ -238,7 +247,7 @@ paths:
       x-cli-group: speech
       responses: {"200": {description: ok}}
 `)
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	group := api.Groups[0]
 	if group.HelpSection != "AI Gateway" || !group.Hidden || !group.Beta {
 		t.Fatalf("expected section, hidden and beta from the own tag, got %q hidden=%v beta=%v", group.HelpSection, group.Hidden, group.Beta)
@@ -254,7 +263,7 @@ func TestUnselectedOperationsKeepClientButLoseMCPToolByDefault(t *testing.T) {
 		t.Fatalf("apply: %v", err)
 	}
 	agents := operationsByRoute(api)["GET /agents"]
-	if !agents.CLIExcluded || !agents.Unselected {
+	if !agents.CLIExcluded {
 		t.Fatal("an unselected operation should be CLI-excluded")
 	}
 	if agents.MCP == nil || !agents.MCP.Excluded {
@@ -284,7 +293,9 @@ func TestCommandSelectionMCPAllKeepsEveryTool(t *testing.T) {
 	}
 }
 
-func TestCommandSelectionDropsWaitersOfUnselectedOperations(t *testing.T) {
+// A waiter on an unselected operation loses its `wait` command but keeps its
+// client function, which the --wait-* flag on a selected operation still calls.
+func TestCommandSelectionDropsOnlyTheWaitCommandOfUnselectedOperations(t *testing.T) {
 	api := selectionAPI(t)
 	if len(api.Waiters) != 1 || len(operationsByRoute(api)["POST /chat/completions/{id}/cancel"].Waiters) != 1 {
 		t.Fatal("fixture should have one waiter followed up by CancelCompletion")
@@ -292,11 +303,23 @@ func TestCommandSelectionDropsWaitersOfUnselectedOperations(t *testing.T) {
 	if err := applyCommandSelection(api, &CommandSelection{Exclude: &CommandSelector{Commands: []string{"chat get"}}}); err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	if len(api.Waiters) != 0 {
-		t.Fatal("a waiter on an unselected operation should be dropped")
+	if len(api.Waiters) != 1 {
+		t.Fatal("the waiter's client function should stay")
 	}
-	if n := len(operationsByRoute(api)["POST /chat/completions/{id}/cancel"].Waiters); n != 0 {
-		t.Fatalf("the follow-up flags for a dropped waiter should go too, %d left", n)
+	if n := len(cliVisibleWaiters(api.Waiters)); n != 0 {
+		t.Fatalf("the waiter's wait command should go, %d left", n)
+	}
+	if n := len(operationsByRoute(api)["POST /chat/completions/{id}/cancel"].Waiters); n != 1 {
+		t.Fatalf("the follow-up flag on the selected operation should stay, %d left", n)
+	}
+}
+
+// x-bartolo-cli-ignore and selection drop the same part of a waiter.
+func TestCLIIgnoredOperationLosesWaitCommandOnly(t *testing.T) {
+	doc := loadTestSpec(t, strings.Replace(selectionSpec, "      operationId: GetCompletion\n", "      operationId: GetCompletion\n      x-bartolo-cli-ignore: true\n", 1))
+	api := mustProcessAPI(t, "example", doc)
+	if len(api.Waiters) != 1 || len(cliVisibleWaiters(api.Waiters)) != 0 {
+		t.Fatalf("expected the waiter kept with no wait command, got %d waiters, %d commands", len(api.Waiters), len(cliVisibleWaiters(api.Waiters)))
 	}
 }
 
@@ -352,10 +375,7 @@ paths:
       x-cli-help-section: Storage
       responses: {"200": {description: ok}}
 `)
-	api := ProcessAPI("example", doc)
-	if err := api.Err(); err != nil {
-		t.Fatalf("process: %v", err)
-	}
+	api := mustProcessAPI(t, "example", doc)
 	if got := api.Groups[0].HelpSection; got != "Storage" {
 		t.Fatalf("a later operation's section should still place the group, got %q", got)
 	}
@@ -379,7 +399,7 @@ paths:
       x-cli-help-section: Compute
       responses: {"200": {description: ok}}
 `)
-	err := ProcessAPI("example", doc).Err()
+	_, err := ProcessAPI("example", doc, nil)
 	if err == nil {
 		t.Fatal("expected disagreeing sections in one group to fail")
 	}
@@ -410,5 +430,63 @@ func TestRegisterDeclaresHelpSectionsBeforeCommands(t *testing.T) {
 	api.HelpSectionOrder = nil
 	if strings.Contains(renderCommandTemplate("templates/generated_register.tmpl", api), "DeclareHelpSections") {
 		t.Fatal("no help_sections should declare nothing")
+	}
+}
+
+const conflictSpec = `
+openapi: 3.0.3
+info: {title: T, version: "1"}
+paths:
+  /a:
+    get:
+      operationId: ListWidgets
+      x-cli-group: widgets
+      x-cli-help-section: Storage
+      responses: {"200": {description: ok}}
+  /b:
+    get:
+      operationId: GetWidget
+      x-cli-group: widgets
+      x-cli-help-section: Compute
+      responses: {"200": {description: ok}}
+  /c:
+    get:
+      operationId: ListGadgets
+      x-cli-group: gadgets
+      responses: {"200": {description: ok}}
+`
+
+// A subset build is not blocked by a conflict in a group it leaves out.
+func TestSectionConflictInUnselectedGroupDoesNotFail(t *testing.T) {
+	config := &ProjectConfig{Commands: &CommandSelection{Include: &CommandSelector{Groups: []string{"gadgets"}}}}
+	if _, err := ProcessAPI("example", loadTestSpec(t, conflictSpec), config); err != nil {
+		t.Fatalf("a conflict outside the selection should not fail: %v", err)
+	}
+	config = &ProjectConfig{Commands: &CommandSelection{Include: &CommandSelector{Commands: []string{"widgets get"}}}}
+	if _, err := ProcessAPI("example", loadTestSpec(t, conflictSpec), config); err == nil {
+		t.Fatal("a conflict in a group that still generates a command should fail")
+	}
+}
+
+// A cli-ignored operation has no command, so its section does not place or
+// conflict with its group.
+func TestCLIIgnoredOperationSectionIsIgnored(t *testing.T) {
+	spec := strings.Replace(conflictSpec, "      x-cli-help-section: Compute\n", "      x-cli-help-section: Compute\n      x-bartolo-cli-ignore: true\n", 1)
+	api := mustProcessAPI(t, "example", loadTestSpec(t, spec))
+	for _, group := range api.Groups {
+		if group.CLIName == "widgets" && group.HelpSection != "Storage" {
+			t.Fatalf("expected the CLI-visible operation's section, got %q", group.HelpSection)
+		}
+	}
+}
+
+func TestProcessAPIAppliesHelpSectionsFromConfig(t *testing.T) {
+	config := &ProjectConfig{HelpSections: []string{"Managed agents", "AI Gateway"}}
+	api, err := ProcessAPI("example", loadTestSpec(t, selectionSpec), config)
+	if err != nil {
+		t.Fatalf("process: %v", err)
+	}
+	if got := strings.Join(api.HelpSectionOrder, "|"); got != "Managed agents|AI Gateway" {
+		t.Fatalf("order %q", got)
 	}
 }

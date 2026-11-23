@@ -253,7 +253,7 @@ func toStringSlice(v any) []string {
 }
 
 func TestBuildMCPToolParamBodyCollision(t *testing.T) {
-	api := ProcessAPI("example", loadTestSpec(t, `
+	api := mustProcessAPI(t, "example", loadTestSpec(t, `
 openapi: 3.1.0
 info: {title: t, version: "1"}
 paths:
@@ -309,7 +309,7 @@ paths:
 }
 
 func TestBuildMCPToolNonObjectBody(t *testing.T) {
-	api := ProcessAPI("example", loadTestSpec(t, `
+	api := mustProcessAPI(t, "example", loadTestSpec(t, `
 openapi: 3.1.0
 info: {title: t, version: "1"}
 paths:
@@ -351,7 +351,7 @@ paths:
 }
 
 func TestMCPExclusionSSEOnlyVsJSONAndSSE(t *testing.T) {
-	api := ProcessAPI("example", loadTestSpec(t, `
+	api := mustProcessAPI(t, "example", loadTestSpec(t, `
 openapi: 3.1.0
 info: {title: t, version: "1"}
 paths:
@@ -388,7 +388,7 @@ paths:
 }
 
 func TestMCPExclusionMultipart(t *testing.T) {
-	api := ProcessAPI("example", loadTestSpec(t, `
+	api := mustProcessAPI(t, "example", loadTestSpec(t, `
 openapi: 3.1.0
 info: {title: t, version: "1"}
 paths:
@@ -409,7 +409,7 @@ paths:
 }
 
 func TestMCPExclusionDeprecated(t *testing.T) {
-	api := ProcessAPI("example", loadTestSpec(t, `
+	api := mustProcessAPI(t, "example", loadTestSpec(t, `
 openapi: 3.1.0
 info: {title: t, version: "1"}
 paths:
@@ -427,7 +427,7 @@ paths:
 }
 
 func TestMCPExclusionXMCPIgnore(t *testing.T) {
-	api := ProcessAPI("example", loadTestSpec(t, `
+	api := mustProcessAPI(t, "example", loadTestSpec(t, `
 openapi: 3.1.0
 info: {title: t, version: "1"}
 paths:
@@ -447,7 +447,7 @@ paths:
 func TestMCPExclusionBartoloMCPIgnore(t *testing.T) {
 	// The canonical x-bartolo-mcp-ignore excludes from MCP only; the op still
 	// generates a CLI command (CLIExcluded stays false).
-	api := ProcessAPI("example", loadTestSpec(t, `
+	api := mustProcessAPI(t, "example", loadTestSpec(t, `
 openapi: 3.1.0
 info: {title: t, version: "1"}
 paths:
@@ -478,7 +478,7 @@ paths:
 }
 
 func TestMCPAnnotationMappingPerMethod(t *testing.T) {
-	api := ProcessAPI("example", loadTestSpec(t, `
+	api := mustProcessAPI(t, "example", loadTestSpec(t, `
 openapi: 3.1.0
 info: {title: t, version: "1"}
 paths:
@@ -536,7 +536,7 @@ paths:
       responses: {"200": {description: ok}}
 `
 	names := func() []string {
-		api := ProcessAPI("example", loadTestSpec(t, spec))
+		api := mustProcessAPI(t, "example", loadTestSpec(t, spec))
 		a := findOp(api, "/alpha", "post")
 		b := findOp(api, "/beta", "post")
 		return []string{a.MCP.Name, b.MCP.Name}
@@ -555,7 +555,7 @@ paths:
 
 func TestMCPDescriptionTruncation(t *testing.T) {
 	long := strings.Repeat("word ", 500) // ~2500 chars
-	api := ProcessAPI("example", loadTestSpec(t, `
+	api := mustProcessAPI(t, "example", loadTestSpec(t, `
 openapi: 3.1.0
 info: {title: t, version: "1"}
 paths:
@@ -596,7 +596,7 @@ func TestMCPFixtureScale(t *testing.T) {
 		t.Fatalf("load fixture: %v", err)
 	}
 
-	api := ProcessAPI("orq", doc)
+	api := mustProcessAPI(t, "orq", doc)
 
 	var all []*Operation
 	all = append(all, api.Operations...)
@@ -656,7 +656,7 @@ func TestMCPFixtureScale(t *testing.T) {
 }
 
 func TestMCPParamsOpLevelOverridesPathLevel(t *testing.T) {
-	api := ProcessAPI("example", loadTestSpec(t, `
+	api := mustProcessAPI(t, "example", loadTestSpec(t, `
 openapi: 3.1.0
 info: {title: t, version: "1"}
 paths:
@@ -916,7 +916,7 @@ func TestConvertSchemaInputConstraints(t *testing.T) {
 }
 
 func TestBuildMCPToolFreeFormObjectBody(t *testing.T) {
-	api := ProcessAPI("example", loadTestSpec(t, `
+	api := mustProcessAPI(t, "example", loadTestSpec(t, `
 openapi: 3.1.0
 info: {title: t, version: "1"}
 paths:
@@ -943,7 +943,7 @@ paths:
 }
 
 func TestBuildMCPToolParamRouting(t *testing.T) {
-	api := ProcessAPI("example", loadTestSpec(t, `
+	api := mustProcessAPI(t, "example", loadTestSpec(t, `
 openapi: 3.1.0
 info: {title: t, version: "1"}
 paths:
@@ -997,7 +997,7 @@ paths:
 }
 
 func TestBuildMCPToolUntypedJSONBody(t *testing.T) {
-	api := ProcessAPI("example", loadTestSpec(t, `
+	api := mustProcessAPI(t, "example", loadTestSpec(t, `
 openapi: 3.1.0
 info: {title: t, version: "1"}
 paths:

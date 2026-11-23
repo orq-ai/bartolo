@@ -278,7 +278,7 @@ Each repo owns its own `.bartolo.json`, so re-running `bartolo sync` in either k
 - `include` and `exclude` each take `tags` (OpenAPI tag names), `sections` (the resolved help section), `groups` (the command group, e.g. `chat`) and `commands` (`group leaf`, e.g. `models list`, or the bare name of a root command).
 - An operation is kept when it matches any `include` value (no `include` keeps everything), then dropped when it matches any `exclude` value.
 - A value that matches no operation fails generation and lists the known values, so a renamed tag or section cannot quietly empty the CLI. So does a selection that leaves no commands.
-- A dropped operation keeps its client function, like `x-bartolo-cli-ignore`, so hand-written code that calls it still compiles. Waiters on it and README examples that point at it go.
+- A dropped operation keeps its client function, like `x-bartolo-cli-ignore`, so hand-written code that calls it still compiles. Its waiters keep their client function and `--wait-*` flags too, but lose their `wait` command, and README examples no longer point at it. The same holds for `x-bartolo-cli-ignore`.
 - `mcp` is `selected` (the default) to give the MCP server the same operations as the CLI, or `all` to keep it on the full spec.
 
 ## Schema Shaping
@@ -408,9 +408,10 @@ Sections are created in the order they are first seen, unless `help_sections` in
 { "help_sections": ["Get started", "AI Gateway", "Observability", "Utilities"] }
 ```
 
-Listed sections are declared in that order before any command registers. Every listed
-heading prints, so generation warns about a listed section no generated command uses; it
-stays empty unless the consuming CLI adds commands to it. As soon as one command has a
+Listed sections are declared in that order before any command registers. `--help` hides a
+section with no commands in it, whether Bartolo or the consuming CLI declared it, so one
+list can serve a full CLI and a subset of it. Generation still warns about a listed
+section no generated command uses, in case the title is a typo. As soon as one command has a
 section, every command without one — including `doctor`, `help`, and anything the
 consuming CLI registers itself — is collected under a final `Other` section, so
 Cobra's `Additional Commands` block never shows up next to named sections. Because the heading travels with the spec,
