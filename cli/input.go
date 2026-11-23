@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -29,6 +30,9 @@ const nullableFlagSentinel = "null"
 //   - "string-slice", "int64-slice", "float64-slice", "bool-slice":
 //     repeatable scalar list (`--tag a --tag b` or `--tag a,b`).
 //   - "string-map": map of string→string (`--metadata key=value`, repeatable).
+//   - "json-map": map whose values are not all strings. Each value is a JSON
+//     object (`--metadata '{"price":499}'`) or key=value pairs, which are sent
+//     as strings; repeatable, later keys win.
 //   - "enum-string": string flag whose value is validated against Enum.
 //   - "datetime": `format: date-time` string, normalized to RFC 3339 before the
 //     request is built. See NormalizeDateTime for the accepted forms.
@@ -135,6 +139,8 @@ func AddBodyFieldFlags(cmd *cobra.Command, fields []BodyField) {
 			cmd.Flags().BoolSlice(name, nil, description+" (repeatable)")
 		case "string-map":
 			cmd.Flags().StringToString(name, nil, description+" (key=value, repeatable)")
+		case "json-map":
+			cmd.Flags().StringArray(name, nil, description+jsonMapHelp)
 		case "datetime":
 			cmd.Flags().String(name, "", WithDateTimeHelp(description))
 		case "datetime-nullable":
@@ -354,6 +360,16 @@ func ApplyBodyFlags(cmd *cobra.Command, params *viper.Viper, mediaType string, b
 				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = values
+		case "json-map":
+			raw, err := cmd.Flags().GetStringArray(name)
+			if err != nil {
+				return "", fmt.Errorf("--%s: %w", name, err)
+			}
+			values, err := parseJSONMap(raw)
+			if err != nil {
+				return "", fmt.Errorf("--%s: %w", name, err)
+			}
+			overrides[field.Name] = values
 		case "datetime":
 			value, err := NormalizeDateTimeFlag(name, params.GetString(name))
 			if err != nil {
@@ -531,6 +547,61 @@ func readStdinWithin(stdin *os.File, grace time.Duration) (string, bool, error) 
 		return string(r.input), true, nil
 	case <-timer.C:
 		return "", false, nil
+	}
+}
+
+// jsonMapHelp is appended to a json-map flag's description so --help says
+// which form keeps value types.
+const jsonMapHelp = ` (JSON object, e.g. '{"price":499,"active":true}', keeps numbers and booleans; ` +
+	`key=value sends the value as a string. Repeatable; a later key overrides an earlier one)`
+
+// parseJSONMap merges the values of a json-map flag in order. A value starting
+// with '{' is a JSON object; anything else is key=value pairs split the way
+// pflag's StringToString splits them, so scripts written against the old
+// string-map flag keep their meaning.
+func parseJSONMap(values []string) (map[string]interface{}, error) {
+	result := map[string]interface{}{}
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); strings.HasPrefix(trimmed, "{") {
+			var obj map[string]interface{}
+			if err := json.Unmarshal([]byte(trimmed), &obj); err != nil {
+				return nil, fmt.Errorf("invalid JSON object: %w", err)
+			}
+			for k, v := range obj {
+				result[k] = v
+			}
+			continue
+		}
+
+		pairs, err := splitKeyValuePairs(value)
+		if err != nil {
+			return nil, err
+		}
+		for _, pair := range pairs {
+			kv := strings.SplitN(pair, "=", 2)
+			if len(kv) != 2 {
+				return nil, fmt.Errorf("%q must be a JSON object or key=value", pair)
+			}
+			result[kv[0]] = kv[1]
+		}
+	}
+	return result, nil
+}
+
+// splitKeyValuePairs mirrors pflag's stringToString.Set: a value with one '='
+// is a single pair, and a value with several is read as comma-separated CSV.
+func splitKeyValuePairs(value string) ([]string, error) {
+	switch strings.Count(value, "=") {
+	case 0:
+		return nil, fmt.Errorf("%q must be a JSON object or key=value", value)
+	case 1:
+		return []string{strings.Trim(value, `"`)}, nil
+	default:
+		pairs, err := csv.NewReader(strings.NewReader(value)).Read()
+		if err != nil {
+			return nil, fmt.Errorf("%q: %w", value, err)
+		}
+		return pairs, nil
 	}
 }
 

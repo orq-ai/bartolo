@@ -2065,16 +2065,19 @@ func bodyFieldType(schema *openapi3.Schema) string {
 			// silently dropping the field.
 			return "json"
 		}
+		// Only string-valued maps get key=value strings. Any other value type
+		// (`{}`, `true`, an anyOf of scalars) needs JSON to keep numbers and
+		// booleans typed.
 		ap := effective.AdditionalProperties
 		if ap.Schema != nil && ap.Schema.Value != nil {
 			apEffective, _ := effectiveBodySchema(ap.Schema.Value)
-			if apEffective == nil || apEffective.Type == nil || apEffective.Type.Is("string") {
+			if apEffective != nil && apEffective.Type != nil && apEffective.Type.Is("string") {
 				return "string-map"
 			}
-			return "json"
+			return "json-map"
 		}
 		if ap.Has != nil && *ap.Has {
-			return "string-map"
+			return "json-map"
 		}
 		// Free-form object (no properties, no additionalProperties): JSON.
 		return "json"

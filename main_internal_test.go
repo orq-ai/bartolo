@@ -1169,6 +1169,8 @@ func TestBodyFieldTypeCoversCommonShapes(t *testing.T) {
                   "scores": {"type": "array", "items": {"type": "integer"}},
                   "metadata": {"type": "object", "additionalProperties": {"type": "string"}},
                   "metadata_any": {"type": "object", "additionalProperties": true},
+                  "metadata_free": {"type": "object", "additionalProperties": {}},
+                  "metadata_mixed": {"type": "object", "additionalProperties": {"anyOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]}},
                   "color": {"type": "string", "enum": ["red", "green", "blue"]},
                   "from": {"type": "string", "format": "date-time"},
                   "expires_at": {"anyOf": [{"type": "string", "format": "date-time"}, {"type": "null"}]},
@@ -1207,9 +1209,13 @@ func TestBodyFieldTypeCoversCommonShapes(t *testing.T) {
 		"tags":         "string-slice",
 		"scores":       "int64-slice",
 		"metadata":     "string-map",
-		"metadata_any": "string-map",
-		"color":        "enum-string",
-		"from":         "datetime",
+		// Maps whose values are not all strings take JSON so numbers and
+		// booleans keep their types (ENG-3622).
+		"metadata_any":   "json-map",
+		"metadata_free":  "json-map",
+		"metadata_mixed": "json-map",
+		"color":          "enum-string",
+		"from":           "datetime",
 		// Nullable date-time keeps both behaviours; any other format stays plain.
 		"expires_at": "datetime-nullable",
 		"email":      "string",
