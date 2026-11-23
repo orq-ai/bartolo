@@ -256,7 +256,7 @@ paths:
           description: ok
 `)
 
-	api := ProcessAPI("example", doc)
+	api := mustProcessAPI(t, "example", doc)
 	if len(api.Groups) != 1 || len(api.Groups[0].Operations) != 1 {
 		t.Fatalf("expected 1 grouped operation, got %+v", api.Groups)
 	}

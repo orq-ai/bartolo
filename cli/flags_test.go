@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -168,5 +169,42 @@ func TestFlagPassedDistinguishesZeroValueFromUnset(t *testing.T) {
 	// A params built by hand has no flags, so generated code falls back to sending non-zero values.
 	if FlagPassed(viper.New(), "detailed") {
 		t.Error("a hand-built params should report nothing as passed")
+	}
+}
+
+func TestHideEmptyHelpSectionsSkipsSectionsWithoutCommands(t *testing.T) {
+	root := &cobra.Command{Use: "root"}
+	DeclareHelpSections(root, "AI Gateway", "Observability")
+	chat := &cobra.Command{Use: "chat", Short: "Chat", Run: func(*cobra.Command, []string) {}}
+	HelpSection(root, chat, "AI Gateway")
+	root.AddCommand(chat)
+
+	if !strings.Contains(root.UsageString(), "Observability:") {
+		t.Fatal("precondition: cobra prints an empty section")
+	}
+	hideEmptyHelpSections(root)
+	usage := root.UsageString()
+	if strings.Contains(usage, "Observability:") {
+		t.Fatalf("an empty section should be hidden:\n%s", usage)
+	}
+	if !strings.Contains(usage, "AI Gateway:") || !strings.Contains(usage, "chat") {
+		t.Fatalf("a section with a command should stay:\n%s", usage)
+	}
+}
+
+// Pins the cobra template text hideEmptyHelpSections rewrites, so a cobra
+// upgrade that changes it fails here instead of bringing empty headings back.
+func TestCobraUsageTemplateHasHelpSectionsRange(t *testing.T) {
+	if !strings.Contains((&cobra.Command{}).UsageTemplate(), cobraHelpSectionsRange) {
+		t.Fatalf("cobra's usage template no longer contains %q", cobraHelpSectionsRange)
+	}
+}
+
+func TestHideEmptyHelpSectionsKeepsCustomTemplate(t *testing.T) {
+	root := &cobra.Command{Use: "root"}
+	root.SetUsageTemplate("custom {{.Use}}")
+	hideEmptyHelpSections(root)
+	if root.UsageTemplate() != "custom {{.Use}}" {
+		t.Fatalf("a CLI's own template should be left alone, got %q", root.UsageTemplate())
 	}
 }

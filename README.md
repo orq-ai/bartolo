@@ -261,6 +261,26 @@ bartolo generate ../schema/openapi.yaml
 
 Each repo owns its own `.bartolo.json`, so re-running `bartolo sync` in either keeps that surface pinned to its recorded target.
 
+### Generate a subset of the spec
+
+`commands` in `.bartolo.json` picks which operations become commands, so one spec can produce a narrower CLI (a gateway-only one, say) without marking anything in the spec:
+
+```json
+{
+  "commands": {
+    "include": { "sections": ["AI Gateway"] },
+    "exclude": { "commands": ["chat get"] },
+    "mcp": "selected"
+  }
+}
+```
+
+- `include` and `exclude` each take `tags` (OpenAPI tag names), `sections` (the resolved help section), `groups` (the command group, e.g. `chat`) and `commands` (`group leaf`, e.g. `models list`, or the bare name of a root command).
+- An operation is kept when it matches any `include` value (no `include` keeps everything), then dropped when it matches any `exclude` value.
+- A value that matches no operation fails generation and lists the known values, so a renamed tag or section cannot quietly empty the CLI. So does a selection that leaves no commands.
+- A dropped operation keeps its client function, like `x-bartolo-cli-ignore`, so hand-written code that calls it still compiles. Its waiters keep their client function and `--wait-*` flags too, but lose their `wait` command, and README examples no longer point at it. The same holds for `x-bartolo-cli-ignore`.
+- `mcp` is `selected` (the default) to give the MCP server the same operations as the CLI, or `all` to keep it on the full spec.
+
 ## Schema Shaping
 
 Bartolo will synthesize a decent CLI from a plain schema, but it gets significantly better when the schema carries product intent.
@@ -275,7 +295,7 @@ Bartolo's canonical extension namespace is `x-bartolo-*`. Shared extensions affe
 | `x-bartolo-beta` | Set to `true` on a group, operation, or flag to append a `(beta)` marker to its help text, so an unstable surface is discoverable but clearly flagged (CLI only). Every operation under a beta group is marked too, unless it sets `x-bartolo-beta: false` itself. |
 | `x-bartolo-description` | Override generated help/description text. |
 | `x-bartolo-group` | Force an operation into a higher-level noun. |
-| `x-bartolo-help-section` | Put a top-level command under a titled section in `--help` (CLI only). |
+| `x-bartolo-help-section` | Put a top-level command, or an operation's whole group, under a titled section in `--help` (CLI only). |
 | `x-bartolo-hidden` | Hide a path or operation from normal CLI help. |
 | `x-bartolo-ignore` | Exclude a path, operation, or parameter entirely (from CLI **and** MCP). |
 | `x-bartolo-list` | Set to `true` to mark an operation as a collection, or `false` to suppress automatic collection detection (CLI only). |
@@ -367,8 +387,7 @@ That fallback matters for large real-world schemas where tagging is inconsistent
 
 ### Help sections
 
-`x-cli-help-section` on a tag (or on a single operation, which wins) sets the heading a
-top-level command appears under in `--help`:
+`x-cli-help-section` on a tag sets the heading a top-level command appears under in `--help`:
 
 ```yaml
 tags:
@@ -376,7 +395,23 @@ tags:
     x-cli-help-section: Storage
 ```
 
-Sections are created in the order they are first seen. As soon as one command has a
+On an operation it overrides the tag. For an operation inside a group it places the whole
+group; the commands inside the group get no heading of their own. Every operation in a
+group that sets one must agree, or generation fails. When a group's `x-cli-group` names no
+declared tag, the section (and the hidden and beta flags) come from the operation's own
+first tag.
+
+Sections are created in the order they are first seen, unless `help_sections` in
+`.bartolo.json` lists them:
+
+```json
+{ "help_sections": ["Get started", "AI Gateway", "Observability", "Utilities"] }
+```
+
+Listed sections are declared in that order before any command registers. `--help` hides a
+section with no commands in it, whether Bartolo or the consuming CLI declared it, so one
+list can serve a full CLI and a subset of it. Generation still warns about a listed
+section no generated command uses, in case the title is a typo. As soon as one command has a
 section, every command without one — including `doctor`, `help`, and anything the
 consuming CLI registers itself — is collected under a final `Other` section, so
 Cobra's `Additional Commands` block never shows up next to named sections. Because the heading travels with the spec,

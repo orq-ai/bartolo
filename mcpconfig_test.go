@@ -34,7 +34,7 @@ paths:
 // SEP-2243: an annotated parameter or body property carries x-mcp-header, so
 // clients mirror its value into an Mcp-Param-* header.
 func TestMCPHeaderAnnotation(t *testing.T) {
-	op := findOp(ProcessAPI("t", loadTestSpec(t, headerSpec("{type: string}"))), "/widgets", "post")
+	op := findOp(mustProcessAPI(t, "t", loadTestSpec(t, headerSpec("{type: string}"))), "/widgets", "post")
 	schema := schemaOf(t, op.MCP.InputSchema)
 	if got := propOf(t, schema, "region")["x-mcp-header"]; got != "Region" {
 		t.Errorf("region x-mcp-header = %v", got)
@@ -58,7 +58,7 @@ func TestMCPHeaderAnnotationRejectsWhatTheSDKRefuses(t *testing.T) {
 					t.Error("expected generation to fail")
 				}
 			}()
-			ProcessAPI("t", loadTestSpec(t, spec))
+			mustProcessAPI(t, "t", loadTestSpec(t, spec))
 		})
 	}
 }
@@ -105,7 +105,7 @@ func TestMCPConfigCheck(t *testing.T) {
 
 // Every option the mcp block can produce must render as valid Go.
 func TestMCPConfigRendersValidGo(t *testing.T) {
-	api := ProcessAPI("acme", loadTestSpec(t, headerSpec("{type: string}")))
+	api := mustProcessAPI(t, "acme", loadTestSpec(t, headerSpec("{type: string}")))
 	api.MCPConfig = fullMCPConfig()
 	src := renderCommandTemplate("templates/generated_mcp.tmpl", buildMCPTemplateData(api))
 	if _, err := parser.ParseFile(token.NewFileSet(), "mcp_tools.go", src, 0); err != nil {

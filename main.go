@@ -146,10 +146,15 @@ type Operation struct {
 	ListColumns    []ListColumnData // ListFields with declared headers; nil unless an entry has a label
 	Waiters        []*WaiterParams
 	Group          *CommandGroup
-	HelpSection    string
-	CommandPath    string
-	LeafName       string
-	MCP            *MCPTool
+	// HelpSection is the top-level help section of a root command. A grouped
+	// operation's x-bartolo-help-section places its group instead (see
+	// CommandGroup.HelpSection), so it stays empty there.
+	HelpSection string
+	// Tags are the operation's OpenAPI tags, for .bartolo.json selection.
+	Tags        []string
+	CommandPath string
+	LeafName    string
+	MCP         *MCPTool
 	// CLIExcluded marks an operation that must not generate a CLI command
 	// (x-bartolo-cli-ignore) while still entering the IR so it can be exposed
 	// as an MCP tool and have its generated client func emitted.
@@ -182,6 +187,16 @@ type CommandGroup struct {
 	// Beta is set when the group's tag is marked beta. Every operation filed
 	// under the group inherits the marker.
 	Beta bool
+	// opSection is the section the group's operations set themselves, and
+	// opSectionFrom the operation that set it first, so a disagreeing
+	// operation can be reported against it.
+	opSection     string
+	opSectionFrom string
+	// sectionConflict describes operations that disagree on opSection. It
+	// fails generation only if the group still generates a command after
+	// .bartolo.json selection, so a subset build is not blocked by a part of
+	// the spec it leaves out.
+	sectionConflict string
 }
 
 // cliVisibleOperations returns the operations that generate a CLI command,
@@ -201,6 +216,15 @@ func cliVisibleOperations(ops []*Operation) []*Operation {
 // HasCLICommands reports whether the group has at least one operation that
 // generates a CLI command. Groups whose operations are all CLI-excluded emit no
 // group command file and are not registered.
+// cliVisibleWaiters returns the waiters that get a `wait` command: those whose
+// operation has a CLI command. Every waiter keeps its client function, which
+// the --wait-* follow-up flags call, so only the command is dropped.
+func cliVisibleWaiters(waiters []*Waiter) []*Waiter {
+	return slices.DeleteFunc(slices.Clone(waiters), func(w *Waiter) bool {
+		return w.Operation != nil && w.Operation.CLIExcluded
+	})
+}
+
 func (g *CommandGroup) HasCLICommands() bool {
 	for _, op := range g.Operations {
 		if !op.CLIExcluded {
@@ -208,6 +232,36 @@ func (g *CommandGroup) HasCLICommands() bool {
 		}
 	}
 	return false
+}
+
+// allOperations returns every operation in the IR, root ones first.
+func (o *OpenAPI) allOperations() []*Operation {
+	ops := slices.Clone(o.Operations)
+	for _, group := range o.Groups {
+		ops = append(ops, group.Operations...)
+	}
+	return ops
+}
+
+func (o *OpenAPI) hasCLICommands() bool {
+	return len(o.CLIOperations()) > 0 || len(o.CLIGroups()) > 0
+}
+
+// CLIGroups returns the groups that generate a command, for the README and
+// examples, which should not list a group whose commands were all left out.
+func (o *OpenAPI) CLIGroups() []*CommandGroup {
+	var groups []*CommandGroup
+	for _, group := range o.Groups {
+		if group.HasCLICommands() {
+			groups = append(groups, group)
+		}
+	}
+	return groups
+}
+
+// CLIOperations returns the root operations that generate a command.
+func (o *OpenAPI) CLIOperations() []*Operation {
+	return cliVisibleOperations(o.Operations)
 }
 
 // Waiter describes a special command that blocks until a condition has been
@@ -279,6 +333,11 @@ type ProjectConfig struct {
 	Targets []string `json:"targets,omitempty"`
 	// MCP holds the generated MCP server's protocol-level options.
 	MCP *MCPConfig `json:"mcp,omitempty"`
+	// Commands selects which operations become commands. See CommandSelection.
+	Commands *CommandSelection `json:"commands,omitempty"`
+	// HelpSections orders the top-level help sections. Sections not listed
+	// follow, in the order commands first use them.
+	HelpSections []string `json:"help_sections,omitempty"`
 }
 
 // defaultTargets is the surface set used when a project does not record an
@@ -416,6 +475,25 @@ type OpenAPI struct {
 	// MCPConfig is the project's `mcp` block, rendered into the generated
 	// server's options.
 	MCPConfig *MCPConfig
+	// HelpSectionOrder is the project's help_sections list: the sections the
+	// generated Register declares before adding any command, so their headings
+	// print in this order rather than in the order commands first use them.
+	HelpSectionOrder []string
+}
+
+// sectionConflicts reports the groups whose operations disagree on their help
+// section, among the groups that generate a command.
+func (o *OpenAPI) sectionConflicts() error {
+	var conflicts []string
+	for _, group := range o.CLIGroups() {
+		if group.sectionConflict != "" {
+			conflicts = append(conflicts, group.sectionConflict)
+		}
+	}
+	if len(conflicts) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s", strings.Join(conflicts, "\n"))
 }
 
 // AuthScheme is a recognized (or explicitly unsupported) OpenAPI security
@@ -440,8 +518,9 @@ type CommandsTemplateData struct {
 }
 
 // ProcessAPI returns the API description to be used with the commands template
-// for a loaded and dereferenced OpenAPI 3 document.
-func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
+// for a loaded and dereferenced OpenAPI 3 document, narrowed to the commands
+// config selects. A nil config selects everything.
+func ProcessAPI(shortName string, api *openapi3.T, config *ProjectConfig) (*OpenAPI, error) {
 	b := newIRBuilder(newOpenAPI(shortName, api), api.Tags)
 
 	paths := slices.Sorted(maps.Keys(api.Paths.Map()))
@@ -453,7 +532,19 @@ func ProcessAPI(shortName string, api *openapi3.T) *OpenAPI {
 	assignMCPToolNames(b.result)
 	b.addWaiters(api.Extensions)
 
-	return b.result
+	var selection *CommandSelection
+	var sections []string
+	if config != nil {
+		selection, sections = config.Commands, config.HelpSections
+	}
+	if err := applyCommandSelection(b.result, selection); err != nil {
+		return nil, err
+	}
+	if err := b.result.sectionConflicts(); err != nil {
+		return nil, err
+	}
+	b.result.HelpSectionOrder = helpSectionOrder(b.result, sections)
+	return b.result, nil
 }
 
 // newOpenAPI builds the API-level part of the IR: names, description, auth,
@@ -581,7 +672,8 @@ func (b *irBuilder) addOperation(scope pathScope, httpMethod string, operation *
 	description, examples := operationDescription(operation, reqInfo, renamedFlags)
 
 	method := strings.Title(strings.ToLower(httpMethod))
-	group, leafName := b.resolveGroup(path, operation, leafName, method, explicitLeafName != "")
+	cliExcluded := scope.cliExcluded || cliIgnored(operation.Extensions)
+	group, leafName := b.resolveGroup(path, operation, leafName, method, explicitLeafName != "", cliExcluded)
 	short := operationShort(operation.Summary, leafName)
 	betaSfx := betaSuffix(operation.Extensions)
 	// An operation that sets the key itself, even to false, keeps its own answer.
@@ -642,12 +734,13 @@ func (b *irBuilder) addOperation(scope pathScope, httpMethod string, operation *
 		ListFields:     listFields,
 		ListColumns:    listColumns,
 		Group:          group,
-		HelpSection:    extString(operation.Extensions, extKeyHelpSection),
+		HelpSection:    rootHelpSection(group, operation),
+		Tags:           operation.Tags,
 		CommandPath:    commandPath,
 		LeafName:       leafName,
 		// The op still enters the IR (so it can become an MCP tool) but is
 		// excluded from CLI command generation.
-		CLIExcluded: scope.cliExcluded || cliIgnored(operation.Extensions),
+		CLIExcluded: cliExcluded,
 	}
 	o.MCP = buildMCPTool(o, operation, scope.item)
 
@@ -675,7 +768,7 @@ func (b *irBuilder) register(o *Operation, operationID string) {
 
 // resolveGroup finds the operation's command group, reusing the group already
 // built for the same CLI name, and infers the leaf name within it.
-func (b *irBuilder) resolveGroup(path string, operation *openapi3.Operation, leafName, method string, explicit bool) (*CommandGroup, string) {
+func (b *irBuilder) resolveGroup(path string, operation *openapi3.Operation, leafName, method string, explicit, cliExcluded bool) (*CommandGroup, string) {
 	group := resolveCommandGroup(path, operation, b.tagDefs)
 	if group == nil {
 		return nil, leafName
@@ -686,12 +779,44 @@ func (b *irBuilder) resolveGroup(path string, operation *openapi3.Operation, lea
 		b.groups[group.CLIName] = group
 		b.groupOrder = append(b.groupOrder, group.CLIName)
 	}
+	if !cliExcluded {
+		mergeOperationSection(group, operation, strings.ToUpper(method)+" "+path)
+	}
 
 	leafName = inferGroupedLeafName(leafName, strings.ToLower(method), path, group.CLIName, explicit)
 	if leafName == "" {
 		leafName = slug(method)
 	}
 	return group, leafName
+}
+
+// mergeOperationSection applies an operation-level x-bartolo-help-section to
+// the operation's group. Any operation in the group may set it, not only the
+// first one seen, and operations that set different sections are recorded as
+// a conflict rather than leaving the group's section to path order. Operations
+// without a CLI command are not passed in: the section is CLI-only.
+func mergeOperationSection(group *CommandGroup, operation *openapi3.Operation, where string) {
+	section := extString(operation.Extensions, extKeyHelpSection)
+	switch {
+	case section == "":
+	case group.opSection == "":
+		group.opSection = section
+		group.opSectionFrom = where
+		group.HelpSection = section
+	case group.opSection != section && group.sectionConflict == "":
+		group.sectionConflict = fmt.Sprintf(
+			"group %q: %s sets help section %q but %s sets %q; give every operation in a group the same x-bartolo-help-section",
+			group.CLIName, where, section, group.opSectionFrom, group.opSection)
+	}
+}
+
+// rootHelpSection is the operation-level help section of a root command. A
+// grouped operation's section places its group, not the command inside it.
+func rootHelpSection(group *CommandGroup, operation *openapi3.Operation) string {
+	if group != nil {
+		return ""
+	}
+	return extString(operation.Extensions, extKeyHelpSection)
 }
 
 // collectGroups appends the groups in first-seen order, each with its
@@ -1279,10 +1404,21 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		if a, ok := extValue(tagDef.Extensions, extKeyAliases); ok {
 			mustDecodeExt(a, &aliases)
 		}
-		if h, ok := extValue(tagDef.Extensions, extKeyHidden); ok {
+	}
+
+	// When x-bartolo-group names no declared tag, the operation's own first tag
+	// still sets the flags below, but not the group's name, aliases or
+	// description: one tag can span several groups (an Audio tag holding speech,
+	// transcriptions and translations).
+	flagTag := tagDef
+	if flagTag == nil && len(operation.Tags) > 0 {
+		flagTag = tagDefs[operation.Tags[0]]
+	}
+	if flagTag != nil {
+		if h, ok := extValue(flagTag.Extensions, extKeyHidden); ok {
 			mustDecodeExt(h, &hidden)
 		}
-		sfx := betaSuffix(tagDef.Extensions)
+		sfx := betaSuffix(flagTag.Extensions)
 		beta = sfx != ""
 		short += sfx
 		// Long and Description both come from `long`, and the group/readme
@@ -1290,15 +1426,11 @@ func resolveCommandGroup(path string, operation *openapi3.Operation, tagDefs map
 		// its help page and in the README, not only in the parent command list.
 		// When long is empty the templates fall back to the already-marked short.
 		long = markFirstLine(long, sfx)
-		section = extString(tagDef.Extensions, extKeyHelpSection)
+		section = extString(flagTag.Extensions, extKeyHelpSection)
 	}
 
 	if override := extString(operation.Extensions, extKeyGroup); override != "" {
 		cliName = slug(override)
-	}
-
-	if override := extString(operation.Extensions, extKeyHelpSection); override != "" {
-		section = override
 	}
 
 	return &CommandGroup{
@@ -3680,14 +3812,14 @@ func buildREADMEExamples(api *OpenAPI) []*READMEExample {
 		},
 	}
 
-	if len(api.Groups) > 0 {
-		group := api.Groups[0]
+	if groups := api.CLIGroups(); len(groups) > 0 {
+		group := groups[0]
 		examples = append(examples, &READMEExample{
 			Title:       "Explore a command group",
 			Command:     binary + " " + group.CLIName + " --help",
 			Description: "Inspect the grouped product commands synthesized from the OpenAPI tags.",
 		})
-		if op := pickREADMEOperation(group.Operations); op != nil {
+		if op := pickREADMEOperation(cliVisibleOperations(group.Operations)); op != nil {
 			command := binary + " " + op.CommandPath
 			description := "Replace any positional placeholders with real values from your environment."
 			if len(op.RequiredParams) > 0 {
@@ -3700,7 +3832,7 @@ func buildREADMEExamples(api *OpenAPI) []*READMEExample {
 				Description: description,
 			})
 		}
-	} else if op := pickREADMEOperation(api.Operations); op != nil {
+	} else if op := pickREADMEOperation(api.CLIOperations()); op != nil {
 		examples = append(examples, &READMEExample{
 			Title:       "Inspect an operation",
 			Command:     binary + " " + op.Use + " --help",
@@ -3741,15 +3873,13 @@ func pickRawRequestOperation(api *OpenAPI) *Operation {
 		return nil
 	}
 
-	if len(api.Groups) > 0 {
-		for _, group := range api.Groups {
-			if operation := pickREADMEOperation(group.Operations); operation != nil {
-				return operation
-			}
+	for _, group := range api.CLIGroups() {
+		if operation := pickREADMEOperation(cliVisibleOperations(group.Operations)); operation != nil {
+			return operation
 		}
 	}
 
-	return pickREADMEOperation(api.Operations)
+	return pickREADMEOperation(api.CLIOperations())
 }
 
 func writeGeneratedREADME(api *OpenAPI) {
@@ -3962,7 +4092,7 @@ func writeGeneratedCLICommandFiles(api *OpenAPI) {
 	rootCommands := &CommandsTemplateData{
 		API:        api,
 		Operations: rootOps,
-		Waiters:    api.Waiters,
+		Waiters:    cliVisibleWaiters(api.Waiters),
 		NeedsFmt:   commandFileNeedsFmt(rootOps),
 	}
 	writeFormattedFile(
@@ -4053,8 +4183,11 @@ func generateFromSpec(specPath string) error {
 
 	shortName := normalizeSpecName(specPath)
 
-	templateData := ProcessAPI(shortName, swagger)
 	config := loadProjectConfig()
+	templateData, err := ProcessAPI(shortName, swagger, config)
+	if err != nil {
+		return err
+	}
 	if config != nil {
 		if err := ensureConfigTargets(config); err != nil {
 			return err

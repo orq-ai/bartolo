@@ -196,11 +196,11 @@ Verify config, auth source, and selected server before connecting a client:
 ## Custom Commands
 {{- else }}
 ## Command Surface
-{{- if .Groups }}
+{{- if .CLIGroups }}
 
 This CLI groups commands by product/resource noun inferred from the OpenAPI tags.
 
-{{- range .Groups }}
+{{- range .CLIGroups }}
 - `{{ $.CommandName }} {{ .CLIName }} --help`
   {{- if .Description }} {{ .Description }}{{ else }} {{ .Short }}{{ end }}
 {{- end }}
