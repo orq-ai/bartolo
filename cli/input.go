@@ -12,6 +12,7 @@ import (
 	"github.com/orq-ai/bartolo/shorthand"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 	yaml "gopkg.in/yaml.v2"
 )
@@ -29,6 +30,9 @@ const nullableFlagSentinel = "null"
 //   - "string-slice", "int64-slice", "float64-slice", "bool-slice":
 //     repeatable scalar list (`--tag a --tag b` or `--tag a,b`).
 //   - "string-map": map of string→string (`--metadata key=value`, repeatable).
+//   - "json-map": map whose values may be non-strings. Each value is a JSON
+//     object (`--metadata '{"price":499}'`) or key=value pairs, which are sent
+//     as strings; repeatable.
 //   - "enum-string": string flag whose value is validated against Enum.
 //   - "datetime": `format: date-time` string, normalized to RFC 3339 before the
 //     request is built. See NormalizeDateTime for the accepted forms.
@@ -135,6 +139,8 @@ func AddBodyFieldFlags(cmd *cobra.Command, fields []BodyField) {
 			cmd.Flags().BoolSlice(name, nil, description+" (repeatable)")
 		case "string-map":
 			cmd.Flags().StringToString(name, nil, description+" (key=value, repeatable)")
+		case "json-map":
+			cmd.Flags().Var(&jsonMapValue{}, name, description+JSONMapFlagHelp)
 		case "datetime":
 			cmd.Flags().String(name, "", WithDateTimeHelp(description))
 		case "datetime-nullable":
@@ -354,6 +360,12 @@ func ApplyBodyFlags(cmd *cobra.Command, params *viper.Viper, mediaType string, b
 				return "", fmt.Errorf("--%s: %w", name, err)
 			}
 			overrides[field.Name] = values
+		case "json-map":
+			values, err := getJSONMap(cmd.Flags(), name)
+			if err != nil {
+				return "", fmt.Errorf("--%s: %w", name, err)
+			}
+			overrides[field.Name] = values
 		case "datetime":
 			value, err := NormalizeDateTimeFlag(name, params.GetString(name))
 			if err != nil {
@@ -533,6 +545,71 @@ func readStdinWithin(stdin *os.File, grace time.Duration) (string, bool, error) 
 		return "", false, nil
 	}
 }
+
+// JSONMapFlagHelp is appended to a json-map flag's description so --help says
+// which form keeps value types.
+const JSONMapFlagHelp = ` (JSON object, e.g. '{"k":1}', keeps value types; or key=value, sent as strings; repeatable)`
+
+// jsonMapValue is the pflag.Value behind a json-map flag.
+type jsonMapValue struct {
+	values map[string]interface{}
+}
+
+func getJSONMap(flags *pflag.FlagSet, name string) (map[string]interface{}, error) {
+	flag := flags.Lookup(name)
+	if flag == nil {
+		return nil, fmt.Errorf("flag is not defined")
+	}
+	m, ok := flag.Value.(*jsonMapValue)
+	if !ok {
+		return nil, fmt.Errorf("flag is not a JSON map flag")
+	}
+	if m.values == nil {
+		return map[string]interface{}{}, nil
+	}
+	return m.values, nil
+}
+
+func (m *jsonMapValue) Set(value string) error {
+	if m.values == nil {
+		m.values = map[string]interface{}{}
+	}
+
+	if trimmed := strings.TrimSpace(value); strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+		var parsed interface{}
+		if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
+			return fmt.Errorf("invalid JSON object: %w", err)
+		}
+		obj, ok := parsed.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("must be a JSON object, got an array")
+		}
+		for k, v := range obj {
+			m.values[k] = v
+		}
+		return nil
+	}
+
+	fs := pflag.NewFlagSet("", pflag.ContinueOnError)
+	pairs := fs.StringToString("v", nil, "")
+	if err := fs.Lookup("v").Value.Set(value); err != nil {
+		return err
+	}
+	for k, v := range *pairs {
+		m.values[k] = v
+	}
+	return nil
+}
+
+func (m *jsonMapValue) String() string {
+	if len(m.values) == 0 {
+		return ""
+	}
+	encoded, _ := json.Marshal(m.values)
+	return string(encoded)
+}
+
+func (m *jsonMapValue) Type() string { return "json|key=value" }
 
 func mergeStructuredBody(mediaType string, body string, result map[string]interface{}) (string, error) {
 	if strings.Contains(mediaType, "json") {

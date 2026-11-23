@@ -422,6 +422,96 @@ func TestApplyBodyFlagsStringMap(t *testing.T) {
 	assert.JSONEq(t, `{"metadata":{"region":"eu","tier":"gold"}}`, body)
 }
 
+func TestApplyBodyFlagsJSONMapKeepsTypes(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "metadata", FlagName: "metadata", Type: "json-map"},
+	}
+
+	body := applyBody(t, fields, map[string][]string{
+		"metadata": {`{"price":499,"active":true,"tier":"enterprise"}`},
+	}, ``)
+
+	assert.JSONEq(t, `{"metadata":{"price":499,"active":true,"tier":"enterprise"}}`, body)
+}
+
+func TestApplyBodyFlagsJSONMapKeyValueStaysString(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "metadata", FlagName: "metadata", Type: "json-map"},
+	}
+
+	body := applyBody(t, fields, map[string][]string{
+		"metadata": {"price=499", "region=eu,tier=gold"},
+	}, ``)
+
+	assert.JSONEq(t, `{"metadata":{"price":"499","region":"eu","tier":"gold"}}`, body)
+}
+
+func TestApplyBodyFlagsJSONMapMergesInOrder(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "metadata", FlagName: "metadata", Type: "json-map"},
+	}
+
+	body := applyBody(t, fields, map[string][]string{
+		"metadata": {`{"price":499,"tier":"gold"}`, "tier=enterprise"},
+	}, ``)
+
+	assert.JSONEq(t, `{"metadata":{"price":499,"tier":"enterprise"}}`, body)
+}
+
+func TestJSONMapFlagRejectsBadValues(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "metadata", FlagName: "metadata", Type: "json-map"},
+	}
+
+	tests := []struct {
+		value   string
+		wantErr string
+	}{
+		{`{"price":`, `invalid argument "{\"price\":" for "--metadata" flag: invalid JSON object: unexpected end of JSON input`},
+		{`["price"]`, `invalid argument "[\"price\"]" for "--metadata" flag: must be a JSON object, got an array`},
+		{"price", `invalid argument "price" for "--metadata" flag: price must be formatted as key=value`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.value, func(t *testing.T) {
+			cmd := &cobra.Command{Use: "test"}
+			cli.AddBodyFieldFlags(cmd, fields)
+
+			err := cmd.Flags().Set("metadata", tt.value)
+			assert.EqualError(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestApplyBodyFlagsJSONMapQuotedKeyValue(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "metadata", FlagName: "metadata", Type: "json-map"},
+	}
+
+	body := applyBody(t, fields, map[string][]string{"metadata": {`"a=b"`}}, ``)
+
+	assert.JSONEq(t, `{"metadata":{"a":"b"}}`, body)
+}
+
+func TestApplyBodyFlagsJSONMapEmptyObjectSendsEmpty(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "metadata", FlagName: "metadata", Type: "json-map"},
+	}
+
+	body := applyBody(t, fields, map[string][]string{"metadata": {`{}`}}, ``)
+
+	assert.JSONEq(t, `{"metadata":{}}`, body)
+}
+
+func TestApplyBodyFlagsJSONMapValueWithEquals(t *testing.T) {
+	fields := []cli.BodyField{
+		{Name: "metadata", FlagName: "metadata", Type: "json-map"},
+	}
+
+	body := applyBody(t, fields, map[string][]string{"metadata": {"a=b=c"}}, ``)
+
+	assert.JSONEq(t, `{"metadata":{"a":"b=c"}}`, body)
+}
+
 func TestApplyBodyFlagsJSONFallback(t *testing.T) {
 	fields := []cli.BodyField{
 		{Name: "documents", FlagName: "documents", Type: "json"},
@@ -761,4 +851,15 @@ func TestDateTimeBodyFlagHelpMentionsRelativeValues(t *testing.T) {
 	cli.AddBodyFieldFlags(cmd, []cli.BodyField{{Name: "from", FlagName: "from", Type: "datetime"}})
 
 	assert.Contains(t, cmd.Flags().Lookup("from").Usage, cli.DateTimeFlagHelp)
+}
+
+func TestAddBodyFieldFlagsJSONMapHelp(t *testing.T) {
+	cmd := &cobra.Command{Use: "test"}
+	cli.AddBodyFieldFlags(cmd, []cli.BodyField{
+		{Name: "metadata", FlagName: "metadata", Type: "json-map", Description: "Metadata of the chunk"},
+	})
+
+	usage := cmd.Flags().Lookup("metadata").Usage
+	assert.Contains(t, usage, "Metadata of the chunk")
+	assert.Contains(t, usage, cli.JSONMapFlagHelp)
 }
